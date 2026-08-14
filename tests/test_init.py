@@ -154,7 +154,7 @@ class InitTests(unittest.TestCase):
                     self.assertEqual(p.returncode, 0, p.stderr)
 
                     if agent == "grok":
-                        path = os.path.join(home, ".grok", "AGENTS.md")
+                        path = os.path.join(home, ".grok", "rules", "actx.md")
                     elif agent == "cline":
                         path = os.path.join(home, ".cline", "rules", "actx.md")
                     else:
@@ -250,10 +250,8 @@ class InitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             claude_dir = os.path.join(home, ".claude")
             os.makedirs(claude_dir, exist_ok=True)
-            grok_file = os.path.join(home, ".grok", "AGENTS.md")
-            os.makedirs(os.path.dirname(grok_file), exist_ok=True)
-            with open(grok_file, "w", encoding="utf-8") as handle:
-                handle.write("existing\n")
+            grok_dir = os.path.join(home, ".grok")
+            os.makedirs(grok_dir, exist_ok=True)
 
             p = self.run_actx(["init"], home)
             self.assertEqual(p.returncode, 0, p.stderr)
@@ -263,7 +261,8 @@ class InitTests(unittest.TestCase):
             self.assertFalse(
                 os.path.exists(os.path.join(home, ".config", "opencode", "plugins", "actx.ts"))
             )
-            with open(grok_file, encoding="utf-8") as handle:
+            grok_rules = os.path.join(home, ".grok", "rules", "actx.md")
+            with open(grok_rules, encoding="utf-8") as handle:
                 self.assertIn(INSTRUCTION_SECTION, handle.read())
 
     def test_agent_all_installs_everything(self):
@@ -276,7 +275,7 @@ class InitTests(unittest.TestCase):
                 os.path.join(home, ".claude", "settings.json"),
                 os.path.join(home, ".codex", "hooks.json"),
                 os.path.join(home, ".config", "opencode", "plugins", "actx.ts"),
-                os.path.join(home, ".grok", "AGENTS.md"),
+                os.path.join(home, ".grok", "rules", "actx.md"),
                 os.path.join(home, ".cline", "rules", "actx.md"),
                 os.path.join(home, ".codeium", "windsurf", "memories", "global_rules.md"),
                 os.path.join(home, ".config", "actx", "instructions.md"),

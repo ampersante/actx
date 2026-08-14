@@ -44,7 +44,7 @@ _AGENT_PATHS = {
     "claude": {"hook": "~/.claude/settings.json"},
     "codex": {"hook": "~/.codex/hooks.json"},
     "opencode": {"plugin": "~/.config/opencode/plugins/actx.ts"},
-    "grok": {"instructions": "~/.grok/AGENTS.md"},
+    "grok": {"instructions": "~/.grok/rules/actx.md"},
     "cursor": {},
     "cline": {"instructions": "~/.cline/rules/actx.md"},
     "windsurf": {"instructions": "~/.codeium/windsurf/memories/global_rules.md"},
@@ -590,7 +590,7 @@ def _detect_existing(agent):
     if agent == "opencode":
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["plugin"])))
     if agent == "grok":
-        return os.path.exists(os.path.expanduser(paths["instructions"]))
+        return os.path.isdir(os.path.expanduser("~/.grok"))
     if agent == "cline":
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["instructions"])))
     if agent == "windsurf":
