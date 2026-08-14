@@ -273,6 +273,31 @@ The suite covers the rewriter security boundary, hook E2E, all filters, adapter 
 - Windows
 - Mutating-command auto-rewrite
 
+## Releasing
+
+1. Bump `VERSION` in `actx_lib/cli.py`, commit, and tag:
+
+   ```bash
+   git add actx_lib/cli.py
+   git commit -m "Bump version to X.Y.Z"
+   git tag vX.Y.Z
+   git push origin master
+   git push origin vX.Y.Z
+   ```
+
+2. Update the tap formula in the `homebrew-actx` repo: set the tag URL and the
+   tarball sha256, then push the formula.
+
+3. Update installed copies:
+
+   ```bash
+   brew update
+   brew upgrade actx
+   ```
+
+`brew update` takes no arguments — `brew update <tap>` does not refresh a
+single tap in current Homebrew.
+
 ## License
 
 MIT. See `LICENSE`.
