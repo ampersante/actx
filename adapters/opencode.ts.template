@@ -1,0 +1,19 @@
+import { execFileSync } from "node:child_process"
+
+const ACTX = __ACTX_ABS_PATH__
+
+export const ActxPlugin = async (ctx) => {
+  return {
+    "tool.execute.before": async (input, output) => {
+      if (input.tool !== "bash") return
+      const cmd = output.args && typeof output.args.command === "string" ? output.args.command : ""
+      if (!cmd) return
+      try {
+        const rewritten = String(execFileSync(ACTX, ["rewrite", cmd])).trim()
+        if (rewritten) output.args.command = rewritten
+      } catch {
+        // fail-open: оставить команду как есть
+      }
+    },
+  }
+}
