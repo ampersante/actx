@@ -104,6 +104,7 @@ Keep the extracted directory — `install.sh` symlinks the `actx` binary from it
 
 ```bash
 brew tap ampersante/actx
+brew trust ampersante/actx
 brew install actx
 ```
 
