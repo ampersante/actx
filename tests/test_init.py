@@ -297,6 +297,69 @@ class InitTests(unittest.TestCase):
                 self.assertIn("%s: installed" % agent, p.stdout)
             self.assertIn("cursor: manual (cursor)", p.stdout)
 
+    def test_gemini_double_init_single_entry_and_uninstall(self):
+        with tempfile.TemporaryDirectory() as home:
+            settings = os.path.join(home, ".gemini", "settings.json")
+            for _ in range(2):
+                p = self.run_actx(["init", "--agent", "gemini"], home)
+                self.assertEqual(p.returncode, 0, p.stderr)
+            with open(settings, encoding="utf-8") as handle:
+                data = json.load(handle)
+            entry = data["hooks"]["BeforeTool"][0]
+            self.assertEqual(entry["matcher"], "Bash")
+            self.assertEqual(len(entry["hooks"]), 1)
+            self.assertEqual(entry["hooks"][0], self.handler())
+
+            p = self.run_actx(["init", "--agent", "gemini", "--uninstall"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(settings, encoding="utf-8") as handle:
+                data = json.load(handle)
+            self.assertNotIn("hooks", data)
+
+    def test_copilot_install_preserves_existing_hook_and_uninstall(self):
+        with tempfile.TemporaryDirectory() as home:
+            settings = os.path.join(home, ".copilot", "settings.json")
+            os.makedirs(os.path.dirname(settings), exist_ok=True)
+            with open(settings, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "hooks": {
+                            "preToolUse": [
+                                {"type": "command", "bash": "echo existing"}
+                            ]
+                        }
+                    },
+                    handle,
+                )
+            p = self.run_actx(["init", "--agent", "copilot"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            p = self.run_actx(["init", "--agent", "copilot"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(settings, encoding="utf-8") as handle:
+                data = json.load(handle)
+            pretool = data["hooks"]["preToolUse"]
+            self.assertEqual(len(pretool), 2)
+
+            p = self.run_actx(["init", "--agent", "copilot", "--uninstall"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(settings, encoding="utf-8") as handle:
+                data = json.load(handle)
+            pretool = data["hooks"]["preToolUse"]
+            self.assertEqual(len(pretool), 1)
+            self.assertEqual(pretool[0]["bash"], "echo existing")
+
+    def test_gemini_non_json_settings_exit_1_unchanged(self):
+        with tempfile.TemporaryDirectory() as home:
+            settings = os.path.join(home, ".gemini", "settings.json")
+            os.makedirs(os.path.dirname(settings), exist_ok=True)
+            original = '{\n  "hooks": [broken\n}\n'
+            with open(settings, "w", encoding="utf-8") as handle:
+                handle.write(original)
+            p = self.run_actx(["init", "--agent", "gemini"], home)
+            self.assertEqual(p.returncode, 1)
+            with open(settings, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), original)
+
     def test_unknown_agent_exit_1(self):
         with tempfile.TemporaryDirectory() as home:
             p = self.run_actx(["init", "--agent", "bogus"], home)

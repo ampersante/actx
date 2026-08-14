@@ -68,15 +68,26 @@ def _status(rest, config):
         branch = _branch_name()
         groups = _group_status(result.stdout)
         out = []
-        if branch is not None:
-            out.append("* " + branch)
-        elif not groups:
-            out.append("no commits yet")
-        for key, paths in groups:
-            out.append("%s (%d):" % (key, len(paths)))
-            out.extend("  " + path for path in paths[:200])
-            if len(paths) > 200:
-                out.append("  ... (%d more)" % (len(paths) - 200))
+        if config.get("ultra_compact"):
+            if branch is not None:
+                out.append("* " + branch)
+            elif not groups:
+                out.append("no commits yet")
+            for key, paths in groups:
+                shown = paths[:200]
+                out.append("%s:%d %s" % (key, len(paths), " ".join(shown)))
+                if len(paths) > 200:
+                    out.append("  ... (%d more)" % (len(paths) - 200))
+        else:
+            if branch is not None:
+                out.append("* " + branch)
+            elif not groups:
+                out.append("no commits yet")
+            for key, paths in groups:
+                out.append("%s (%d):" % (key, len(paths)))
+                out.extend("  " + path for path in paths[:200])
+                if len(paths) > 200:
+                    out.append("  ... (%d more)" % (len(paths) - 200))
         if out:
             print("\n".join(out))
         return 0

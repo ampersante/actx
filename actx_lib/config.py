@@ -6,11 +6,15 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "mode": "failures",
         "dir": "~/.local/share/actx/tee",
+        "min_bytes": 0,
     },
     "truncate": {
         "max_lines": 500,
         "max_line_chars": 300,
     },
+    "bypass_commands": [],
+    "ignore_dirs": [".git", "node_modules", "target"],
+    "ignore_files": ["*.lock"],
 }
 
 

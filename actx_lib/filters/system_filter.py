@@ -54,15 +54,26 @@ def run_ls(args, config):
         files.sort()
 
         display = path.rstrip("/")
-        out = ["%s/ (%d)" % (display, len(entries))]
-        if len(entries) <= 30:
-            out.extend("  " + entry for entry in dirs + files)
+        if config.get("ultra_compact"):
+            if len(entries) <= 30:
+                shown = dirs + files
+                remaining = 0
+            else:
+                shown = dirs[:10] + files[:10]
+                remaining = len(entries) - len(shown)
+            out = ["%s/ (%d): %s" % (display, len(entries), " ".join(shown))]
+            if remaining:
+                out.append("... (%d more)" % remaining)
         else:
-            shown_dirs = dirs[:10]
-            shown_files = files[:10]
-            out.extend("  " + entry for entry in shown_dirs + shown_files)
-            remaining = len(entries) - len(shown_dirs) - len(shown_files)
-            out.append("  ... (%d more)" % remaining)
+            out = ["%s/ (%d)" % (display, len(entries))]
+            if len(entries) <= 30:
+                out.extend("  " + entry for entry in dirs + files)
+            else:
+                shown_dirs = dirs[:10]
+                shown_files = files[:10]
+                out.extend("  " + entry for entry in shown_dirs + shown_files)
+                remaining = len(entries) - len(shown_dirs) - len(shown_files)
+                out.append("  ... (%d more)" % remaining)
         print("\n".join(out))
         return 0
     except Exception:

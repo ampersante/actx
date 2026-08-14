@@ -16,6 +16,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(loaded["tee"]["mode"], "failures")
                 self.assertEqual(loaded["truncate"]["max_lines"], 500)
                 self.assertEqual(loaded["truncate"]["max_line_chars"], 300)
+                self.assertEqual(loaded["bypass_commands"], [])
                 path = os.path.join(home, ".config", "actx", "config.json")
                 self.assertTrue(os.path.exists(path))
                 with open(path, encoding="utf-8") as handle:

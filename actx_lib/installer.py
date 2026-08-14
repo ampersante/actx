@@ -10,7 +10,18 @@ import os
 import shlex
 import sys
 
-AGENTS = ("claude", "codex", "opencode", "grok", "cursor", "cline", "windsurf", "aider")
+AGENTS = (
+    "claude",
+    "codex",
+    "opencode",
+    "grok",
+    "cursor",
+    "cline",
+    "windsurf",
+    "aider",
+    "gemini",
+    "copilot",
+)
 
 INSTRUCTION_SECTION = """## Output compression (actx)
 
@@ -41,6 +52,8 @@ _AGENT_PATHS = {
         "instructions": "~/.config/actx/instructions.md",
         "conf": "~/.aider.conf.yml",
     },
+    "gemini": {"hook": "~/.gemini/settings.json"},
+    "copilot": {"hook": "~/.copilot/settings.json"},
 }
 
 _AIDER_READ_PATH = "~/.config/actx/instructions.md"
@@ -56,6 +69,22 @@ def _hook_handler(abs_actx):
         "type": "command",
         "command": shlex.quote(abs_actx) + " hook",
         "timeout": 10,
+    }
+
+
+def _gemini_handler(abs_actx):
+    return {
+        "type": "command",
+        "command": shlex.quote(abs_actx) + " hook",
+        "timeout": 10,
+    }
+
+
+def _copilot_handler(abs_actx):
+    return {
+        "type": "command",
+        "bash": shlex.quote(abs_actx) + " hook",
+        "timeoutSec": 10,
     }
 
 
@@ -179,6 +208,166 @@ def _uninstall_hook(path, abs_actx):
             data.pop("hooks", None)
         _write_json(path, data)
     return changed
+
+
+def _install_gemini(path, abs_actx):
+    if os.path.exists(path):
+        data = _read_json(path)
+        if not isinstance(data, dict):
+            raise ValueError("cannot install: %s is not a JSON object" % path)
+    else:
+        data = {}
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    before = hooks.get("BeforeTool")
+    if not isinstance(before, list):
+        before = []
+    else:
+        before = list(before)
+
+    handler = _gemini_handler(abs_actx)
+    command = handler["command"]
+    changed = False
+    bash_entry = None
+    for entry in before:
+        if isinstance(entry, dict) and entry.get("matcher") == "Bash":
+            bash_entry = entry
+            break
+    if bash_entry is None:
+        bash_entry = {"matcher": "Bash", "hooks": []}
+        before.append(bash_entry)
+        changed = True
+    entry_hooks = bash_entry.get("hooks")
+    if not isinstance(entry_hooks, list):
+        entry_hooks = []
+        bash_entry["hooks"] = entry_hooks
+        changed = True
+    if not any(
+        isinstance(existing, dict) and existing.get("command") == command
+        for existing in entry_hooks
+    ):
+        entry_hooks.append(handler)
+        changed = True
+    if changed:
+        hooks["BeforeTool"] = before
+        data["hooks"] = hooks
+        _write_json(path, data)
+    return changed
+
+
+def _uninstall_gemini(path, abs_actx):
+    if not os.path.exists(path):
+        return False
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    before = hooks.get("BeforeTool")
+    if not isinstance(before, list):
+        return False
+    command = _gemini_handler(abs_actx)["command"]
+    changed = False
+    kept_entries = []
+    for entry in before:
+        if not isinstance(entry, dict):
+            kept_entries.append(entry)
+            continue
+        entry_hooks = entry.get("hooks")
+        if entry.get("matcher") == "Bash" and isinstance(entry_hooks, list):
+            filtered = [
+                existing
+                for existing in entry_hooks
+                if not (
+                    isinstance(existing, dict)
+                    and existing.get("command") == command
+                )
+            ]
+            if len(filtered) != len(entry_hooks):
+                changed = True
+            if filtered:
+                entry = dict(entry)
+                entry["hooks"] = filtered
+                kept_entries.append(entry)
+        else:
+            kept_entries.append(entry)
+    if changed:
+        if kept_entries:
+            hooks["BeforeTool"] = kept_entries
+        else:
+            hooks.pop("BeforeTool", None)
+        if hooks:
+            data["hooks"] = hooks
+        else:
+            data.pop("hooks", None)
+        _write_json(path, data)
+    return changed
+
+
+def _install_copilot(path, abs_actx):
+    if os.path.exists(path):
+        data = _read_json(path)
+        if not isinstance(data, dict):
+            raise ValueError("cannot install: %s is not a JSON object" % path)
+    else:
+        data = {}
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    pretool = hooks.get("preToolUse")
+    if not isinstance(pretool, list):
+        pretool = []
+    else:
+        pretool = list(pretool)
+
+    handler = _copilot_handler(abs_actx)
+    bash = handler["bash"]
+    changed = False
+    if not any(
+        isinstance(existing, dict) and existing.get("bash") == bash
+        for existing in pretool
+    ):
+        pretool.append(handler)
+        changed = True
+    if changed:
+        hooks["preToolUse"] = pretool
+        data["hooks"] = hooks
+        _write_json(path, data)
+    return changed
+
+
+def _uninstall_copilot(path, abs_actx):
+    if not os.path.exists(path):
+        return False
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    pretool = hooks.get("preToolUse")
+    if not isinstance(pretool, list):
+        return False
+    bash = _copilot_handler(abs_actx)["bash"]
+    filtered = [
+        existing
+        for existing in pretool
+        if not (isinstance(existing, dict) and existing.get("bash") == bash)
+    ]
+    if len(filtered) == len(pretool):
+        return False
+    if filtered:
+        hooks["preToolUse"] = filtered
+    else:
+        hooks.pop("preToolUse", None)
+    if hooks:
+        data["hooks"] = hooks
+    else:
+        data.pop("hooks", None)
+    _write_json(path, data)
+    return True
 
 
 def _read_instructions(path):
@@ -396,7 +585,7 @@ def _detect_existing(agent):
     paths = _agent_config(agent)
     if agent == "cursor":
         return False
-    if agent in ("claude", "codex"):
+    if agent in ("claude", "codex", "gemini", "copilot"):
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["hook"])))
     if agent == "opencode":
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["plugin"])))
@@ -441,6 +630,54 @@ def _installed(agent):
                 ):
                     return True
         return False
+    if agent == "gemini":
+        path = os.path.expanduser(paths["hook"])
+        if not os.path.exists(path):
+            return False
+        try:
+            data = _read_json(path)
+        except ValueError:
+            return False
+        if not isinstance(data, dict):
+            return False
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            return False
+        before = hooks.get("BeforeTool")
+        if not isinstance(before, list):
+            return False
+        command = _gemini_handler(abs_path())["command"]
+        for entry in before:
+            if isinstance(entry, dict) and entry.get("matcher") == "Bash":
+                entry_hooks = entry.get("hooks")
+                if isinstance(entry_hooks, list) and any(
+                    isinstance(existing, dict)
+                    and existing.get("command") == command
+                    for existing in entry_hooks
+                ):
+                    return True
+        return False
+    if agent == "copilot":
+        path = os.path.expanduser(paths["hook"])
+        if not os.path.exists(path):
+            return False
+        try:
+            data = _read_json(path)
+        except ValueError:
+            return False
+        if not isinstance(data, dict):
+            return False
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            return False
+        pretool = hooks.get("preToolUse")
+        if not isinstance(pretool, list):
+            return False
+        bash = _copilot_handler(abs_path())["bash"]
+        return any(
+            isinstance(existing, dict) and existing.get("bash") == bash
+            for existing in pretool
+        )
     if agent == "opencode":
         return os.path.exists(os.path.expanduser(paths["plugin"]))
     if agent in ("grok", "cline", "windsurf", "aider"):
@@ -458,6 +695,22 @@ def install(agent, abs_actx):
         path = os.path.expanduser(paths["hook"])
         try:
             changed = _install_hook(path, abs_actx)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+    if agent == "gemini":
+        path = os.path.expanduser(paths["hook"])
+        try:
+            _install_gemini(path, abs_actx)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+    if agent == "copilot":
+        path = os.path.expanduser(paths["hook"])
+        try:
+            _install_copilot(path, abs_actx)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -486,6 +739,22 @@ def uninstall(agent, abs_actx):
         path = os.path.expanduser(paths["hook"])
         try:
             _uninstall_hook(path, abs_actx)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+    if agent == "gemini":
+        path = os.path.expanduser(paths["hook"])
+        try:
+            _uninstall_gemini(path, abs_actx)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+    if agent == "copilot":
+        path = os.path.expanduser(paths["hook"])
+        try:
+            _uninstall_copilot(path, abs_actx)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1
