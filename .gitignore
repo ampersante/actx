@@ -4,3 +4,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Local scratch and generated tap files
+.review_tmp/
+homebrew-tap/

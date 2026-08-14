@@ -10,7 +10,7 @@ $ git status        →   $ actx git status
 
 ![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB)
 ![Stdlib only](https://img.shields.io/badge/dependencies-none-brightgreen)
-![Tests](https://img.shields.io/badge/tests-115%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-129%20passed-brightgreen)
 
 ---
 
@@ -62,12 +62,15 @@ src/main.py
 - **Lossless filenames** — `git status`, `ls`, and `find` compress the format, not the names.
 - **Tee for raw recovery** — truncated or failed output is saved to `~/.local/share/actx/tee` as JSON; `git diff` always saves, because its compression is lossy.
 - **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent; on any error they pass the command or output through unchanged.
+- **Escape hatch** — `ACTX_BYPASS=1` or a `bypass_commands` entry runs the matching command unfiltered (raw), preserving the exit code.
 - **Stdlib only** — Python 3.14 standard library. No pip, no brew, no network, no telemetry.
 - **Multi-agent** — deterministic hooks for Claude Code, Codex, and OpenCode; rule-based instructions for Grok, Cline, Windsurf, Aider, and Cursor.
 
 ## Installation
 
 Requirements: **Python 3.14** (macOS or Linux). No third-party packages.
+
+### From source
 
 ```bash
 chmod +x actx
@@ -86,6 +89,62 @@ actx init --agent opencode
 ```
 
 After installation, restart the agent.
+
+### Via curl (release tarball)
+
+```bash
+curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.2.tar.gz | tar xz
+cd actx-2.2
+bash install.sh
+```
+
+Keep the extracted directory — `install.sh` symlinks the `actx` binary from it.
+
+### Via Homebrew
+
+```bash
+brew tap ampersante/actx
+brew install actx
+```
+
+`brew` installs Python 3.14 automatically via the formula dependency.
+
+## Uninstall
+
+Step 1 first — while `actx` is still installed at the same path:
+
+```bash
+actx init --agent all --uninstall
+actx init --show    # every agent except Cursor should read "not installed"
+```
+
+Cursor always shows `manual (cursor)` — that is fine, it was never written to
+disk. You will also see a Cursor "nothing to uninstall" line on stderr; that is
+expected. If you pasted the section into Cursor UI, remove it there by hand.
+Restart the agent(s) before the next step.
+
+Then remove the program:
+
+```bash
+rm ~/.local/bin/actx    # symlink install
+brew uninstall actx     # instead, if you installed via Homebrew
+```
+
+If you installed by adding the `actx` directory to PATH, remove that line from
+your shell config instead. If you installed via curl, also delete the extracted
+directory.
+
+Then remove user data (these are actx's own directories):
+
+```bash
+rm -rf ~/.config/actx ~/.local/share/actx
+```
+
+If you cloned `actx`, delete that folder too.
+
+If you moved `actx` after installing, move it back to its original path, run
+Step 1, then delete it; otherwise remove the old hooks from the agent config by
+hand.
 
 ## Usage
 
@@ -111,8 +170,9 @@ actx --help
 | `actx run <cmd...>` | Generic wrapper: truncate lines/chars, tee on failure |
 | `actx git add/commit/push/pull/branch` | Manual mutating commands; success prints a tiny confirmation |
 | `actx --raw <command>` | Bypass filtering, print output verbatim |
+| `ACTX_BYPASS=1 actx <command>` | Run the command raw (no filter, no tee) |
 
-Everywhere, `-v`/`-vv`/`-vvv` (before the subcommand) control debug output to stderr.
+`ACTX_BYPASS=1` disables filtering for that call; adding a command's first token to `bypass_commands` in the config does the same for every call of that command. Everywhere, `-v`/`-vv`/`-vvv` (before the subcommand) control debug output to stderr.
 
 ### Examples
 
@@ -178,11 +238,13 @@ Created automatically on first run at `~/.config/actx/config.json`:
   "truncate": {
     "max_lines": 500,
     "max_line_chars": 300
-  }
+  },
+  "bypass_commands": []
 }
 ```
 
 - `tee.mode`: `failures` (default), `always`, or `never`.
+- `bypass_commands`: list of command names (first token) that run unfiltered, e.g. `["git"]`. Environment variable `ACTX_BYPASS=1` bypasses filtering for the current call only.
 - `git diff` always tees regardless of `mode`, because its compression is lossy.
 - Tee files are `~/.local/share/actx/tee/<unix_ts>_<sha1(command)[:8]>.log`, kept to 100 files.
 
@@ -201,7 +263,7 @@ Run the full test suite (stdlib `unittest` only):
 python3 -m unittest discover tests
 ```
 
-The suite covers the rewriter security boundary, hook E2E, all filters, adapter installation, an AST security scan, and performance targets.
+The suite covers the rewriter security boundary, hook E2E, all filters, adapter installation, an AST security scan, the bypass escape hatch, lazy-import guards, and performance targets.
 
 ## Non-goals for v1
 
@@ -212,4 +274,4 @@ The suite covers the rewriter security boundary, hook E2E, all filters, adapter 
 
 ## License
 
-Not yet chosen.
+MIT. See `LICENSE`.
