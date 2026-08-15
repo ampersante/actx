@@ -1,0 +1,56 @@
+name: Update Homebrew tap
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+
+      - name: Compute release data
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "${tag}" =~ ^v[0-9][0-9A-Za-z._+-]*$ ]]; then
+            echo "Unsupported tag format: ${tag}" >&2
+            exit 1
+          fi
+          url="https://github.com/ampersante/actx/archive/refs/tags/${tag}.tar.gz"
+          curl -fsSL "${url}" -o /tmp/actx.tar.gz
+          sha="$(sha256sum /tmp/actx.tar.gz | awk '{print $1}')"
+          {
+            echo "TAG=${tag}"
+            echo "VERSION=${tag#v}"
+            echo "SHA256=${sha}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build formula
+        run: |
+          cp packaging/homebrew/actx.rb /tmp/actx.rb
+          sed -E -i '/# Fill sha256 in the tap copy/,+1d' /tmp/actx.rb
+          sed -E -i "s|tags/[^/]+\.tar\.gz|tags/${TAG}.tar.gz|" /tmp/actx.rb
+          sed -E -i "s|sha256 \"[0-9a-f]{64}\"|sha256 \"${SHA256}\"|" /tmp/actx.rb
+          ruby -c /tmp/actx.rb
+
+      - name: Push formula to tap
+        env:
+          TAP_PAT: ${{ secrets.TAP_PAT }}
+        run: |
+          git clone "https://x-access-token:${TAP_PAT}@github.com/ampersante/homebrew-actx.git" /tmp/homebrew-actx
+          cp /tmp/actx.rb /tmp/homebrew-actx/Formula/actx.rb
+          git -C /tmp/homebrew-actx config user.name "github-actions[bot]"
+          git -C /tmp/homebrew-actx config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git -C /tmp/homebrew-actx diff --quiet; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git -C /tmp/homebrew-actx add Formula/actx.rb
+          git -C /tmp/homebrew-actx commit -m "Bump actx to ${VERSION}"
+          git -C /tmp/homebrew-actx push origin master

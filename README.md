@@ -285,8 +285,13 @@ The suite covers the rewriter security boundary, hook E2E, all filters, adapter 
    git push origin vX.Y.Z
    ```
 
-2. Update the tap formula in the `homebrew-actx` repo: set the tag URL and the
-   tarball sha256, then push the formula.
+2. The `update-tap` workflow updates the tap formula automatically when the
+   tag is pushed (`.github/workflows/update-tap.yml`). It needs a PAT with
+   `contents: write` on `ampersante/homebrew-actx`, stored in the `actx`
+   repo as the secret `TAP_PAT` (Settings → Secrets and variables → Actions).
+
+   Manual fallback: edit `Formula/actx.rb` in `ampersante/homebrew-actx`,
+   set the tag URL and sha256, then push.
 
 3. Update installed copies:
 
