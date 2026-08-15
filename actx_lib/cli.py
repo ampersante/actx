@@ -2,7 +2,7 @@ import sys
 
 import actx_lib.rewriter as rewriter
 
-VERSION = "actx 2.2.2"
+VERSION = "actx 2.2.3"
 
 USAGE = """usage: actx [--raw] [--ultra-compact] [-v|-vv|-vvv] <command> [args...]
 
