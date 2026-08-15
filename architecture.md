@@ -52,7 +52,8 @@ Six-phase lifecycle (borrowed from RTK): parse → route → execute → filter 
 
 ## Data Model
 
-- Config: `~/.config/actx/config.json` → `{"tee":{"enabled","mode","dir"},"truncate":{"max_lines","max_line_chars"},"bypass_commands":[]}`; created with defaults on first run.
+- Config: `~/.config/actx/config.json` → `{"tee":{"enabled","mode","dir"},"truncate":{"max_lines","max_line_chars"},"bypass_commands":[],"tracking":{"enabled":true,"history_days":90}}`; created with defaults on first run.
+- Tracking: `~/.local/share/actx/history.db` stores `sha1(command)`, `category`, `strategy`, bytes before/after, exit code, timestamp.
 - Tee file: `~/.local/share/actx/tee/<unix_ts>_<sha1(cmd)[:8]>.log`, JSON `{"command","stdout","stderr","exit_code"}`; retention 100 files / 10 MB per stream.
 
 ## Open Forks

@@ -15,6 +15,7 @@ DEFAULT_CONFIG = {
     "bypass_commands": [],
     "ignore_dirs": [".git", "node_modules", "target"],
     "ignore_files": ["*.lock"],
+    "tracking": {"enabled": True, "history_days": 90},
 }
 
 
@@ -24,16 +25,14 @@ def _config_path():
 
 def _merge(defaults, loaded):
     if not isinstance(loaded, dict):
-        return defaults
-    merged = {}
+        return json.loads(json.dumps(defaults))
+    merged = dict(loaded)
     for key, value in defaults.items():
         loaded_value = loaded.get(key)
         if isinstance(value, dict) and isinstance(loaded_value, dict):
             merged[key] = dict(value)
             merged[key].update(loaded_value)
-        elif key in loaded:
-            merged[key] = loaded_value
-        else:
+        elif key not in loaded:
             merged[key] = value
     return merged
 

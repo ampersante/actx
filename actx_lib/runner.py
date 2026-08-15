@@ -14,6 +14,24 @@ def _text_bytes(text):
     return len(text.encode("utf-8")) if text else 0
 
 
+def record_raw(cmd, result, strategy, passthrough=0):
+    raw = _text_bytes(result.stdout) + _text_bytes(result.stderr)
+    tracking.record(
+        cmd, cmd[0], raw, raw, result.returncode,
+        passthrough=passthrough, strategy=strategy,
+    )
+
+
+def record_compacted(cmd, result, out_text, strategy, newline=True, extra_bytes=0):
+    raw = _text_bytes(result.stdout) + _text_bytes(result.stderr)
+    emitted = _text_bytes(out_text) + extra_bytes
+    if newline and out_text and not out_text.endswith("\n"):
+        emitted += 1
+    tracking.record(
+        cmd, cmd[0], raw, emitted, result.returncode, strategy=strategy,
+    )
+
+
 def _tee_min_bytes(config):
     tee = config.get("tee", {})
     try:
@@ -107,7 +125,10 @@ def run_passthrough(cmd):
         sys.stderr.buffer.write(result.stderr)
         sys.stderr.buffer.flush()
     raw_bytes = len(result.stdout) + len(result.stderr)
-    tracking.record(cmd, cmd[0], raw_bytes, raw_bytes, result.returncode, passthrough=1)
+    tracking.record(
+        cmd, cmd[0], raw_bytes, raw_bytes, result.returncode,
+        passthrough=1, strategy="passthrough",
+    )
     return result.returncode
 
 
@@ -161,7 +182,7 @@ def run(cmd, config):
         emitted += 1 if result.stderr and not result.stderr.endswith("\n") else 0
         emitted += _text_bytes("[exit: %d]\n" % result.returncode)
 
-    tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode)
+    tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="generic")
 
     tee_config = config.get("tee", {})
     should_tee = bool(tee_config.get("enabled")) and (
@@ -236,7 +257,7 @@ def write_tee(cmd, result, config):
     return path
 
 
-def compacted_result(cmd, result, config, compact_fn, tee_policy="auto"):
+def compacted_result(cmd, result, config, compact_fn, tee_policy="auto", strategy="compact"):
     """Compact stdout for any exit code; fall back to raw output on error."""
     if result is None:
         return 1
@@ -255,7 +276,7 @@ def compacted_result(cmd, result, config, compact_fn, tee_policy="auto"):
                 print()
         emitted = _text_bytes(out) + (1 if out and not out.endswith("\n") else 0)
         raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-        tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode)
+        tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy=strategy)
         if tee_decision(config, tee_policy, result.returncode):
             write_tee(cmd, result, config)
         return result.returncode
@@ -285,7 +306,7 @@ def run_errors(cmd):
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
     emitted = _text_bytes(result.stderr)
     emitted += 1 if result.stderr and not result.stderr.endswith("\n") else 0
-    tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode)
+    tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="errors")
     return result.returncode
 
 
@@ -324,5 +345,5 @@ def run_digest(cmd, n=10):
     emitted += _text_bytes(result.stderr)
     emitted += 1 if result.stderr and not result.stderr.endswith("\n") else 0
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-    tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode)
+    tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="digest")
     return result.returncode

@@ -90,6 +90,7 @@ def _status(rest, config):
                     out.append("  ... (%d more)" % (len(paths) - 200))
         if out:
             print("\n".join(out))
+        runner.record_compacted(cmd, result, "\n".join(out), "git.status")
         return 0
     except Exception:
         return runner.raw_fallback(result)
@@ -154,15 +155,19 @@ def _diff(rest, config):
         return _failure(cmd, result, config, tee_policy="always")
     if len(result.stdout) <= 1000:
         runner.print_raw(result)
+        runner.record_raw(cmd, result, "git.diff")
         return result.returncode
 
     try:
         out = []
         for block in _split_diff_blocks(result.stdout):
             out.extend(_format_diff_block(block))
-        if out:
-            print("\n".join(out))
-        runner.write_tee(cmd, result, config)
+        out_text = "\n".join(out)
+        if out_text:
+            print(out_text)
+        path = runner.write_tee(cmd, result, config)
+        extra = len("[full output: %s]\n" % path) if path else 0
+        runner.record_compacted(cmd, result, out_text, "git.diff", extra_bytes=extra)
         return 0
     except Exception:
         return runner.raw_fallback(result)
@@ -183,6 +188,7 @@ def _log(rest, config):
             print(result.stdout, end="")
             if not result.stdout.endswith("\n"):
                 print()
+        runner.record_raw(cmd, result, "git.log")
         return 0
     except Exception:
         return runner.raw_fallback(result)
@@ -199,6 +205,7 @@ def _branch(rest, config):
         return _failure(cmd, result, config)
     try:
         print("ok")
+        runner.record_compacted(cmd, result, "ok", "git.branch")
         return 0
     except Exception:
         return runner.raw_fallback(result)
@@ -215,9 +222,12 @@ def _mutating(sub, rest, config):
         if sub == "commit":
             rev = runner.execute(["git", "rev-parse", "--short", "HEAD"])
             if rev is not None and rev.returncode == 0:
-                print("ok %s" % rev.stdout.strip())
+                text = "ok %s" % rev.stdout.strip()
+                print(text)
+                runner.record_compacted(cmd, result, text, "git.mutating")
                 return 0
         print("ok")
+        runner.record_compacted(cmd, result, "ok", "git.mutating")
         return 0
     except Exception:
         return runner.raw_fallback(result)

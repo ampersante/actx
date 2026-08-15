@@ -166,7 +166,9 @@ def run(args, config):
         return result.returncode
 
     try:
-        print(_summarize(result.stdout, ext))
+        out = _summarize(result.stdout, ext)
+        print(out)
+        runner.record_compacted(cmd, result, out, "smart")
         return 0
     except Exception:
         return runner.raw_fallback(result)

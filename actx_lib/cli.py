@@ -11,9 +11,10 @@ commands:
   pytest, cargo, go, jest, vitest, ruff, tsc, eslint, golangci-lint, next
   pip, uv, npm, pnpm, docker, kubectl, gh, aws
   run [--errors|--failures|--digest] <cmd...>
-  gain [--graph|--history|--daily] [--format json]
+  gain [--graph|--history|--daily|--breakdown] [--format json]
   discover
   session
+  tracking [on|off|status|clear]
   rewrite "<command>"
   hook
   init [--agent <name>] [--show] [--uninstall]
@@ -88,15 +89,19 @@ def _run(args, raw):
 
     from actx_lib import config
     from actx_lib import runner
+    from actx_lib import tracking
 
     mode, rest = _parse_run_args(args)
     if mode is None and rest is None:
         return 1
 
+    cfg = config.load()
+    tracking.set_enabled(tracking.configured_enabled(cfg))
+    tracking.set_retention_days(tracking.configured_retention_days(cfg))
+
     if mode is None:
         if raw:
             return runner.run_passthrough(rest)
-        cfg = config.load()
         if _bypass_requested(rest[0], cfg):
             return runner.run_passthrough(rest)
         return runner.run(rest, cfg)
@@ -105,7 +110,6 @@ def _run(args, raw):
         print("error: run --%s requires a command" % mode, file=sys.stderr)
         return 1
 
-    cfg = config.load()
     if _bypass_requested(rest[0], cfg):
         return runner.run_passthrough(rest)
 
@@ -174,12 +178,24 @@ def main(argv):
             return 1
         return installer.main(args)
 
+    if command == "tracking":
+        try:
+            from actx_lib import tracking_cli
+        except ImportError:
+            print("not implemented", file=sys.stderr)
+            return 1
+        return tracking_cli.main(args)
+
     from actx_lib import config
     from actx_lib import runner
+    from actx_lib import tracking
+
+    cfg = config.load()
+    tracking.set_enabled(tracking.configured_enabled(cfg))
+    tracking.set_retention_days(tracking.configured_retention_days(cfg))
 
     if raw:
         return runner.run_passthrough([command] + args)
-    cfg = config.load()
     if _bypass_requested(command, cfg):
         return runner.run_passthrough([command] + args)
 

@@ -152,6 +152,10 @@ hand.
 ```text
 actx [--raw] [-v|-vv|-vvv] <command> [args...]
 actx run <cmd...>
+actx gain [--graph|--history|--daily|--breakdown] [--format json]
+actx discover
+actx session
+actx tracking [on|off|status|clear]
 actx rewrite "<command>"
 actx hook
 actx init [--agent <name>] [--show] [--uninstall]
@@ -169,6 +173,11 @@ actx --help
 | `actx find [args]` | Groups paths by directory |
 | `actx read <file> [--level minimal]` | Strips full-line comments for known extensions |
 | `actx run <cmd...>` | Generic wrapper: truncate lines/chars, tee on failure |
+| `actx gain` | Savings summary: calls, bytes/≈tokens, %, top categories and strategies |
+| `actx gain --breakdown` | Savings composition by compression strategy |
+| `actx discover` | Candidates for new filters (frequent passthrough commands) |
+| `actx session` | Adoption across sessions |
+| `actx tracking on\|off\|status\|clear` | Enable/disable/inspect/clear local analytics |
 | `actx git add/commit/push/pull/branch` | Manual mutating commands; success prints a tiny confirmation |
 | `actx --raw <command>` | Bypass filtering, print output verbatim |
 | `ACTX_BYPASS=1 actx <command>` | Run the command raw (no filter, no tee) |
@@ -240,7 +249,11 @@ Created automatically on first run at `~/.config/actx/config.json`:
     "max_lines": 500,
     "max_line_chars": 300
   },
-  "bypass_commands": []
+  "bypass_commands": [],
+  "tracking": {
+    "enabled": true,
+    "history_days": 90
+  }
 }
 ```
 
@@ -248,6 +261,33 @@ Created automatically on first run at `~/.config/actx/config.json`:
 - `bypass_commands`: list of command names (first token) that run unfiltered, e.g. `["git"]`. Environment variable `ACTX_BYPASS=1` bypasses filtering for the current call only.
 - `git diff` always tees regardless of `mode`, because its compression is lossy.
 - Tee files are `~/.local/share/actx/tee/<unix_ts>_<sha1(command)[:8]>.log`, kept to 100 files.
+
+## Analytics
+
+Local-only, on by default. `actx` records every proxied command as an aggregate into a single SQLite file `~/.local/share/actx/history.db`:
+
+- `sha1(command)` and `category` (first token) — never full commands or arguments;
+- `strategy` — which compression path ran (`git.status`, `git.diff`, `ls`, `grep`, `read`, `test`, `passthrough`, …);
+- `bytes_before/after`, exit code, timestamp.
+
+The directory is `0700` and the database is `0600`, so only your user can read it.
+
+Views:
+
+- `actx gain` — total saved bytes, approximate tokens (`bytes / 4`), savings %, top categories and strategies.
+- `actx gain --breakdown` — full composition by strategy.
+- `actx gain --graph|--history|--daily` and `--format json`.
+- `actx discover` / `actx session`.
+
+Control:
+
+- `actx tracking off` / `on` — persist the switch in config (`tracking.enabled`).
+- `ACTX_TRACKING=0 actx ...` — disable for one call, overriding config.
+- `actx tracking status` — show state, db path, and call count.
+- `actx tracking clear` — delete the database.
+- Rows older than `tracking.history_days` (default 90) are pruned on write; set `0` to keep forever.
+
+Error/exception paths are not recorded (they produce no savings); `tree` is not recorded (no subprocess); passthrough calls are recorded under `passthrough`.
 
 ## Safety
 
@@ -266,12 +306,11 @@ python3 -m unittest discover tests
 
 The suite covers the rewriter security boundary, hook E2E, all filters, adapter installation, an AST security scan, the bypass escape hatch, lazy-import guards, and performance targets.
 
-## Non-goals for v1
+## Non-goals
 
-- Test-runner filters (pytest/cargo/go), linters, docker/kubectl
-- `actx gain` / SQLite statistics
 - Windows
 - Mutating-command auto-rewrite
+- Remote telemetry
 
 ## Releasing
 

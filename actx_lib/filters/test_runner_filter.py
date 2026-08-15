@@ -194,7 +194,7 @@ def _run_tool(tool, cmd, config, failures_only=False):
         parts.append(_counter(data["failed"], data["passed"]))
         return "\n".join(parts)
 
-    return runner.compacted_result(cmd, result, config, compact_fn)
+    return runner.compacted_result(cmd, result, config, compact_fn, strategy="test")
 
 
 def run_pytest(args, config):

@@ -286,6 +286,7 @@ def run(args, config):
             out = "\n".join(kept)
         if out:
             print(out, end="")
+        runner.record_compacted(cmd, result, out, "read", newline=False)
         return 0
     except Exception:
         return runner.raw_fallback(result)

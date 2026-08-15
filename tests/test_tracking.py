@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -20,6 +21,16 @@ CONFIG = {
 
 
 class TrackingTests(unittest.TestCase):
+    def setUp(self):
+        tracking._ENABLED = True
+        tracking._RETENTION_DAYS = 90
+        os.environ.pop("ACTX_TRACKING", None)
+
+    def tearDown(self):
+        tracking._ENABLED = True
+        tracking._RETENTION_DAYS = 90
+        os.environ.pop("ACTX_TRACKING", None)
+
     def _db_path(self, home):
         return os.path.join(home, ".local", "share", "actx", "history.db")
 
@@ -92,6 +103,71 @@ class TrackingTests(unittest.TestCase):
                 rc = runner.run(["python3", "-c", "print('hi')"], CONFIG)
         self.assertEqual(rc, 0)
         self.assertIn("hi", out.getvalue())
+
+    def test_env_disable_skips_write(self):
+        home = tempfile.TemporaryDirectory()
+        os.environ["HOME"] = home.name
+        os.environ["ACTX_TRACKING"] = "0"
+        try:
+            tracking.record(["git", "status"], "git", 10, 5, 0, strategy="git.status")
+        finally:
+            del os.environ["HOME"]
+            del os.environ["ACTX_TRACKING"]
+        self.assertFalse(os.path.exists(self._db_path(home.name)))
+        home.cleanup()
+
+    def test_set_enabled_false_skips_write(self):
+        home = tempfile.TemporaryDirectory()
+        os.environ["HOME"] = home.name
+        tracking.set_enabled(False)
+        try:
+            tracking.record(["git", "status"], "git", 10, 5, 0)
+        finally:
+            tracking.set_enabled(True)
+            del os.environ["HOME"]
+        self.assertFalse(os.path.exists(self._db_path(home.name)))
+        home.cleanup()
+
+    def test_configured_enabled_malformed_falls_back_to_true(self):
+        self.assertTrue(tracking.configured_enabled({"tracking": False}))
+        self.assertTrue(tracking.configured_enabled({"tracking": {}}))
+
+    def test_strategy_is_stored(self):
+        home = tempfile.TemporaryDirectory()
+        os.environ["HOME"] = home.name
+        try:
+            tracking.record(["git", "status"], "git", 10, 5, 0, strategy="git.status")
+        finally:
+            del os.environ["HOME"]
+        conn = sqlite3.connect(self._db_path(home.name))
+        row = conn.execute("SELECT strategy FROM calls").fetchone()
+        conn.close()
+        home.cleanup()
+        self.assertEqual(row[0], "git.status")
+
+    def test_retention_deletes_old_rows_keeps_new(self):
+        home = tempfile.TemporaryDirectory()
+        os.environ["HOME"] = home.name
+        try:
+            conn = tracking.connect()
+            conn.execute(
+                "INSERT INTO calls (command_hash, category, bytes_before, "
+                "bytes_after, exit_code, timestamp, passthrough, strategy) "
+                "VALUES ('old', 'git', 10, 5, 0, ?, 0, 'git.status')",
+                (int(time.time()) - 91 * 86400,),
+            )
+            conn.commit()
+            conn.close()
+            tracking.record(["git", "status"], "git", 10, 5, 0, strategy="git.status")
+        finally:
+            del os.environ["HOME"]
+        conn = sqlite3.connect(self._db_path(home.name))
+        rows = list(conn.execute("SELECT command_hash FROM calls"))
+        conn.close()
+        home.cleanup()
+        expected = hashlib.sha1("git status".encode("utf-8")).hexdigest()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], expected)
 
 
 if __name__ == "__main__":

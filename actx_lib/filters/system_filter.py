@@ -75,6 +75,7 @@ def run_ls(args, config):
                 remaining = len(entries) - len(shown_dirs) - len(shown_files)
                 out.append("  ... (%d more)" % remaining)
         print("\n".join(out))
+        runner.record_compacted(cmd, result, "\n".join(out), "ls")
         return 0
     except Exception:
         return runner.raw_fallback(result)
@@ -96,6 +97,7 @@ def run_grep(args, config):
         return 1
     if result.returncode == 1:
         print("no matches")
+        runner.record_compacted(cmd, result, "no matches", "grep")
         return 1
     if result.returncode >= 2:
         runner.print_raw(result)
@@ -104,6 +106,7 @@ def run_grep(args, config):
         return result.returncode
     if len(result.stdout) <= 1000:
         runner.print_raw(result)
+        runner.record_raw(cmd, result, "grep")
         return result.returncode
 
     try:
@@ -128,6 +131,7 @@ def run_grep(args, config):
                 out.append("  ...")
         if out:
             print("\n".join(out))
+        runner.record_compacted(cmd, result, "\n".join(out), "grep")
         return 0
     except Exception:
         return runner.raw_fallback(result)
@@ -148,6 +152,7 @@ def run_find(args, config):
         return result.returncode
     if len(result.stdout) <= 200:
         runner.print_raw(result)
+        runner.record_raw(cmd, result, "find")
         return result.returncode
 
     try:
@@ -170,6 +175,7 @@ def run_find(args, config):
             out.append("... (%d more dirs)" % (total_dirs - 200))
         if out:
             print("\n".join(out))
+        runner.record_compacted(cmd, result, "\n".join(out), "find")
         return 0
     except Exception:
         return runner.raw_fallback(result)

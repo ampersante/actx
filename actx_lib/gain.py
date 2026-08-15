@@ -6,7 +6,7 @@ from datetime import datetime
 
 from actx_lib import tracking
 
-_USAGE = """usage: actx gain [--graph|--history|--daily] [--format json]
+_USAGE = """usage: actx gain [--graph|--history|--daily|--breakdown] [--format json]
 """
 
 
@@ -23,11 +23,11 @@ def _parse_args(args):
             fmt = args[index + 1]
             index += 2
             continue
-        if token in ("--graph", "--history", "--daily"):
+        if token in ("--graph", "--history", "--daily", "--breakdown", "--by-strategy"):
             if view != "total":
                 print("error: gain views are mutually exclusive", file=sys.stderr)
                 return None, None
-            view = token[2:]
+            view = "breakdown" if token == "--by-strategy" else token[2:]
             index += 1
             continue
         print("error: unknown gain option: %s" % token, file=sys.stderr)
@@ -45,9 +45,10 @@ def _open():
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     try:
+        tracking._migrate(conn)
         conn.execute(
             "SELECT command_hash, category, bytes_before, bytes_after, "
-            "exit_code, timestamp, passthrough FROM calls LIMIT 1"
+            "exit_code, timestamp, passthrough, strategy FROM calls LIMIT 1"
         )
     except sqlite3.OperationalError:
         conn.close()
@@ -55,16 +56,63 @@ def _open():
     return conn
 
 
+def _empty_conn():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE calls (
+            command_hash TEXT, category TEXT, bytes_before INTEGER,
+            bytes_after INTEGER, exit_code INTEGER, timestamp INTEGER,
+            passthrough INTEGER, strategy TEXT
+        )"""
+    )
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def _saved_expression():
     return "MAX(0, bytes_before - bytes_after)"
 
 
-def _total(conn):
+def _totals(conn):
     row = conn.execute(
-        "SELECT COALESCE(SUM(%s), 0) AS saved, COUNT(*) AS calls FROM calls"
+        "SELECT COALESCE(SUM(%s), 0) AS saved, COUNT(*) AS calls, "
+        "COALESCE(SUM(bytes_before), 0) AS raw FROM calls"
         % _saved_expression()
     ).fetchone()
-    return int(row["saved"]), int(row["calls"])
+    return int(row["saved"]), int(row["calls"]), int(row["raw"])
+
+
+def _top_saved(conn):
+    return conn.execute(
+        "SELECT category, SUM(%s) AS saved FROM calls "
+        "GROUP BY category ORDER BY saved DESC, category ASC LIMIT 5"
+        % _saved_expression()
+    ).fetchall()
+
+
+def _top_calls(conn):
+    return conn.execute(
+        "SELECT category, COUNT(*) AS calls FROM calls "
+        "GROUP BY category ORDER BY calls DESC, category ASC LIMIT 5"
+    ).fetchall()
+
+
+def _strategy_breakdown(conn):
+    rows = conn.execute(
+        "SELECT strategy, SUM(%s) AS saved, COUNT(*) AS calls FROM calls "
+        "WHERE strategy != '' GROUP BY strategy ORDER BY saved DESC, strategy ASC"
+        % _saved_expression()
+    ).fetchall()
+    total = sum(int(r["saved"]) for r in rows)
+    return [
+        {
+            "strategy": r["strategy"],
+            "saved_bytes": int(r["saved"]),
+            "calls": int(r["calls"]),
+            "percent": round(int(r["saved"]) / total * 100, 1) if total else 0.0,
+        }
+        for r in rows
+    ]
 
 
 def _daily(conn):
@@ -94,8 +142,22 @@ def _history(conn):
 
 
 def _fmt_total(conn):
-    saved, calls = _total(conn)
-    return {"total_saved_bytes": saved, "calls": calls}
+    saved, calls, raw = _totals(conn)
+    return {
+        "calls": calls,
+        "total_saved_bytes": saved,
+        "estimated_tokens": saved // 4,
+        "savings_percent": round(saved / raw * 100, 1) if raw else 0.0,
+        "top_saved": [
+            {"category": r["category"], "saved_bytes": int(r["saved"])}
+            for r in _top_saved(conn)
+        ],
+        "top_calls": [
+            {"category": r["category"], "calls": int(r["calls"])}
+            for r in _top_calls(conn)
+        ],
+        "top_strategies": _strategy_breakdown(conn)[:5],
+    }
 
 
 def _fmt_daily(conn):
@@ -119,18 +181,41 @@ def _fmt_graph(conn):
     return {"graph": _fmt_daily(conn)["daily"]}
 
 
+def _fmt_breakdown(conn):
+    return {"breakdown": _strategy_breakdown(conn)}
+
+
 _JSON_BUILDERS = {
     "total": _fmt_total,
     "daily": _fmt_daily,
     "history": _fmt_history,
     "graph": _fmt_graph,
+    "breakdown": _fmt_breakdown,
 }
 
 
 def _print_text(view, conn):
     if view == "total":
-        saved, calls = _total(conn)
-        print("saved: %d bytes" % saved)
+        saved, calls, raw = _totals(conn)
+        print("calls: %d" % calls)
+        print("saved: %d bytes (~%d tokens)" % (saved, saved // 4))
+        print("savings: %.1f%% of raw bytes" % (saved / raw * 100 if raw else 0.0))
+        for r in _top_saved(conn):
+            print("top saved: %s %d bytes" % (r["category"], int(r["saved"])))
+        for r in _top_calls(conn):
+            print("top calls: %s %d" % (r["category"], int(r["calls"])))
+        for r in _strategy_breakdown(conn)[:3]:
+            print(
+                "top strategy: %s %d bytes %.1f%%"
+                % (r["strategy"], r["saved_bytes"], r["percent"])
+            )
+        return
+    if view == "breakdown":
+        for r in _strategy_breakdown(conn):
+            print(
+                "%s %d bytes %.1f%% (%d calls)"
+                % (r["strategy"], r["saved_bytes"], r["percent"], r["calls"])
+            )
         return
     if view == "daily":
         for day, saved in _daily(conn):
@@ -159,15 +244,7 @@ def main(args):
 
     conn = _open()
     if conn is None:
-        conn = sqlite3.connect(":memory:")
-        conn.execute(
-            """CREATE TABLE calls (
-                command_hash TEXT, category TEXT, bytes_before INTEGER,
-                bytes_after INTEGER, exit_code INTEGER, timestamp INTEGER,
-                passthrough INTEGER
-            )"""
-        )
-        conn.row_factory = sqlite3.Row
+        conn = _empty_conn()
     try:
         if fmt == "json":
             print(json.dumps(_JSON_BUILDERS[view](conn)))

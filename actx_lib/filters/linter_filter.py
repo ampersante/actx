@@ -8,7 +8,9 @@ def _run_compact(args, config, parser):
     result = runner.execute(cmd)
     if result is None:
         return 1
-    return runner.compacted_result(cmd, result, config, runner.stdout_compactor(parser))
+    return runner.compacted_result(
+        cmd, result, config, runner.stdout_compactor(parser), strategy="linter"
+    )
 
 
 def compact_ruff(text):
