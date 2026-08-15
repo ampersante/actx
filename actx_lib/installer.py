@@ -8,6 +8,7 @@ files; it never rewrites those files wholesale.
 import json
 import os
 import shlex
+import shutil
 import sys
 
 AGENTS = (
@@ -60,8 +61,30 @@ _AIDER_READ_PATH = "~/.config/actx/instructions.md"
 
 
 def abs_path():
-    """Resolve the running ``actx`` binary to an absolute path."""
-    return os.path.realpath(sys.argv[0])
+    """Return a stable absolute path to the running ``actx`` binary.
+
+    Deliberately does NOT resolve symlinks: resolving ``/opt/homebrew/bin/actx``
+    to a versioned Cellar path makes hooks break after ``brew upgrade``.
+    """
+    arg0 = sys.argv[0]
+    if os.path.isabs(arg0):
+        return arg0
+    if os.sep in arg0:
+        return os.path.abspath(arg0)
+    found = shutil.which(arg0)
+    return found or os.path.abspath(arg0)
+
+
+def _is_actx_hook_command(command):
+    """True for our hook command format ``'<path-to-actx>' hook``."""
+    if not isinstance(command, str) or not command.endswith(" hook"):
+        return False
+    path_part = command[: -len(" hook")]
+    try:
+        parts = shlex.split(path_part)
+    except ValueError:
+        return False
+    return len(parts) == 1 and os.path.basename(parts[0]) == "actx"
 
 
 def _hook_handler(abs_actx):
@@ -145,6 +168,19 @@ def _install_hook(path, abs_actx):
         bash_entry["hooks"] = entry_hooks
         changed = True
 
+    filtered = [
+        existing
+        for existing in entry_hooks
+        if not (
+            isinstance(existing, dict)
+            and _is_actx_hook_command(existing.get("command"))
+        )
+    ]
+    if len(filtered) != len(entry_hooks):
+        entry_hooks = filtered
+        bash_entry["hooks"] = entry_hooks
+        changed = True
+
     if not any(
         isinstance(existing, dict) and existing.get("command") == handler_command
         for existing in entry_hooks
@@ -174,7 +210,6 @@ def _uninstall_hook(path, abs_actx):
     if not isinstance(pretool, list):
         return False
 
-    handler_command = _hook_handler(abs_actx)["command"]
     changed = False
     kept_entries = []
     for entry in pretool:
@@ -186,7 +221,10 @@ def _uninstall_hook(path, abs_actx):
             filtered = [
                 existing
                 for existing in entry_hooks
-                if not (isinstance(existing, dict) and existing.get("command") == handler_command)
+                if not (
+                    isinstance(existing, dict)
+                    and _is_actx_hook_command(existing.get("command"))
+                )
             ]
             if len(filtered) != len(entry_hooks):
                 changed = True
@@ -243,6 +281,18 @@ def _install_gemini(path, abs_actx):
         entry_hooks = []
         bash_entry["hooks"] = entry_hooks
         changed = True
+    filtered = [
+        existing
+        for existing in entry_hooks
+        if not (
+            isinstance(existing, dict)
+            and _is_actx_hook_command(existing.get("command"))
+        )
+    ]
+    if len(filtered) != len(entry_hooks):
+        entry_hooks = filtered
+        bash_entry["hooks"] = entry_hooks
+        changed = True
     if not any(
         isinstance(existing, dict) and existing.get("command") == command
         for existing in entry_hooks
@@ -268,7 +318,6 @@ def _uninstall_gemini(path, abs_actx):
     before = hooks.get("BeforeTool")
     if not isinstance(before, list):
         return False
-    command = _gemini_handler(abs_actx)["command"]
     changed = False
     kept_entries = []
     for entry in before:
@@ -282,7 +331,7 @@ def _uninstall_gemini(path, abs_actx):
                 for existing in entry_hooks
                 if not (
                     isinstance(existing, dict)
-                    and existing.get("command") == command
+                    and _is_actx_hook_command(existing.get("command"))
                 )
             ]
             if len(filtered) != len(entry_hooks):
@@ -325,6 +374,17 @@ def _install_copilot(path, abs_actx):
     handler = _copilot_handler(abs_actx)
     bash = handler["bash"]
     changed = False
+    filtered = [
+        existing
+        for existing in pretool
+        if not (
+            isinstance(existing, dict)
+            and _is_actx_hook_command(existing.get("bash"))
+        )
+    ]
+    if len(filtered) != len(pretool):
+        pretool = filtered
+        changed = True
     if not any(
         isinstance(existing, dict) and existing.get("bash") == bash
         for existing in pretool
@@ -350,11 +410,13 @@ def _uninstall_copilot(path, abs_actx):
     pretool = hooks.get("preToolUse")
     if not isinstance(pretool, list):
         return False
-    bash = _copilot_handler(abs_actx)["bash"]
     filtered = [
         existing
         for existing in pretool
-        if not (isinstance(existing, dict) and existing.get("bash") == bash)
+        if not (
+            isinstance(existing, dict)
+            and _is_actx_hook_command(existing.get("bash"))
+        )
     ]
     if len(filtered) == len(pretool):
         return False

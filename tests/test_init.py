@@ -5,6 +5,7 @@ import shlex
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACTX = os.path.realpath(os.path.join(ROOT, "actx"))
@@ -364,6 +365,81 @@ class InitTests(unittest.TestCase):
             p = self.run_actx(["init", "--agent", "bogus"], home)
             self.assertEqual(p.returncode, 1)
             self.assertIn("unknown agent", p.stderr)
+
+    def test_claude_init_replaces_stale_actx_hook(self):
+        with tempfile.TemporaryDirectory() as home:
+            settings = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings), exist_ok=True)
+            stale = shlex.quote("/opt/homebrew/Cellar/actx/2.2/libexec/actx") + " hook"
+            other = {"type": "command", "command": "echo existing", "timeout": 10}
+            with open(settings, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "Bash",
+                                    "hooks": [
+                                        {"type": "command", "command": stale, "timeout": 10},
+                                        other,
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                    handle,
+                )
+            p = self.run_actx(["init", "--agent", "claude"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(settings, encoding="utf-8") as handle:
+                data = json.load(handle)
+            hooks = data["hooks"]["PreToolUse"][0]["hooks"]
+            self.assertEqual(len(hooks), 2)
+            self.assertIn(self.handler(), hooks)
+            self.assertIn(other, hooks)
+            self.assertNotIn(stale, [h.get("command") for h in hooks])
+
+    def test_abs_path_keeps_absolute_arg0(self):
+        from actx_lib import installer
+
+        with mock.patch("sys.argv", ["/opt/homebrew/bin/actx"]):
+            self.assertEqual(installer.abs_path(), "/opt/homebrew/bin/actx")
+
+    def test_abs_path_relative_with_slash(self):
+        from actx_lib import installer
+
+        with mock.patch("sys.argv", ["bin/actx"]):
+            self.assertEqual(installer.abs_path(), os.path.abspath("bin/actx"))
+
+    def test_claude_uninstall_removes_stale_actx_hook(self):
+        with tempfile.TemporaryDirectory() as home:
+            settings = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings), exist_ok=True)
+            stale = shlex.quote("/opt/homebrew/Cellar/actx/2.2/libexec/actx") + " hook"
+            other = {"type": "command", "command": "echo existing", "timeout": 10}
+            with open(settings, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "Bash",
+                                    "hooks": [
+                                        {"type": "command", "command": stale, "timeout": 10},
+                                        other,
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                    handle,
+                )
+            p = self.run_actx(["init", "--agent", "claude", "--uninstall"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(settings, encoding="utf-8") as handle:
+                data = json.load(handle)
+            hooks = data["hooks"]["PreToolUse"][0]["hooks"]
+            self.assertEqual(hooks, [other])
 
 
 if __name__ == "__main__":
