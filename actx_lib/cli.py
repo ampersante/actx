@@ -7,13 +7,14 @@ VERSION = "actx 2.2.3"
 USAGE = """usage: actx [--raw] [--ultra-compact] [-v|-vv|-vvv] <command> [args...]
 
 commands:
-  git, ls, grep, find, read, smart, tree
+  git, ls, grep, find, wc, head, tail, sort, uniq, read, smart, tree
   pytest, cargo, go, jest, vitest, ruff, tsc, eslint, golangci-lint, next
   pip, uv, npm, pnpm, docker, kubectl, gh, aws
   run [--errors|--failures|--digest] <cmd...>
   gain [--graph|--history|--daily|--breakdown] [--format json]
   discover
   session
+  insights [--days N] [--top N] [--json]
   tracking [on|off|status|clear]
   rewrite "<command>"
   hook
@@ -152,7 +153,7 @@ def main(argv):
             return 1
         return gain.main(args)
 
-    if command in ("discover", "session"):
+    if command in ("discover", "session", "insights"):
         try:
             from actx_lib import insights
         except ImportError:
@@ -160,6 +161,8 @@ def main(argv):
             return 1
         if command == "discover":
             return insights.run_discover(args)
+        if command == "insights":
+            return insights.run_insights(args)
         return insights.run_session(args)
 
     if command == "hook":

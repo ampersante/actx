@@ -179,3 +179,27 @@ def run_find(args, config):
         return 0
     except Exception:
         return runner.raw_fallback(result)
+
+
+def _run_lossless_head(head, args, config):
+    return runner.run_lossless([head] + args, config)
+
+
+def run_wc(args, config):
+    return _run_lossless_head("wc", args, config)
+
+
+def run_head(args, config):
+    return _run_lossless_head("head", args, config)
+
+
+def run_tail(args, config):
+    return _run_lossless_head("tail", args, config)
+
+
+def run_sort(args, config):
+    return _run_lossless_head("sort", args, config)
+
+
+def run_uniq(args, config):
+    return _run_lossless_head("uniq", args, config)

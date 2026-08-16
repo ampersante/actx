@@ -119,5 +119,16 @@ class SystemFilterTests(unittest.TestCase):
         self.assertIn("match line 000", p.stdout)
 
 
+    def test_wc_counts_lines(self):
+        self._write("f.txt", "a\nb\nc\n")
+        raw = self.run_raw("wc", "-l", "f.txt")
+        p = self.run_actx("wc", "-l", "f.txt")
+        self.assertEqual(p.returncode, raw.returncode)
+        self.assertEqual(p.stdout, raw.stdout)
+
+    def test_wc_missing_file_preserves_exit(self):
+        p = self.run_actx("wc", "-l", "missing.txt")
+        self.assertEqual(p.returncode, 1)
+
 if __name__ == "__main__":
     unittest.main()

@@ -44,4 +44,16 @@ def rewrite(command):
         if forbidden.isdisjoint(tokens):
             return "actx " + command
         return None
+    if head in {"wc", "head", "tail", "sort", "uniq"}:
+        if head == "tail" and any(
+            tok == "-f" or tok == "--follow" or tok.startswith("--follow=")
+            for tok in tokens
+        ):
+            return None
+        if head == "sort" and any(
+            tok.startswith("-o") or tok == "--output" or tok.startswith("--output=")
+            for tok in tokens
+        ):
+            return None
+        return "actx " + command
     return None

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -50,18 +51,76 @@ def _truncate_line(line, max_chars):
     return line[:max_chars] + "...(truncated)"
 
 
-def _truncate_lines(text, max_lines, max_line_chars):
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text):
+    if not text:
+        return text
+    return _ANSI_RE.sub("", text)
+
+
+def _collapse_lines(text):
+    """Collapse consecutive identical non-empty lines losslessly."""
     if not text:
         return text
     lines = text.split("\n")
-    truncated = False
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        truncated = True
-    out = [_truncate_line(line, max_line_chars) for line in lines]
-    if truncated:
-        out.append("...(truncated)")
-    return "\n".join(out)
+    had_trailing_newline = lines[-1] == ""
+    if had_trailing_newline:
+        lines = lines[:-1]
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        j = i + 1
+        while j < len(lines) and lines[j] == line:
+            j += 1
+        count = j - i
+        if count > 1 and line != "":
+            out.append("%s  [×%d]" % (line, count))
+        else:
+            out.extend([line] * count)
+        i = j
+    return "\n".join(out) + ("\n" if had_trailing_newline else "")
+
+
+def _lossless_transform(text):
+    return _collapse_lines(_strip_ansi(text))
+
+
+def _cap_lines_explicit(text, max_lines, max_line_chars):
+    """Head+tail with an explicit count marker when the cap is exceeded."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    had_trailing_newline = lines[-1] == ""
+    if had_trailing_newline:
+        lines = lines[:-1]
+    lines = [_truncate_line(line, max_line_chars) for line in lines]
+    if len(lines) <= max_lines:
+        return "\n".join(lines) + ("\n" if had_trailing_newline else "")
+    max_lines = max(1, max_lines)
+    head_count = max_lines // 2
+    tail_count = max_lines - head_count
+    head = lines[:head_count]
+    tail = lines[-tail_count:]
+    omitted = len(lines) - max_lines
+    marker = "...[truncated: %d lines omitted — сузьте команду]" % omitted
+    return (
+        "\n".join(head + [marker] + tail)
+        + ("\n" if had_trailing_newline else "")
+    )
+
+
+def _print_transformed(stdout, stderr):
+    if stdout:
+        sys.stdout.write(stdout)
+        if not stdout.endswith("\n"):
+            sys.stdout.write("\n")
+    if stderr:
+        sys.stderr.write(stderr)
+        if not stderr.endswith("\n"):
+            sys.stderr.write("\n")
 
 
 def _write_tee(cmd, stdout, stderr, exit_code, tee_dir):
@@ -132,6 +191,35 @@ def run_passthrough(cmd):
     return result.returncode
 
 
+def run_lossless(cmd, config):
+    """Execute and apply lossless transforms; fail open on any error."""
+    result = execute(cmd)
+    if result is None:
+        return 1
+    try:
+        truncate = config.get("truncate", {})
+        max_lines = truncate.get("max_lines", 500)
+        max_line_chars = truncate.get("max_line_chars", 300)
+        stdout = _cap_lines_explicit(
+            _lossless_transform(result.stdout), max_lines, max_line_chars
+        )
+        stderr = _cap_lines_explicit(
+            _lossless_transform(result.stderr), max_lines, max_line_chars
+        )
+        _print_transformed(stdout, stderr)
+        raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
+        emitted = _text_bytes(stdout) + _text_bytes(stderr)
+        tracking.record(
+            cmd, cmd[0], raw_bytes, emitted, result.returncode,
+            strategy="lossless",
+        )
+        if tee_decision(config, "auto", result.returncode):
+            write_tee(cmd, result, config)
+        return result.returncode
+    except Exception:
+        return raw_fallback(result)
+
+
 def run(cmd, config):
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -143,34 +231,39 @@ def run(cmd, config):
     max_lines = truncate.get("max_lines", 500)
     max_line_chars = truncate.get("max_line_chars", 300)
 
-    truncated_stdout = _truncate_lines(result.stdout, max_lines, max_line_chars)
-    truncated_stderr = _truncate_lines(result.stderr, max_lines, max_line_chars)
-
+    raw_stdout = result.stdout
     rules = user_filter.load()
     if rules is None:
         rules = []
-    if rules and result.returncode == 0 and truncated_stdout:
+    if rules and result.returncode == 0 and raw_stdout:
         try:
-            truncated_stdout = user_filter.apply(rules, cmd[0], truncated_stdout)
+            raw_stdout = user_filter.apply(rules, cmd[0], raw_stdout)
         except Exception:
             return raw_fallback(result)
 
+    stdout_compacted = _cap_lines_explicit(
+        _lossless_transform(raw_stdout), max_lines, max_line_chars
+    )
+    stderr_compacted = _cap_lines_explicit(
+        _lossless_transform(result.stderr), max_lines, max_line_chars
+    )
+
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
     if result.returncode == 0:
-        if truncated_stdout:
-            print(truncated_stdout, end="")
-        if truncated_stderr:
-            print(truncated_stderr, end="", file=sys.stderr)
-        if result.stdout and not result.stdout.endswith("\n"):
+        if stdout_compacted:
+            print(stdout_compacted, end="")
+        if stderr_compacted:
+            print(stderr_compacted, end="", file=sys.stderr)
+        if stdout_compacted and not stdout_compacted.endswith("\n"):
             print()
-        if result.stderr and not result.stderr.endswith("\n"):
+        if stderr_compacted and not stderr_compacted.endswith("\n"):
             print(file=sys.stderr)
-        emitted = _text_bytes(truncated_stdout) + _text_bytes(truncated_stderr)
+        emitted = _text_bytes(stdout_compacted) + _text_bytes(stderr_compacted)
         emitted += (
-            1 if result.stdout and not result.stdout.endswith("\n") else 0
+            1 if stdout_compacted and not stdout_compacted.endswith("\n") else 0
         )
         emitted += (
-            1 if result.stderr and not result.stderr.endswith("\n") else 0
+            1 if stderr_compacted and not stderr_compacted.endswith("\n") else 0
         )
     else:
         if result.stderr:
@@ -324,7 +417,7 @@ def digest_text(text, n=10):
     head = "\n".join(lines[:n])
     tail = "\n".join(lines[-n:])
     skipped = len(lines) - 2 * n
-    return "%s\n... (%d lines skipped)\n%s" % (head, skipped, tail)
+    return "%s\n... (%d lines skipped — сузьте команду)\n%s" % (head, skipped, tail)
 
 
 def run_digest(cmd, n=10):

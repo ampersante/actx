@@ -75,6 +75,27 @@ class RewriteUnitTests(unittest.TestCase):
     def test_find_print0_rewritten(self):
         self.assertEqual(rewrite("find . -print0"), "actx find . -print0")
 
+    def test_wc_rewritten(self):
+        self.assertEqual(rewrite("wc -l tasks.md"), "actx wc -l tasks.md")
+
+    def test_head_rewritten(self):
+        self.assertEqual(rewrite("head -20 tasks.md"), "actx head -20 tasks.md")
+
+    def test_tail_follow_rejected(self):
+        self.assertIsNone(rewrite("tail -f x"))
+
+    def test_sort_output_rejected(self):
+        self.assertIsNone(rewrite("sort -o out in"))
+
+    def test_uniq_rewritten(self):
+        self.assertEqual(rewrite("uniq -c tasks.md"), "actx uniq -c tasks.md")
+
+    def test_python_script_rejected(self):
+        self.assertIsNone(rewrite("python3 parse.py"))
+
+    def test_python_c_rejected(self):
+        self.assertIsNone(rewrite("python3 -c print(1)"))
+
     def test_unknown_command_rejected(self):
         self.assertIsNone(rewrite("cat README.md"))
 

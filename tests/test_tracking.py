@@ -34,7 +34,7 @@ class TrackingTests(unittest.TestCase):
     def _db_path(self, home):
         return os.path.join(home, ".local", "share", "actx", "history.db")
 
-    def test_schema_has_no_full_command_column(self):
+    def test_schema_has_command_text_and_no_legacy_names(self):
         home = tempfile.TemporaryDirectory()
         os.environ["HOME"] = home.name
         try:
@@ -46,9 +46,44 @@ class TrackingTests(unittest.TestCase):
         conn.close()
         home.cleanup()
         self.assertIn("command_hash", columns)
+        self.assertIn("command_text", columns)
         self.assertNotIn("command", columns)
         self.assertNotIn("full_command", columns)
         self.assertNotIn("args", columns)
+
+    def test_record_stores_command_text(self):
+        home = tempfile.TemporaryDirectory()
+        os.environ["HOME"] = home.name
+        try:
+            tracking.record(["git", "status"], "git", 10, 5, 0)
+        finally:
+            del os.environ["HOME"]
+        conn = sqlite3.connect(self._db_path(home.name))
+        row = conn.execute("SELECT command_text FROM calls").fetchone()
+        conn.close()
+        home.cleanup()
+        self.assertEqual(row[0], "git status")
+
+    def test_insert_without_command_text_uses_default(self):
+        home = tempfile.TemporaryDirectory()
+        os.environ["HOME"] = home.name
+        try:
+            conn = tracking.connect()
+            conn.execute(
+                "INSERT INTO calls (command_hash, category, bytes_before, "
+                "bytes_after, exit_code, timestamp, passthrough, strategy) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("h", "git", 1, 1, 0, 0, 0, ""),
+            )
+            conn.commit()
+            conn.close()
+        finally:
+            del os.environ["HOME"]
+        conn = sqlite3.connect(self._db_path(home.name))
+        row = conn.execute("SELECT command_text FROM calls").fetchone()
+        conn.close()
+        home.cleanup()
+        self.assertEqual(row[0], "")
 
     def test_command_hash_is_reproducible(self):
         home = tempfile.TemporaryDirectory()

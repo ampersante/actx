@@ -57,6 +57,10 @@ def _migrate(conn):
         conn.execute(
             "ALTER TABLE calls ADD COLUMN strategy TEXT NOT NULL DEFAULT ''"
         )
+    if "command_text" not in columns:
+        conn.execute(
+            "ALTER TABLE calls ADD COLUMN command_text TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def connect():
@@ -67,6 +71,7 @@ def connect():
     conn.execute(
         """CREATE TABLE IF NOT EXISTS calls (
             command_hash TEXT NOT NULL,
+            command_text TEXT NOT NULL DEFAULT '',
             category TEXT NOT NULL,
             bytes_before INTEGER NOT NULL,
             bytes_after INTEGER NOT NULL,
@@ -99,11 +104,12 @@ def record(cmd, category, bytes_before, bytes_after, exit_code, passthrough=0, s
         conn = connect()
         try:
             conn.execute(
-                "INSERT INTO calls (command_hash, category, bytes_before, "
-                "bytes_after, exit_code, timestamp, passthrough, strategy) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO calls (command_hash, command_text, category, "
+                "bytes_before, bytes_after, exit_code, timestamp, passthrough, "
+                "strategy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     command_hash,
+                    _join_cmd(cmd)[:4096],
                     category,
                     int(bytes_before),
                     int(bytes_after),

@@ -1,7 +1,9 @@
 import hashlib
+import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 
 from actx_lib import tracking
@@ -10,6 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACTX = os.path.join(ROOT, "actx")
 
 TS1 = 1700000000
+NOW = int(time.time())
 
 
 class InsightsTests(unittest.TestCase):
@@ -46,6 +49,32 @@ class InsightsTests(unittest.TestCase):
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         command_hash,
+                        category,
+                        before,
+                        after,
+                        code,
+                        timestamp,
+                        passthrough,
+                    ),
+                )
+            conn.commit()
+            conn.close()
+        finally:
+            del os.environ["HOME"]
+
+    def seed_with_text(self, rows):
+        os.environ["HOME"] = self.home.name
+        try:
+            conn = tracking.connect()
+            for text, category, before, after, code, timestamp, passthrough in rows:
+                command_hash = hashlib.sha1(text.encode("utf-8")).hexdigest()
+                conn.execute(
+                    "INSERT INTO calls (command_hash, command_text, category, "
+                    "bytes_before, bytes_after, exit_code, timestamp, passthrough) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        command_hash,
+                        text,
                         category,
                         before,
                         after,
@@ -111,6 +140,64 @@ class InsightsTests(unittest.TestCase):
             self.assertEqual(p.returncode, 0)
             self.assertEqual(p.stdout, "")
 
+
+    def test_insights_shows_sections_and_suggestions(self):
+        self.seed_with_text(
+            [
+                ("git status", "git", 100, 50, 0, NOW, 0),
+                ("git status", "git", 100, 50, 0, NOW, 0),
+                ("git status", "git", 100, 50, 0, NOW, 0),
+                ("git log", "git", 2000, 100, 0, NOW, 0),
+                ("pytest x", "pytest", 5000, 500, 1, NOW, 0),
+                ("pytest x", "pytest", 5000, 500, 1, NOW, 0),
+                ("docker ps", "docker", 300, 300, 0, NOW, 1),
+                ("cat f.txt", "cat", 20, 20, 0, NOW, 0),
+                ("cat f.txt", "cat", 20, 20, 0, NOW, 0),
+                ("cat f.txt", "cat", 20, 20, 0, NOW, 0),
+            ]
+        )
+        p = self.run_actx("insights")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("repeated:", p.stdout)
+        self.assertIn("3 calls", p.stdout)
+        self.assertIn("failing:", p.stdout)
+        self.assertIn("2 failures", p.stdout)
+        self.assertIn("passthrough:", p.stdout)
+        self.assertIn("docker ps", p.stdout)
+        self.assertIn("git log без -n", p.stdout)
+        self.assertIn("файл читается 3 раз", p.stdout)
+
+    def test_insights_json_valid(self):
+        self.seed_with_text([("git status", "git", 100, 50, 0, NOW, 0)])
+        p = self.run_actx("insights", "--json")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["repeated"][0]["command"], "git status")
+        self.assertEqual(data["repeated"][0]["calls"], 1)
+
+    def test_insights_old_db_migrates(self):
+        os.environ["HOME"] = self.home.name
+        try:
+            conn = tracking.connect()
+            conn.execute("DROP TABLE IF EXISTS calls")
+            conn.execute(
+                "CREATE TABLE calls ("
+                "command_hash TEXT, category TEXT, bytes_before INTEGER, "
+                "bytes_after INTEGER, exit_code INTEGER, timestamp INTEGER, "
+                "passthrough INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO calls (command_hash, category, bytes_before, "
+                "bytes_after, exit_code, timestamp, passthrough) "
+                "VALUES ('h', 'git', 1, 1, 0, ?, 0)",
+                (TS1,),
+            )
+            conn.commit()
+            conn.close()
+        finally:
+            del os.environ["HOME"]
+        p = self.run_actx("insights")
+        self.assertEqual(p.returncode, 0)
 
 if __name__ == "__main__":
     unittest.main()

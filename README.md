@@ -57,7 +57,7 @@ src/main.py
 
 ## Features
 
-- **Read-only auto-rewrite** — only `git status/diff/log`, `ls`, `grep`, and safe `find` are rewritten automatically. Mutating commands are never auto-rewritten.
+- **Read-only auto-rewrite** — `git status/diff/log`, `ls`, `grep`, safe `find`, and the read-only text utilities `wc`, `head`, `tail`, `sort`, `uniq` are rewritten automatically (`tail -f` and `sort -o` are excluded). Mutating commands are never auto-rewritten.
 - **Exact exit codes** — the original command's exit code is preserved, including `git status` returning `128` outside a repo and `grep` returning `1` for no matches.
 - **Lossless filenames** — `git status`, `ls`, and `find` compress the format, not the names.
 - **Tee for raw recovery** — truncated or failed output is saved to `~/.local/share/actx/tee` as JSON; `git diff` always saves, because its compression is lossy.
@@ -171,12 +171,15 @@ actx --help
 | `actx ls [path]` | Directories first, then files, grouped by path |
 | `actx grep [args] <pattern> [path...]` | Groups matches by file, truncates long lines |
 | `actx find [args]` | Groups paths by directory |
+| `actx wc/head/tail/sort/uniq [args]` | Read-only passthrough with lossless repeated-line collapse |
 | `actx read <file> [--level minimal]` | Strips full-line comments for known extensions |
-| `actx run <cmd...>` | Generic wrapper: truncate lines/chars, tee on failure |
+| `actx run <cmd...>` | Generic wrapper: lossless collapse, explicit truncation marker, tee on failure |
+| `actx run --digest <cmd...>` | Head+tail with skipped-line count; use for large `python3` output |
 | `actx gain` | Savings summary: calls, bytes/≈tokens, %, top categories and strategies |
 | `actx gain --breakdown` | Savings composition by compression strategy |
 | `actx discover` | Candidates for new filters (frequent passthrough commands) |
 | `actx session` | Adoption across sessions |
+| `actx insights [--days N] [--top N] [--json]` | Orchestration analytics: repeats, failures, passthrough, suggestions |
 | `actx tracking on\|off\|status\|clear` | Enable/disable/inspect/clear local analytics |
 | `actx git add/commit/push/pull/branch` | Manual mutating commands; success prints a tiny confirmation |
 | `actx --raw <command>` | Bypass filtering, print output verbatim |
@@ -194,8 +197,12 @@ actx grep "TODO" src/
 actx find . -name "*.py"
 actx read main.py --level minimal
 actx run pytest tests/
+actx run --digest python3 parse_data.py   # large parsing output: head+tail
+actx insights --json        # orchestration analytics as JSON
 actx --raw git status      # full original output
 ```
+
+`python3` is never auto-rewritten (arbitrary code, not provably read-only). For large `python3` parsing output, use `actx run --digest python3 ...`; the script itself should print compact structured output where possible.
 
 ## How it works
 
@@ -278,6 +285,9 @@ Views:
 - `actx gain --breakdown` — full composition by strategy.
 - `actx gain --graph|--history|--daily` and `--format json`.
 - `actx discover` / `actx session`.
+- `actx insights [--days N] [--top N] [--json]` — orchestration analytics: repeated calls, failures, passthrough candidates, and conservative suggestions.
+
+The history database stores the local command text (`command_text`, capped at 4096 chars) while the tool is personal; it is planned to shrink back to `sha1` only after learning from the data. See `journal.md`.
 
 Control:
 
