@@ -10,7 +10,7 @@ Pre-dev: hard rules now; stack-specific idioms marked "refine with code".
 4. **Exit code passthrough.** Return the original command's exit code exactly; actx internal errors use exit 1. Source: `PRD.md` §10.2, §5.
 5. **Filter exceptions → raw passthrough.** Any filter error prints raw stdout+stderr and keeps the exit code. Source: `PRD.md` §8 common rules.
 6. **No project configs.** Only `~/.config/actx/config.json`; all paths via `os.path.expanduser` with `$HOME`. Source: `PRD.md` §9, §11.5.
-7. **`actx init` merges, never overwrites.** JSON merge / section append; dedupe by exact `command` string or `## Output compression (actx)` header. Source: `PRD.md` §6.4.
+7. **`actx init` merges, never overwrites whole files.** JSON merge; Tier-2 instruction section appends, or replaces in place when the body differs (keyed by `## Output compression (actx)`). Dedupe hooks by exact `command` string. Source: `PRD.md` §6.4.
 
 ## General Practices
 
@@ -58,6 +58,6 @@ Pre-dev: hard rules now; stack-specific idioms marked "refine with code".
 
 - No `shell=True`, `os.system`, `os.popen`, `eval`, `exec`.
 - No pytest/toml/rich/click/typer; no pip/brew installs.
-- No auto-rewriting mutating commands; no rewrite logic in adapters.
+- No auto-rewrite outside the §7 allow-list (no `python3`/`aws`, no lexer/compounds); no rewrite logic in adapters.
 - No project configs; no overwriting user config files wholly.
 - No network calls; no telemetry.

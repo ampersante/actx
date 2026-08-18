@@ -1,6 +1,6 @@
 # Architecture — actx
 
-Target snapshot; code not started (pre-dev). Product source of truth: `PRD.md`.
+Living snapshot (v2.3.0). Product source of truth: `PRD.md`.
 
 ## System Overview
 
@@ -26,7 +26,9 @@ agent Bash call → adapter → actx (rewrite) → agent executes
 no shell) → filter → print compact / tee → original exit code
 ```
 
-Six-phase lifecycle (borrowed from RTK): parse → route → execute → filter → print → track (track omitted in v1).
+Six-phase lifecycle (borrowed from RTK): parse → route → execute → filter → print → track.
+
+Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); metachar/write-flag rejects; no lexer; no `python3`/`aws` auto-rewrite.
 
 ## Components
 
@@ -47,7 +49,7 @@ Six-phase lifecycle (borrowed from RTK): parse → route → execute → filter 
 
 1. **Tier 1 rewrite (Claude/Codex)**: PreToolUse JSON hook → `actx hook` → `updatedInput` with rewritten command → agent executes.
 2. **Tier 1 rewrite (OpenCode)**: TS plugin `tool.execute.before` mutates `output.args.command` via `execFileSync(ACTX, ["rewrite", cmd])`.
-3. **Tier 2 (Grok/Cursor/Cline/Windsurf/Aider)**: instruction appended to agent rules (`PRD.md` §6.3); agent prefixes read-only commands manually; adoption ~70–85% (estimate).
+3. **Tier 2 (Grok/Cursor/Cline/Windsurf/Aider)**: instruction section in agent rules (`PRD.md` §6.3; replace-in-place on reinit when body differs); agent prefixes supported commands manually; adoption ~70–85% (estimate).
 4. **CLI**: `actx <cmd>` executes, filters, prints compact output, tee on failure/always (git diff), preserves exit code.
 
 ## Data Model

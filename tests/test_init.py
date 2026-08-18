@@ -7,23 +7,21 @@ import tempfile
 import unittest
 from unittest import mock
 
+from actx_lib.installer import INSTRUCTION_SECTION
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACTX = os.path.realpath(os.path.join(ROOT, "actx"))
 
-INSTRUCTION_SECTION = """## Output compression (actx)
+AIDER_READ = "~/.config/actx/instructions.md"
+
+_STALE_SECTION = """## Output compression (actx)
 
 To reduce context noise, prefix read-only commands with `actx`:
 - `git status` → `actx git status`
-- `git diff` → `actx git diff`
-- `git log` → `actx git log`
 - `ls` → `actx ls`
-- `grep` → `actx grep`
-- `find` → `actx find`
 
 Mutating commands run normally. For full output, run the command without `actx` or use `actx --raw <command>`.
 """
-
-AIDER_READ = "~/.config/actx/instructions.md"
 
 
 class InitTests(unittest.TestCase):
@@ -176,6 +174,26 @@ class InitTests(unittest.TestCase):
                     with open(path, encoding="utf-8") as handle:
                         content = handle.read()
                     self.assertNotIn("## Output compression (actx)", content)
+
+    def test_tier2_replaces_stale_section(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, ".grok", "rules", "actx.md")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("Other rules\n\n" + _STALE_SECTION + "\n")
+            p = self.run_actx(["init", "--agent", "grok"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(path, encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertIn("Other rules", content)
+            self.assertIn(INSTRUCTION_SECTION, content)
+            self.assertNotIn("prefix read-only commands", content)
+            self.assertEqual(content.count("## Output compression (actx)"), 1)
+            p = self.run_actx(["init", "--agent", "grok"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(path, encoding="utf-8") as handle:
+                again = handle.read()
+            self.assertEqual(again, content)
 
     def test_aider_scalar_other_becomes_list(self):
         with tempfile.TemporaryDirectory() as home:

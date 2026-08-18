@@ -21,6 +21,8 @@ REGISTRY = {
     "tail": system_filter.run_tail,
     "sort": system_filter.run_sort,
     "uniq": system_filter.run_uniq,
+    "rg": system_filter.run_rg,
+    "cat": system_filter.run_cat,
     "read": read_filter.run,
     "smart": smart_filter.run,
     "tree": tree_filter.run,

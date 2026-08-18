@@ -96,6 +96,33 @@ class PackageParserTests(unittest.TestCase):
         self.assertNotIn("Legend:", out)
         self.assertNotIn("project@1.0.0", out)
 
+    def test_npm_install_drops_noise(self):
+        raw = "\n".join([
+            "npm warn deprecated foo@1.0.0",
+            "added 10 packages in 2s",
+            "npm notice",
+            "ERR! code ERESOLVE",
+            "up to date in 1s",
+        ])
+        out = package_filter.compact_npm_install(raw)
+        self.assertIn("ERR! code ERESOLVE", out)
+        self.assertIn("up to date in 1s", out)
+        self.assertNotIn("npm warn", out)
+        self.assertNotIn("added 10", out)
+
+    def test_pip_install_keeps_summary(self):
+        raw = "\n".join([
+            "Collecting requests",
+            "Downloading requests-2.31.0.whl",
+            "Installing collected packages: requests",
+            "Successfully installed requests-2.31.0",
+        ])
+        out = package_filter.compact_pip_install(raw)
+        self.assertIn("Installing collected packages: requests", out)
+        self.assertIn("Successfully installed requests-2.31.0", out)
+        self.assertNotIn("Collecting", out)
+        self.assertNotIn("Downloading", out)
+
 
 class PackageExitCodeTests(unittest.TestCase):
     def test_pip_preserves_exit_code(self):

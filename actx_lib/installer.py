@@ -26,15 +26,17 @@ AGENTS = (
 
 INSTRUCTION_SECTION = """## Output compression (actx)
 
-To reduce context noise, prefix read-only commands with `actx`:
+To reduce context noise, prefix supported shell commands with `actx`:
 - `git status` → `actx git status`
 - `git diff` → `actx git diff`
 - `git log` → `actx git log`
-- `ls` → `actx ls`
-- `grep` → `actx grep`
-- `find` → `actx find`
+- `git show` / `git blame` → `actx git show` / `actx git blame`
+- `ls` / `ls -la` → `actx ls` / `actx ls -la`
+- `grep` / `rg` → `actx grep` / `actx rg`
+- `find` / `cat` / `tree` → `actx find` / `actx cat` / `actx tree`
+- `pytest` / `ruff` / `docker ps` / `gh pr list` → `actx <cmd>`
 
-Mutating commands run normally. For full output, run the command without `actx` or use `actx --raw <command>`.
+Hook/plugin agents rewrite automatically when installed. For full output, run without `actx` or use `actx --raw <command>`.
 """
 
 _SECTION_HEADER = "## Output compression (actx)"
@@ -449,28 +451,58 @@ def _contains_section(text):
     return _SECTION_HEADER in text
 
 
+def _section_span(lines):
+    """Return (start, end) indices of the actx section, or None.
+
+    Section runs from its header through the line before the next Markdown
+    ``## `` heading (or EOF). Internal blank lines are allowed.
+    """
+    start = None
+    for index, line in enumerate(lines):
+        if line.startswith(_SECTION_HEADER):
+            start = index
+            break
+    if start is None:
+        return None
+    end = start + 1
+    while end < len(lines):
+        if lines[end].startswith("## ") and not lines[end].startswith(_SECTION_HEADER):
+            break
+        end += 1
+    return start, end
+
+
 def _strip_section(text):
-    """Remove the actx instruction section (header through blank line)."""
+    """Remove the actx instruction section (header through next heading/EOF)."""
     lines = text.split("\n")
-    out = []
-    i = 0
-    while i < len(lines):
-        if lines[i].startswith(_SECTION_HEADER):
-            i += 1
-            while i < len(lines) and lines[i].strip() != "":
-                i += 1
-            while i < len(lines) and lines[i].strip() == "":
-                i += 1
-            continue
-        out.append(lines[i])
-        i += 1
+    span = _section_span(lines)
+    if span is None:
+        return text
+    start, end = span
+    while end < len(lines) and lines[end].strip() == "":
+        end += 1
+    out = lines[:start] + lines[end:]
     return "\n".join(out)
 
 
+def _section_body(text):
+    """Return the actx instruction section text (rstrip), or None."""
+    lines = text.split("\n")
+    span = _section_span(lines)
+    if span is None:
+        return None
+    start, end = span
+    return "\n".join(lines[start:end]).rstrip("\n")
+
+
 def _append_section(text):
-    """Return text with the Tier-2 instruction section appended once."""
-    if _contains_section(text):
+    """Return text with the current Tier-2 instruction section (append or replace)."""
+    desired = INSTRUCTION_SECTION.rstrip("\n")
+    existing = _section_body(text)
+    if existing == desired:
         return text
+    if existing is not None:
+        text = _strip_section(text)
     result = text.rstrip("\n")
     if result:
         result += "\n\n"
@@ -479,7 +511,9 @@ def _append_section(text):
 
 def _install_instructions(path):
     text = _read_instructions(path)
-    if _contains_section(text):
+    desired = INSTRUCTION_SECTION.rstrip("\n")
+    existing = _section_body(text)
+    if existing == desired:
         return False
     _write_instructions(path, _append_section(text))
     return True

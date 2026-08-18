@@ -2,7 +2,7 @@
 
 **Context compression for AI-agent shell commands.**
 
-`actx` is a small, dependency-free CLI that compresses the output of read-only shell commands before it reaches an AI agent — fewer tokens, shorter context windows, cheaper and more focused agent sessions.
+`actx` is a small, dependency-free CLI that compresses the output of supported shell commands before it reaches an AI agent — fewer tokens, shorter context windows, cheaper and more focused agent sessions.
 
 ```text
 $ git status        →   $ actx git status
@@ -16,7 +16,7 @@ $ git status        →   $ actx git status
 
 ## Why
 
-AI agents run `git status`, `git diff`, `grep`, `find`, `ls` and then read their full output. Most of that output is noise: progress bars, repeated lines, boilerplate. `actx` sits between the agent and the shell, rewrites read-only commands through itself, and returns a compact, structured summary — while keeping the original exit code and a recoverable raw copy.
+AI agents run `git status`, `git diff`, `grep`, `find`, `ls`, tests, and installers, then read their full output. Most of that output is noise: progress bars, repeated lines, boilerplate. `actx` sits between the agent and the shell, rewrites supported commands through itself, and returns a compact, structured summary — while keeping the original exit code and a recoverable raw copy.
 
 ## Demo
 
@@ -57,7 +57,7 @@ src/main.py
 
 ## Features
 
-- **Read-only auto-rewrite** — `git status/diff/log`, `ls`, `grep`, safe `find`, and the read-only text utilities `wc`, `head`, `tail`, `sort`, `uniq` are rewritten automatically (`tail -f` and `sort -o` are excluded). Mutating commands are never auto-rewritten.
+- **Auto-rewrite (observational + narrow mutators)** — observational CLI (`git` RO, `ls`/`grep`/`find`/`wc`/…, test runners, linters without write flags, `docker`/`kubectl`/`gh` RO, …) plus a narrow mutator allow-list (`git add|commit|push|pull|fetch`, `npm|pnpm install|ci`, `pip install`, `uv pip install`). Safety is metachar/exec/fail-open/write-flag rejects (`--fix`, `ruff format`, …), not “read-only only”. No lexer; no `python3`/`aws` auto-rewrite.
 - **Exact exit codes** — the original command's exit code is preserved, including `git status` returning `128` outside a repo and `grep` returning `1` for no matches.
 - **Lossless filenames** — `git status`, `ls`, and `find` compress the format, not the names.
 - **Tee for raw recovery** — truncated or failed output is saved to `~/.local/share/actx/tee` as JSON; `git diff` always saves, because its compression is lossy.
@@ -181,7 +181,8 @@ actx --help
 | `actx session` | Adoption across sessions |
 | `actx insights [--days N] [--top N] [--json]` | Orchestration analytics: repeats, failures, passthrough, suggestions |
 | `actx tracking on\|off\|status\|clear` | Enable/disable/inspect/clear local analytics |
-| `actx git add/commit/push/pull/branch` | Manual mutating commands; success prints a tiny confirmation |
+| `actx git add/commit/push/pull/fetch` | Narrow mutators (auto-rewritable); success prints a tiny confirmation |
+| `actx git branch [RO flags]` | Branch list / show-current (RO flags only) |
 | `actx --raw <command>` | Bypass filtering, print output verbatim |
 | `ACTX_BYPASS=1 actx <command>` | Run the command raw (no filter, no tee) |
 
@@ -222,7 +223,7 @@ actx CLI: parse → route → execute (exec-array) → filter → print → tee
 compact output + original exit code
 ```
 
-One rewriter is the single source of truth for every adapter. It only rewrites simple, read-only commands and returns the original command string verbatim with an `actx ` prefix — never rebuilt from tokens.
+One rewriter is the single source of truth for every adapter. It rewrites simple allow-listed commands (no compounds/lexer) and returns the original command string verbatim with an `actx ` prefix — never rebuilt from tokens.
 
 ## Agent integration
 
@@ -302,7 +303,7 @@ Error/exception paths are not recorded (they produce no savings); `tree` is not 
 ## Safety
 
 - No `shell=True`, `os.system`, `eval`, or `exec` anywhere — every subprocess is an exec-array.
-- Only read-only commands are auto-rewritten; the rewriter rejects shell metacharacters, pipes, redirects, and command substitution.
+- Auto-rewrite follows the §7 allow-list; the rewriter rejects shell metacharacters, pipes, redirects, command substitution, and write flags (`--fix`, `format`, …).
 - No project configs are read; adapters write only to global user files.
 - No network calls, accounts, or telemetry.
 
@@ -319,7 +320,8 @@ The suite covers the rewriter security boundary, hook E2E, all filters, adapter 
 ## Non-goals
 
 - Windows
-- Mutating-command auto-rewrite
+- Lexer / compound-command rewrite; `python3` or `aws` auto-rewrite
+- Broad mutator auto-rewrite beyond the narrow allow-list
 - Remote telemetry
 
 ## Releasing

@@ -21,8 +21,8 @@ class RewriteUnitTests(unittest.TestCase):
     def test_git_alone_rejected(self):
         self.assertIsNone(rewrite("git"))
 
-    def test_mutating_git_rejected(self):
-        self.assertIsNone(rewrite("git add ."))
+    def test_git_rm_still_rejected(self):
+        self.assertIsNone(rewrite("git rm file"))
 
     def test_git_output_flag_rejected(self):
         self.assertIsNone(rewrite("git diff --output=x"))
@@ -48,8 +48,11 @@ class RewriteUnitTests(unittest.TestCase):
     def test_ls_path_rewritten(self):
         self.assertEqual(rewrite("ls src"), "actx ls src")
 
-    def test_ls_flag_rejected(self):
-        self.assertIsNone(rewrite("ls -la"))
+    def test_ls_la_rewritten(self):
+        self.assertEqual(rewrite("ls -la"), "actx ls -la")
+
+    def test_ls_color_rejected(self):
+        self.assertIsNone(rewrite("ls --color"))
 
     def test_ls_empty_arg_rejected(self):
         self.assertIsNone(rewrite('ls ""'))
@@ -68,6 +71,60 @@ class RewriteUnitTests(unittest.TestCase):
 
     def test_find_exec_rejected(self):
         self.assertIsNone(rewrite("find . -exec rm {} \\;"))
+
+    def test_git_show_rewritten(self):
+        self.assertEqual(rewrite("git show HEAD"), "actx git show HEAD")
+
+    def test_git_blame_rewritten(self):
+        self.assertEqual(rewrite("git blame file"), "actx git blame file")
+
+    def test_git_branch_ro_rewritten(self):
+        self.assertEqual(rewrite("git branch -a"), "actx git branch -a")
+
+    def test_git_branch_delete_rejected(self):
+        self.assertIsNone(rewrite("git branch -d x"))
+
+    def test_git_add_rewritten(self):
+        self.assertEqual(rewrite("git add ."), "actx git add .")
+
+    def test_rg_rewritten(self):
+        self.assertEqual(rewrite("rg foo"), "actx rg foo")
+
+    def test_cat_rewritten(self):
+        self.assertEqual(rewrite("cat README.md"), "actx cat README.md")
+
+    def test_tree_rewritten(self):
+        self.assertEqual(rewrite("tree"), "actx tree")
+
+    def test_gh_pr_rewritten(self):
+        self.assertEqual(rewrite("gh pr list"), "actx gh pr list")
+
+    def test_pytest_rewritten(self):
+        self.assertEqual(rewrite("pytest -q"), "actx pytest -q")
+
+    def test_ruff_fix_rejected(self):
+        self.assertIsNone(rewrite("ruff check --fix"))
+
+    def test_ruff_format_rejected(self):
+        self.assertIsNone(rewrite("ruff format ."))
+
+    def test_docker_ps_rewritten(self):
+        self.assertEqual(rewrite("docker ps"), "actx docker ps")
+
+    def test_docker_run_rejected(self):
+        self.assertIsNone(rewrite("docker run x"))
+
+    def test_kubectl_apply_rejected(self):
+        self.assertIsNone(rewrite("kubectl apply -f f"))
+
+    def test_pip_install_rewritten(self):
+        self.assertEqual(rewrite("pip install x"), "actx pip install x")
+
+    def test_npm_install_rewritten(self):
+        self.assertEqual(rewrite("npm install"), "actx npm install")
+
+    def test_aws_rejected(self):
+        self.assertIsNone(rewrite("aws s3 ls"))
 
     def test_find_fprint_rejected(self):
         self.assertIsNone(rewrite("find . -fprint out.txt"))
@@ -97,7 +154,7 @@ class RewriteUnitTests(unittest.TestCase):
         self.assertIsNone(rewrite("python3 -c print(1)"))
 
     def test_unknown_command_rejected(self):
-        self.assertIsNone(rewrite("cat README.md"))
+        self.assertIsNone(rewrite("echo hi"))
 
     def test_empty_rejected(self):
         self.assertIsNone(rewrite(""))

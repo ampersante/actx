@@ -2,12 +2,12 @@ import sys
 
 import actx_lib.rewriter as rewriter
 
-VERSION = "actx 2.2.4"
+VERSION = "actx 2.3.0"
 
 USAGE = """usage: actx [--raw] [--ultra-compact] [-v|-vv|-vvv] <command> [args...]
 
 commands:
-  git, ls, grep, find, wc, head, tail, sort, uniq, read, smart, tree
+  git, ls, grep, find, wc, head, tail, sort, uniq, rg, cat, read, smart, tree
   pytest, cargo, go, jest, vitest, ruff, tsc, eslint, golangci-lint, next
   pip, uv, npm, pnpm, docker, kubectl, gh, aws
   run [--errors|--failures|--digest] <cmd...>

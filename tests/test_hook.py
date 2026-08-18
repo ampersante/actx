@@ -56,6 +56,41 @@ class HookCliTests(unittest.TestCase):
             "actx ls",
         )
 
+    def test_ls_la_rewritten(self):
+        p = self.run_hook(hook_input("Bash", {"command": "ls -la"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(
+            data["hookSpecificOutput"]["updatedInput"]["command"],
+            "actx ls -la",
+        )
+        self.assertEqual(
+            data["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+
+    def test_git_show_rewritten(self):
+        p = self.run_hook(hook_input("Bash", {"command": "git show HEAD"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(
+            data["hookSpecificOutput"]["updatedInput"]["command"],
+            "actx git show HEAD",
+        )
+
+    def test_pytest_rewritten(self):
+        p = self.run_hook(hook_input("Bash", {"command": "pytest -q"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(
+            data["hookSpecificOutput"]["updatedInput"]["command"],
+            "actx pytest -q",
+        )
+
+    def test_kubectl_apply_not_rewritten(self):
+        p = self.run_hook(hook_input("Bash", {"command": "kubectl apply -f f"}))
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, "")
+
     def test_mutating_compound_empty(self):
         p = self.run_hook(hook_input("Bash", {"command": "git status && rm x"}))
         self.assertEqual(p.returncode, 0)

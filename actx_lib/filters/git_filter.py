@@ -1,6 +1,7 @@
 import sys
 
 from actx_lib import runner
+from actx_lib.rewriter import BRANCH_READ_ONLY
 
 _DIFF_PASSTHROUGH = {
     "--stat", "--numstat", "--name-only", "--name-status",
@@ -10,11 +11,6 @@ _DIFF_PASSTHROUGH = {
 _LOG_PASSTHROUGH = {
     "-p", "--stat", "--graph", "--numstat", "--name-only",
     "--name-status", "--format", "--pretty",
-}
-
-_BRANCH_READ_ONLY = {
-    "-a", "-r", "-l", "--list", "--show-current",
-    "-v", "--verbose", "-vv", "--no-color",
 }
 
 
@@ -195,7 +191,7 @@ def _log(rest, config):
 
 
 def _branch(rest, config):
-    if not rest or all(arg in _BRANCH_READ_ONLY for arg in rest):
+    if not rest or all(arg in BRANCH_READ_ONLY for arg in rest):
         return runner.run_passthrough(["git", "branch"] + rest)
     cmd = ["git", "branch"] + rest
     result = runner.execute(cmd)
@@ -233,6 +229,21 @@ def _mutating(sub, rest, config):
         return runner.raw_fallback(result)
 
 
+def _show_or_blame(sub, rest, config):
+    cmd = ["git", sub] + rest
+    return runner.run_lossless(cmd, config, strategy="git.%s" % sub)
+
+
+def _rev_parse(rest, config):
+    return runner.run_passthrough(["git", "rev-parse"] + rest)
+
+
+def _stash(rest, config):
+    if rest and rest[0] == "list":
+        return runner.run_lossless(["git", "stash"] + rest, config, strategy="git.stash")
+    return runner.run_passthrough(["git", "stash"] + rest)
+
+
 def run(args, config):
     if not args:
         return runner.run_passthrough(["git"])
@@ -246,6 +257,12 @@ def run(args, config):
         return _log(rest, config)
     if sub == "branch":
         return _branch(rest, config)
-    if sub in {"add", "commit", "push", "pull"}:
+    if sub in {"show", "blame"}:
+        return _show_or_blame(sub, rest, config)
+    if sub == "rev-parse":
+        return _rev_parse(rest, config)
+    if sub == "stash":
+        return _stash(rest, config)
+    if sub in {"add", "commit", "push", "pull", "fetch"}:
         return _mutating(sub, rest, config)
     return runner.run_passthrough(["git"] + args)

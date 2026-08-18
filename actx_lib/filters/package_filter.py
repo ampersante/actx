@@ -86,23 +86,88 @@ def compact_pnpm_list(text):
     return "\n".join(out)
 
 
+_NPM_NOISE_PREFIXES = (
+    "npm warn ",
+    "npm notice ",
+    "added ",
+    "removed ",
+    "changed ",
+    "audited ",
+    "funding ",
+    "run `npm ",
+)
+
+
+def compact_npm_install(text):
+    kept = []
+    summary = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if any(lower.startswith(prefix) for prefix in _NPM_NOISE_PREFIXES):
+            continue
+        if stripped.startswith("up to date") or "packages in" in lower:
+            summary.append(stripped)
+            continue
+        if lower.startswith("error") or lower.startswith("err!"):
+            kept.append(line)
+            continue
+        kept.append(line)
+    parts = kept + summary
+    return "\n".join(parts)
+
+
+def compact_pip_install(text):
+    out = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("Collecting ", "Downloading ", "Using cached ", "Requirement already")):
+            continue
+        if stripped.startswith("Installing collected packages:"):
+            out.append(stripped)
+            continue
+        if stripped.startswith(("Successfully installed", "ERROR", "error:")):
+            out.append(stripped)
+            continue
+        if set(stripped) <= {"-", " ", "="}:
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 def run_pip(args, config):
+    if args and args[0] == "install":
+        return _run_compact(["pip"] + args, config, compact_pip_install)
     return _run_compact(["pip"] + args, config, compact_pip)
 
 
 def run_uv(args, config):
-    if not args or args[0] != "run":
-        return runner.run_passthrough(["uv"] + args)
-    return _run_compact(["uv"] + args, config, compact_uv_run)
+    if args and args[0] == "run":
+        return _run_compact(["uv"] + args, config, compact_uv_run)
+    if args and args[0] == "pip" and len(args) >= 2 and args[1] == "install":
+        return _run_compact(["uv"] + args, config, compact_uv_run)
+    return runner.run_passthrough(["uv"] + args)
 
 
 def run_npm(args, config):
-    if not args or args[0] != "list":
+    if not args:
         return runner.run_passthrough(["npm"] + args)
-    return _run_compact(["npm"] + args, config, compact_npm_list)
+    if args[0] == "list":
+        return _run_compact(["npm"] + args, config, compact_npm_list)
+    if args[0] in ("install", "ci"):
+        return _run_compact(["npm"] + args, config, compact_npm_install)
+    return runner.run_passthrough(["npm"] + args)
 
 
 def run_pnpm(args, config):
-    if not args or args[0] != "list":
+    if not args:
         return runner.run_passthrough(["pnpm"] + args)
-    return _run_compact(["pnpm"] + args, config, compact_pnpm_list)
+    if args[0] == "list":
+        return _run_compact(["pnpm"] + args, config, compact_pnpm_list)
+    if args[0] in ("install", "ci"):
+        return _run_compact(["pnpm"] + args, config, compact_npm_install)
+    return runner.run_passthrough(["pnpm"] + args)

@@ -26,8 +26,21 @@ def _clip(text, limit):
     return text[:limit]
 
 
+_LS_FLAGS = {
+    "-l", "-a", "-la", "-al", "-lh", "-lah", "-ahl", "-hal", "-hla", "-alh",
+    "-1", "-F",
+}
+
+
 def run_ls(args, config):
-    if any(arg.startswith("-") for arg in args) or len(args) > 1:
+    if any(arg.startswith("-") for arg in args):
+        if all(
+            (arg in _LS_FLAGS) or (not arg.startswith("-"))
+            for arg in args
+        ) and sum(1 for arg in args if not arg.startswith("-")) <= 1:
+            return runner.run_lossless(["ls"] + args, config, strategy="ls")
+        return runner.run_passthrough(["ls"] + args)
+    if len(args) > 1:
         return runner.run_passthrough(["ls"] + args)
     cmd = ["ls", "-1"] + args
     result = runner.execute(cmd)
@@ -203,3 +216,11 @@ def run_sort(args, config):
 
 def run_uniq(args, config):
     return _run_lossless_head("uniq", args, config)
+
+
+def run_rg(args, config):
+    return runner.run_lossless(["rg"] + args, config, strategy="rg")
+
+
+def run_cat(args, config):
+    return runner.run_lossless(["cat"] + args, config, strategy="cat")

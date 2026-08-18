@@ -191,7 +191,7 @@ def run_passthrough(cmd):
     return result.returncode
 
 
-def run_lossless(cmd, config):
+def run_lossless(cmd, config, strategy="lossless"):
     """Execute and apply lossless transforms; fail open on any error."""
     result = execute(cmd)
     if result is None:
@@ -211,7 +211,7 @@ def run_lossless(cmd, config):
         emitted = _text_bytes(stdout) + _text_bytes(stderr)
         tracking.record(
             cmd, cmd[0], raw_bytes, emitted, result.returncode,
-            strategy="lossless",
+            strategy=strategy,
         )
         if tee_decision(config, "auto", result.returncode):
             write_tee(cmd, result, config)
