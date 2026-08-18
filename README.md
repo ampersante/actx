@@ -93,8 +93,8 @@ After installation, restart the agent.
 ### Via curl (release tarball)
 
 ```bash
-curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.2.tar.gz | tar xz
-cd actx-2.2
+curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.3.0.tar.gz | tar xz
+cd actx-2.3.0
 bash install.sh
 ```
 
