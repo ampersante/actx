@@ -68,7 +68,13 @@ class LazyImportTests(unittest.TestCase):
     def test_hook_path_imports_only_allowed(self):
         self.assertEqual(
             self.run_path(["hook"], stdin_text=HOOK_JSON),
-            {"actx_lib", "actx_lib.cli", "actx_lib.rewriter", "actx_lib.hook"},
+            {
+                "actx_lib",
+                "actx_lib.cli",
+                "actx_lib.rewriter",
+                "actx_lib.hook",
+                "actx_lib.security_gate",
+            },
         )
 
 

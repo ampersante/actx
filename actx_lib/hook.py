@@ -2,6 +2,7 @@ import json
 import sys
 
 import actx_lib.rewriter as rewriter
+import actx_lib.security_gate as security_gate
 
 ALLOWED_TOOLS = {"Bash", "bash", "Shell"}
 
@@ -34,8 +35,47 @@ def process(text):
         print("actx hook: command is missing or not a string", file=sys.stderr)
         return None
 
-    rewritten = rewriter.rewrite(command)
+    # 1. Evaluate Security Gatekeeper policies
+    try:
+        sec_res = security_gate.evaluate_security(command)
+    except Exception:
+        # Fail-open guarantee: defer to native harness permissions on gate error
+        return None
+
+    if sec_res is not None:
+        if sec_res.decision == "deny":
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        f"actx security gate violation [{sec_res.category}]: {sec_res.reason}"
+                        if sec_res.category
+                        else f"actx security gate violation: {sec_res.reason}"
+                    ),
+                }
+            }
+
+        if sec_res.decision == "ask":
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                    "permissionDecisionReason": (
+                        f"actx security gate confirmation required: {sec_res.reason}"
+                    ),
+                }
+            }
+
+    # 2. Output compression rewrite (for safe/allowed commands)
+    try:
+        rewritten = rewriter.rewrite(command)
+    except Exception:
+        rewritten = None
+
     if rewritten is None:
+        # Clean/safe command without compression -> strictly return None
+        # to defer to the agent harness's native permission policy
         return None
 
     updated_input = dict(tool_input)

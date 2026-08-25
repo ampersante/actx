@@ -86,13 +86,41 @@ class HookCliTests(unittest.TestCase):
             "actx pytest -q",
         )
 
-    def test_kubectl_apply_not_rewritten(self):
+    def test_security_gate_denies_sensitive_file_read(self):
+        p = self.run_hook(hook_input("Bash", {"command": "cat ~/.ssh/id_rsa"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("T1_CREDENTIAL_ACCESS", output["permissionDecisionReason"])
+
+    def test_security_gate_denies_destructive_mutation(self):
+        p = self.run_hook(hook_input("Bash", {"command": "rm -rf /"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("T4_DESTRUCTIVE_MUTATION", output["permissionDecisionReason"])
+
+    def test_security_gate_asks_on_force_push(self):
+        p = self.run_hook(hook_input("Bash", {"command": "git push --force origin master"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertEqual(output["permissionDecision"], "ask")
+        self.assertIn("confirmation required", output["permissionDecisionReason"])
+
+    def test_safe_uncompressed_command_returns_empty_deferral(self):
+        # kubectl apply is safe (not denied), but not rewritable -> strictly returns None (empty stdout)
         p = self.run_hook(hook_input("Bash", {"command": "kubectl apply -f f"}))
         self.assertEqual(p.returncode, 0)
         self.assertEqual(p.stdout, "")
 
     def test_mutating_compound_empty(self):
-        p = self.run_hook(hook_input("Bash", {"command": "git status && rm x"}))
+        p = self.run_hook(hook_input("Bash", {"command": "git status && echo done"}))
         self.assertEqual(p.returncode, 0)
         self.assertEqual(p.stdout, "")
 
@@ -131,8 +159,8 @@ class HookCliTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         self.assertEqual(p.stdout, "")
 
-    def test_unknown_command_empty(self):
-        p = self.run_hook(hook_input("Bash", {"command": "rm -rf /"}))
+    def test_unknown_safe_command_empty(self):
+        p = self.run_hook(hook_input("Bash", {"command": "custom_script_safe.sh --foo"}))
         self.assertEqual(p.returncode, 0)
         self.assertEqual(p.stdout, "")
 

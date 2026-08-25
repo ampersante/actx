@@ -1,6 +1,6 @@
 # Architecture — actx
 
-Living snapshot (v2.3.0). Product source of truth: `PRD.md`.
+Living snapshot (v2.4.0). Product source of truth: `PRD.md`.
 
 ## System Overview
 
@@ -35,10 +35,11 @@ Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); m
 | Layer | Tech | Role |
 |---|---|---|
 | `actx` | Python 3.14.2, stdlib | entrypoint; dispatch by `argv[1]` |
+| `actx_lib/security_gate.py` | stdlib (json/shlex/re) | L7 Security Gatekeeper: deterministic prompt-injection / secret access / exfiltration defense (<1ms) |
 | `actx_lib/rewriter.py` | stdlib (json/sys/shlex) | single source of truth: command → rewritten |
 | `actx_lib/cli.py` | argparse | CLI dispatch; lazy filter imports |
 | `actx_lib/runner.py` | stdlib | execute, exit-code, tee |
-| `actx_lib/hook.py` | stdlib | JSON PreToolUse hook (Claude/Codex) |
+| `actx_lib/hook.py` | stdlib | JSON PreToolUse hook (Claude/Codex): security evaluation + rewrite |
 | `actx_lib/rewrite_cmd.py` | stdlib | `actx rewrite "<cmd>"` |
 | `actx_lib/installer.py` | stdlib | `actx init/--show/--uninstall` |
 | `actx_lib/config.py` | stdlib | JSON config load/save |
@@ -47,7 +48,12 @@ Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); m
 
 ## Key Flows
 
-1. **Tier 1 rewrite (Claude/Codex)**: PreToolUse JSON hook → `actx hook` → `updatedInput` with rewritten command → agent executes.
+1. **Tier 1 hook (Claude/Codex)**: PreToolUse JSON hook → `actx hook` → `security_gate.evaluate_security()`:
+   - On violation (T1..T5) $\to$ structured `deny` with reason.
+   - On high-risk mutation (T6) $\to$ structured `ask` for human confirmation.
+   - On clean command $\to$ `rewriter.rewrite()`:
+     - if eligible $\to$ `allow` with compressed `updatedInput`.
+     - if not eligible $\to$ `None` (defer to native agent harness permissions).
 2. **Tier 1 rewrite (OpenCode)**: TS plugin `tool.execute.before` mutates `output.args.command` via `execFileSync(ACTX, ["rewrite", cmd])`.
 3. **Tier 2 (Grok/Cursor/Cline/Windsurf/Aider)**: instruction section in agent rules (`PRD.md` §6.3; replace-in-place on reinit when body differs); agent prefixes supported commands manually; adoption ~70–85% (estimate).
 4. **CLI**: `actx <cmd>` executes, filters, prints compact output, tee on failure/always (git diff), preserves exit code.

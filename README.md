@@ -10,7 +10,7 @@ $ git status        →   $ actx git status
 
 ![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB)
 ![Stdlib only](https://img.shields.io/badge/dependencies-none-brightgreen)
-![Tests](https://img.shields.io/badge/tests-129%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-335%20passed-brightgreen)
 
 ---
 
@@ -57,6 +57,7 @@ src/main.py
 
 ## Features
 
+- **L7 Security Gatekeeper (`actx hook`)** — deterministic PreToolUse guard (<0.02ms latency) that intercepts dangerous commands before execution. Blocks credential exposure (`.env`, `~/.ssh/id_rsa`, AWS/GCP keys, Keychain), network exfiltration (`curl -d @.env`, `nc`/`socat`), pipe-to-interpreter obfuscation, OS destruction (`rm -rf /`), and insecure package registries. Requests human confirmation (`ask`) on destructive git operations (`git push --force`, `git reset --hard`).
 - **Auto-rewrite (observational + narrow mutators)** — observational CLI (`git` RO, `ls`/`grep`/`find`/`wc`/…, test runners, linters without write flags, `docker`/`kubectl`/`gh` RO, …) plus a narrow mutator allow-list (`git add|commit|push|pull|fetch`, `npm|pnpm install|ci`, `pip install`, `uv pip install`). Safety is metachar/exec/fail-open/write-flag rejects (`--fix`, `ruff format`, …), not “read-only only”. No lexer; no `python3`/`aws` auto-rewrite.
 - **Exact exit codes** — the original command's exit code is preserved, including `git status` returning `128` outside a repo and `grep` returning `1` for no matches.
 - **Lossless filenames** — `git status`, `ls`, and `find` compress the format, not the names.
@@ -93,8 +94,8 @@ After installation, restart the agent.
 ### Via curl (release tarball)
 
 ```bash
-curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.3.0.tar.gz | tar xz
-cd actx-2.3.0
+curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.4.0.tar.gz | tar xz
+cd actx-2.4.0
 bash install.sh
 ```
 
@@ -302,8 +303,9 @@ Error/exception paths are not recorded (they produce no savings); `tree` is not 
 
 ## Safety
 
+- **Deterministic L7 Security Gatekeeper**: Intercepts shell commands in PreToolUse hooks before execution. Blocks credential access (`.env`, `~/.ssh/id_rsa`, AWS/GCP keys, Keychain), network exfiltration, pipe-to-interpreter, OS mutation (`rm -rf /`), and insecure package registries. Prompts for human confirmation (`ask`) on destructive git commands.
 - No `shell=True`, `os.system`, `eval`, or `exec` anywhere — every subprocess is an exec-array.
-- Auto-rewrite follows the §7 allow-list; the rewriter rejects shell metacharacters, pipes, redirects, command substitution, and write flags (`--fix`, `format`, …).
+- Auto-rewrite follows the allow-list; the rewriter rejects shell metacharacters, pipes, redirects, command substitution, and write flags (`--fix`, `format`, …).
 - No project configs are read; adapters write only to global user files.
 - No network calls, accounts, or telemetry.
 
