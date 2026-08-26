@@ -55,7 +55,7 @@ _AGENT_PATHS = {
         "instructions": "~/.config/actx/instructions.md",
         "conf": "~/.aider.conf.yml",
     },
-    "gemini": {"hook": "~/.gemini/settings.json"},
+    "gemini": {"hook": "~/.gemini/config/hooks.json"},
     "copilot": {"hook": "~/.copilot/settings.json"},
 }
 
@@ -128,7 +128,7 @@ def _write_json(path, data):
         handle.write("\n")
 
 
-def _install_hook(path, abs_actx):
+def _install_hook(path, abs_actx, matcher="Bash"):
     """Merge the actx PreToolUse handler into a JSON settings file."""
     if os.path.exists(path):
         try:
@@ -155,12 +155,15 @@ def _install_hook(path, abs_actx):
     changed = False
     bash_entry = None
     for entry in pretool:
-        if isinstance(entry, dict) and entry.get("matcher") == "Bash":
+        if isinstance(entry, dict) and entry.get("matcher") in (matcher, "Bash"):
             bash_entry = entry
+            if bash_entry.get("matcher") != matcher:
+                bash_entry["matcher"] = matcher
+                changed = True
             break
 
     if bash_entry is None:
-        bash_entry = {"matcher": "Bash", "hooks": []}
+        bash_entry = {"matcher": matcher, "hooks": []}
         pretool.append(bash_entry)
         changed = True
 
@@ -219,7 +222,7 @@ def _uninstall_hook(path, abs_actx):
             kept_entries.append(entry)
             continue
         entry_hooks = entry.get("hooks")
-        if entry.get("matcher") == "Bash" and isinstance(entry_hooks, list):
+        if entry.get("matcher") in ("Bash", "Bash|shell|bash|exec") and isinstance(entry_hooks, list):
             filtered = [
                 existing
                 for existing in entry_hooks
@@ -257,32 +260,37 @@ def _install_gemini(path, abs_actx):
             raise ValueError("cannot install: %s is not a JSON object" % path)
     else:
         data = {}
-    hooks = data.get("hooks")
-    if not isinstance(hooks, dict):
-        hooks = {}
-    before = hooks.get("BeforeTool")
-    if not isinstance(before, list):
-        before = []
+
+    actx_entry = data.get("actx-gate")
+    if not isinstance(actx_entry, dict):
+        actx_entry = {}
+
+    pretool = actx_entry.get("PreToolUse")
+    if not isinstance(pretool, list):
+        pretool = []
     else:
-        before = list(before)
+        pretool = list(pretool)
 
     handler = _gemini_handler(abs_actx)
     command = handler["command"]
     changed = False
-    bash_entry = None
-    for entry in before:
-        if isinstance(entry, dict) and entry.get("matcher") == "Bash":
-            bash_entry = entry
+    cmd_entry = None
+    for entry in pretool:
+        if isinstance(entry, dict) and entry.get("matcher") == "run_command":
+            cmd_entry = entry
             break
-    if bash_entry is None:
-        bash_entry = {"matcher": "Bash", "hooks": []}
-        before.append(bash_entry)
+
+    if cmd_entry is None:
+        cmd_entry = {"matcher": "run_command", "hooks": []}
+        pretool.append(cmd_entry)
         changed = True
-    entry_hooks = bash_entry.get("hooks")
+
+    entry_hooks = cmd_entry.get("hooks")
     if not isinstance(entry_hooks, list):
         entry_hooks = []
-        bash_entry["hooks"] = entry_hooks
+        cmd_entry["hooks"] = entry_hooks
         changed = True
+
     filtered = [
         existing
         for existing in entry_hooks
@@ -293,17 +301,19 @@ def _install_gemini(path, abs_actx):
     ]
     if len(filtered) != len(entry_hooks):
         entry_hooks = filtered
-        bash_entry["hooks"] = entry_hooks
+        cmd_entry["hooks"] = entry_hooks
         changed = True
+
     if not any(
         isinstance(existing, dict) and existing.get("command") == command
         for existing in entry_hooks
     ):
         entry_hooks.append(handler)
         changed = True
-    if changed:
-        hooks["BeforeTool"] = before
-        data["hooks"] = hooks
+
+    if changed or "actx-gate" not in data:
+        actx_entry["PreToolUse"] = pretool
+        data["actx-gate"] = actx_entry
         _write_json(path, data)
     return changed
 
@@ -314,47 +324,13 @@ def _uninstall_gemini(path, abs_actx):
     data = _read_json(path)
     if not isinstance(data, dict):
         return False
-    hooks = data.get("hooks")
-    if not isinstance(hooks, dict):
+
+    if "actx-gate" not in data:
         return False
-    before = hooks.get("BeforeTool")
-    if not isinstance(before, list):
-        return False
-    changed = False
-    kept_entries = []
-    for entry in before:
-        if not isinstance(entry, dict):
-            kept_entries.append(entry)
-            continue
-        entry_hooks = entry.get("hooks")
-        if entry.get("matcher") == "Bash" and isinstance(entry_hooks, list):
-            filtered = [
-                existing
-                for existing in entry_hooks
-                if not (
-                    isinstance(existing, dict)
-                    and _is_actx_hook_command(existing.get("command"))
-                )
-            ]
-            if len(filtered) != len(entry_hooks):
-                changed = True
-            if filtered:
-                entry = dict(entry)
-                entry["hooks"] = filtered
-                kept_entries.append(entry)
-        else:
-            kept_entries.append(entry)
-    if changed:
-        if kept_entries:
-            hooks["BeforeTool"] = kept_entries
-        else:
-            hooks.pop("BeforeTool", None)
-        if hooks:
-            data["hooks"] = hooks
-        else:
-            data.pop("hooks", None)
-        _write_json(path, data)
-    return changed
+
+    data.pop("actx-gate", None)
+    _write_json(path, data)
+    return True
 
 
 def _install_copilot(path, abs_actx):
@@ -718,7 +694,7 @@ def _installed(agent):
             return False
         handler_command = _hook_handler(abs_path())["command"]
         for entry in pretool:
-            if isinstance(entry, dict) and entry.get("matcher") == "Bash":
+            if isinstance(entry, dict) and entry.get("matcher") in ("Bash", "Bash|shell|bash|exec"):
                 entry_hooks = entry.get("hooks")
                 if isinstance(entry_hooks, list) and any(
                     isinstance(existing, dict) and existing.get("command") == handler_command
@@ -736,15 +712,15 @@ def _installed(agent):
             return False
         if not isinstance(data, dict):
             return False
-        hooks = data.get("hooks")
-        if not isinstance(hooks, dict):
+        actx_entry = data.get("actx-gate")
+        if not isinstance(actx_entry, dict):
             return False
-        before = hooks.get("BeforeTool")
-        if not isinstance(before, list):
+        pretool = actx_entry.get("PreToolUse")
+        if not isinstance(pretool, list):
             return False
         command = _gemini_handler(abs_path())["command"]
-        for entry in before:
-            if isinstance(entry, dict) and entry.get("matcher") == "Bash":
+        for entry in pretool:
+            if isinstance(entry, dict) and entry.get("matcher") == "run_command":
                 entry_hooks = entry.get("hooks")
                 if isinstance(entry_hooks, list) and any(
                     isinstance(existing, dict)
@@ -787,10 +763,18 @@ def install(agent, abs_actx):
         _install_cursor()
         return 0
     paths = _agent_config(agent)
-    if agent in ("claude", "codex"):
+    if agent == "claude":
         path = os.path.expanduser(paths["hook"])
         try:
-            changed = _install_hook(path, abs_actx)
+            changed = _install_hook(path, abs_actx, matcher="Bash")
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+    if agent == "codex":
+        path = os.path.expanduser(paths["hook"])
+        try:
+            changed = _install_hook(path, abs_actx, matcher="Bash|shell|bash|exec")
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 1

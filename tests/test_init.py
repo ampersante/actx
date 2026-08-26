@@ -299,6 +299,7 @@ class InitTests(unittest.TestCase):
                 os.path.join(home, ".codeium", "windsurf", "memories", "global_rules.md"),
                 os.path.join(home, ".config", "actx", "instructions.md"),
                 os.path.join(home, ".aider.conf.yml"),
+                os.path.join(home, ".gemini", "config", "hooks.json"),
             ):
                 self.assertTrue(os.path.exists(path), path)
 
@@ -311,28 +312,32 @@ class InitTests(unittest.TestCase):
                 "cline",
                 "windsurf",
                 "aider",
+                "gemini",
             ):
                 self.assertIn("%s: installed" % agent, p.stdout)
             self.assertIn("cursor: manual (cursor)", p.stdout)
 
     def test_gemini_double_init_single_entry_and_uninstall(self):
         with tempfile.TemporaryDirectory() as home:
-            settings = os.path.join(home, ".gemini", "settings.json")
+            hooks_file = os.path.join(home, ".gemini", "config", "hooks.json")
             for _ in range(2):
                 p = self.run_actx(["init", "--agent", "gemini"], home)
                 self.assertEqual(p.returncode, 0, p.stderr)
-            with open(settings, encoding="utf-8") as handle:
+            with open(hooks_file, encoding="utf-8") as handle:
                 data = json.load(handle)
-            entry = data["hooks"]["BeforeTool"][0]
-            self.assertEqual(entry["matcher"], "Bash")
+            entry = data["actx-gate"]["PreToolUse"][0]
+            self.assertEqual(entry["matcher"], "run_command")
             self.assertEqual(len(entry["hooks"]), 1)
             self.assertEqual(entry["hooks"][0], self.handler())
 
+            p = self.run_actx(["init", "--show"], home)
+            self.assertIn("gemini: installed", p.stdout)
+
             p = self.run_actx(["init", "--agent", "gemini", "--uninstall"], home)
             self.assertEqual(p.returncode, 0, p.stderr)
-            with open(settings, encoding="utf-8") as handle:
+            with open(hooks_file, encoding="utf-8") as handle:
                 data = json.load(handle)
-            self.assertNotIn("hooks", data)
+            self.assertNotIn("actx-gate", data)
 
     def test_copilot_install_preserves_existing_hook_and_uninstall(self):
         with tempfile.TemporaryDirectory() as home:
@@ -368,14 +373,14 @@ class InitTests(unittest.TestCase):
 
     def test_gemini_non_json_settings_exit_1_unchanged(self):
         with tempfile.TemporaryDirectory() as home:
-            settings = os.path.join(home, ".gemini", "settings.json")
-            os.makedirs(os.path.dirname(settings), exist_ok=True)
-            original = '{\n  "hooks": [broken\n}\n'
-            with open(settings, "w", encoding="utf-8") as handle:
+            hooks_file = os.path.join(home, ".gemini", "config", "hooks.json")
+            os.makedirs(os.path.dirname(hooks_file), exist_ok=True)
+            original = '{\n  "actx-gate": [broken\n}\n'
+            with open(hooks_file, "w", encoding="utf-8") as handle:
                 handle.write(original)
             p = self.run_actx(["init", "--agent", "gemini"], home)
             self.assertEqual(p.returncode, 1)
-            with open(settings, encoding="utf-8") as handle:
+            with open(hooks_file, encoding="utf-8") as handle:
                 self.assertEqual(handle.read(), original)
 
     def test_unknown_agent_exit_1(self):

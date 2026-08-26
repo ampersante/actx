@@ -4,7 +4,7 @@ import sys
 import actx_lib.rewriter as rewriter
 import actx_lib.security_gate as security_gate
 
-ALLOWED_TOOLS = {"Bash", "bash", "Shell"}
+ALLOWED_TOOLS = {"Bash", "bash", "Shell", "shell", "exec"}
 
 ADDITIONAL_CONTEXT = "Command rewritten by actx for output compression."
 
@@ -20,12 +20,65 @@ def process(text):
         print("actx hook: input is not a JSON object", file=sys.stderr)
         return None
 
-    tool_name = data.get("tool_name")
+    # Antigravity CLI (gemini) schema
+    if "toolCall" in data:
+        tool_call = data.get("toolCall")
+        if not isinstance(tool_call, dict) or tool_call.get("name") != "run_command":
+            print("actx hook: missing or unsupported toolCall name", file=sys.stderr)
+            return None
+        args = tool_call.get("args")
+        if not isinstance(args, dict):
+            print("actx hook: toolCall args is not an object", file=sys.stderr)
+            return None
+        command = args.get("CommandLine")
+        if not isinstance(command, str):
+            print("actx hook: CommandLine is missing or not a string", file=sys.stderr)
+            return None
+
+        try:
+            sec_res = security_gate.evaluate_security(command)
+        except Exception:
+            return None
+
+        if sec_res is not None:
+            if sec_res.decision == "deny":
+                return {
+                    "decision": "deny",
+                    "reason": sec_res.reason,
+                }
+            if sec_res.decision == "ask":
+                return {
+                    "decision": "ask",
+                    "reason": sec_res.reason,
+                }
+
+        try:
+            rewritten = rewriter.rewrite(command)
+        except Exception:
+            rewritten = None
+
+        if rewritten is not None:
+            return {
+                "decision": "allow",
+                "overwrite": {"CommandLine": rewritten},
+            }
+        return {"decision": "allow"}
+
+    # Claude Code / Codex CLI schema
+    tool_name = data.get("tool_name") or (
+        data.get("toolUse", {}).get("name")
+        if isinstance(data.get("toolUse"), dict)
+        else None
+    )
     if tool_name not in ALLOWED_TOOLS:
         print("actx hook: missing or unsupported tool_name", file=sys.stderr)
         return None
 
-    tool_input = data.get("tool_input")
+    tool_input = data.get("tool_input") or (
+        data.get("toolUse", {}).get("input")
+        if isinstance(data.get("toolUse"), dict)
+        else None
+    )
     if not isinstance(tool_input, dict):
         print("actx hook: tool_input is not an object", file=sys.stderr)
         return None

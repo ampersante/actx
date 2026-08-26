@@ -11,6 +11,10 @@ def hook_input(tool_name, tool_input):
     return json.dumps({"tool_name": tool_name, "tool_input": tool_input})
 
 
+def gemini_input(tool_name, args):
+    return json.dumps({"toolCall": {"name": tool_name, "args": args}})
+
+
 class HookCliTests(unittest.TestCase):
     def run_hook(self, stdin_text):
         return subprocess.run(
@@ -18,6 +22,74 @@ class HookCliTests(unittest.TestCase):
             input=stdin_text,
             capture_output=True,
             text=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Antigravity CLI (Gemini) Hook Schema Tests
+    # ------------------------------------------------------------------
+    def test_gemini_run_command_rewritten(self):
+        payload = gemini_input("run_command", {"CommandLine": "git status"})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data, {
+            "decision": "allow",
+            "overwrite": {"CommandLine": "actx git status"},
+        })
+
+    def test_gemini_run_command_safe_uncompressed_allowed(self):
+        payload = gemini_input("run_command", {"CommandLine": "python3 -c \"import sys; print(sys.version)\""})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data, {"decision": "allow"})
+
+    def test_gemini_run_command_denied(self):
+        payload = gemini_input("run_command", {"CommandLine": "cat .env"})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["decision"], "deny")
+        self.assertIn("Access to sensitive credential/file '.env' is prohibited", data["reason"])
+
+    def test_gemini_run_command_ask(self):
+        payload = gemini_input("run_command", {"CommandLine": "git push --force origin main"})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["decision"], "ask")
+        self.assertIn("Force-pushing to remote git repository requires human confirmation", data["reason"])
+
+    def test_gemini_action_space_denied(self):
+        payload = gemini_input("run_command", {"CommandLine": "sed -i 's/foo/bar/g' main.py"})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["decision"], "deny")
+        self.assertIn("In-place stream editing via shell is prohibited", data["reason"])
+
+    def test_gemini_unsupported_tool_call_empty(self):
+        payload = gemini_input("view_file", {"AbsolutePath": "/path/to/file"})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, "")
+
+    def test_gemini_missing_command_line_empty(self):
+        payload = gemini_input("run_command", {})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, "")
+
+    # ------------------------------------------------------------------
+    # Claude Code / Codex CLI Hook Schema Tests
+    # ------------------------------------------------------------------
+    def test_codex_exec_tool_rewritten(self):
+        p = self.run_hook(hook_input("exec", {"command": "git diff"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(
+            data["hookSpecificOutput"]["updatedInput"]["command"],
+            "actx git diff",
         )
 
     def test_git_status_rewritten_with_all_keys(self):
