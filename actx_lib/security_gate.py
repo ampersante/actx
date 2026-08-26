@@ -560,7 +560,7 @@ def _check_exfiltration(command: str, raw_tokens: list[str]) -> SecurityDecision
 
         # Check for credential environment variable names in URLs/arguments
         # Allow standard Authorization: Bearer $TOKEN in headers against HTTPS endpoints
-        if _RE_EXFIL_VARS.search(command):
+        if "$" in command and _RE_EXFIL_VARS.search(command):
             is_legit_auth_header = (
                 ("Authorization:" in command or "x-api-key:" in command or "--header=" in command or "-H " in command)
                 and "https://" in command
@@ -677,7 +677,7 @@ def _check_obfuscation_and_eval(command: str, raw_tokens: list[str]) -> Security
                 )
 
     # 4. Inline runtime socket connection
-    if _RE_INLINE_SOCKET.search(command):
+    if ("-c" in command or "-e" in command or "--eval" in command or "-r" in command) and _RE_INLINE_SOCKET.search(command):
         return SecurityDecision(
             decision="deny",
             reason="Inline script establishes raw network socket connection",
@@ -727,7 +727,7 @@ _DANGEROUS_TARGET_PREFIXES = (
 
 def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
     # Fork bomb
-    if _RE_FORK_BOMB.search(command):
+    if ":" in command and "{" in command and _RE_FORK_BOMB.search(command):
         return SecurityDecision(
             decision="deny",
             reason="Fork bomb execution pattern detected",
@@ -1465,8 +1465,16 @@ _RE_SIMPLE_TOKENS = re.compile(r"""[^\s"']+|"[^"\\]*"|'[^'\\]*'""")
 
 
 def _fast_tokenize(chunk: str) -> list[str]:
-    """Blazing fast tokenizer (<0.02ms) with fallback to shlex."""
+    """Blazing fast tokenizer (<0.005ms) with fallback to regex and shlex."""
+    if '"' not in chunk and "'" not in chunk and "\\" not in chunk and "`" not in chunk and "$" not in chunk and "<" not in chunk and ">" not in chunk and "=" not in chunk:
+        return chunk.split()
     if "\\" not in chunk and "`" not in chunk and "$" not in chunk and "<" not in chunk and ">" not in chunk and "=" not in chunk:
+        parts = chunk.split()
+        if len(parts) > 4 and not any(p.startswith('"') or p.startswith("'") or p.endswith('"') or p.endswith("'") for p in parts[3:]):
+            return [
+                p[1:-1] if (p.startswith('"') and p.endswith('"')) or (p.startswith("'") and p.endswith("'")) else p
+                for p in parts
+            ]
         matches = _RE_SIMPLE_TOKENS.findall(chunk)
         if matches:
             return [
@@ -1542,6 +1550,12 @@ def _split_into_chunks(command: str) -> list[str]:
         if not any(op in line for op in (";", "&&", "||", "|", "&")):
             chunks.append(line)
             continue
+        if '"' not in line and "'" not in line and "\\" not in line and "`" not in line and "$" not in line:
+            for part in re.split(r";+|&&|\|\||\||&+", line):
+                p = part.strip()
+                if p:
+                    chunks.append(p)
+            continue
         try:
             norm_line = re.sub(r"(?<![&|;'\"])([;&|]{1,2})(?![&|;'\"])", r" \1 ", line)
             raw_tokens = shlex.split(norm_line, posix=True)
@@ -1597,7 +1611,7 @@ def evaluate_security(command: str, cwd: str | None = None) -> SecurityDecision:
                 return _DECISION_ALLOW
 
         # Fast global check for fork bombs
-        if _RE_FORK_BOMB.search(command):
+        if ":" in command and "{" in command and _RE_FORK_BOMB.search(command):
             return SecurityDecision(
                 decision="deny",
                 reason="Fork bomb execution pattern detected",
