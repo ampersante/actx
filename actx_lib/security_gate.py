@@ -720,6 +720,44 @@ _DANGEROUS_TARGET_PREFIXES = (
     ".*",
 )
 
+_PROTECTED_USER_DIRS = {
+    "Downloads",
+    "Documents",
+    "Applications",
+    "Desktop",
+    "Pictures",
+    "Music",
+    "Movies",
+}
+
+
+def _is_critical_system_target(norm_t: str, raw_target: str) -> bool:
+    for p in _DANGEROUS_TARGET_PREFIXES:
+        if norm_t == p or norm_t.startswith(p + "/") or norm_t.startswith(p + "*"):
+            return True
+
+    # Check root user paths /Users, /home, /Users/username, /home/username, ~/
+    if raw_target.startswith("/") or raw_target.startswith("~") or raw_target.startswith("$"):
+        parts = [p for p in norm_t.strip("/").split("/") if p]
+        if parts and parts[0] in ("Users", "home"):
+            # /Users or /Users/username
+            if len(parts) <= 2:
+                return True
+            # /Users/username/Desktop, /Users/username/Downloads, /Users/username/Documents, etc.
+            if len(parts) == 3 and parts[2] in _PROTECTED_USER_DIRS:
+                return True
+            if len(parts) == 4 and parts[2] in _PROTECTED_USER_DIRS and parts[3] in ("*", ".*"):
+                return True
+        elif parts and (parts[0] == "~" or norm_t.startswith("~")):
+            # ~, ~/Desktop, ~/Downloads, etc.
+            if len(parts) <= 1:
+                return True
+            if len(parts) == 2 and parts[1] in _PROTECTED_USER_DIRS:
+                return True
+            if len(parts) == 3 and parts[1] in _PROTECTED_USER_DIRS and parts[2] in ("*", ".*"):
+                return True
+    return False
+
 
 def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
     # Fork bomb
@@ -761,18 +799,7 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> S
                     norm_t = posixpath.normpath(norm_t)
                 except Exception:
                     pass
-                is_dangerous = False
-                for p in _DANGEROUS_TARGET_PREFIXES:
-                    if norm_t == p or norm_t.startswith(p + "/") or norm_t.startswith(p + "*"):
-                        is_dangerous = True
-                        break
-                # Only check /Users/username or /home/username when path is absolute or starts with ~/$HOME
-                if t.startswith("/") or t.startswith("~") or t.startswith("$"):
-                    parts = [p for p in norm_t.strip("/").split("/") if p]
-                    if len(parts) <= 2 and parts and parts[0] in ("Users", "home"):
-                        is_dangerous = True
-
-                if is_dangerous:
+                if _is_critical_system_target(norm_t, t):
                     return SecurityDecision(
                         decision="deny",
                         reason=f"Destructive recursive deletion of critical target '{norm_t}' is prohibited",
@@ -788,17 +815,7 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> S
                     norm_t = posixpath.normpath(norm_t)
                 except Exception:
                     pass
-                is_dangerous = False
-                for p in _DANGEROUS_TARGET_PREFIXES:
-                    if norm_t == p or norm_t.startswith(p + "/") or norm_t.startswith(p + "*"):
-                        is_dangerous = True
-                        break
-                if tok.startswith("/") or tok.startswith("~") or tok.startswith("$"):
-                    parts = [p for p in norm_t.strip("/").split("/") if p]
-                    if len(parts) <= 2 and parts and parts[0] in ("Users", "home"):
-                        is_dangerous = True
-
-                if is_dangerous:
+                if _is_critical_system_target(norm_t, tok):
                     return SecurityDecision(
                         decision="deny",
                         reason=f"Destructive find deletion of critical directory '{norm_t}' is prohibited",
@@ -824,17 +841,7 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> S
                     norm_t = posixpath.normpath(norm_t)
                 except Exception:
                     pass
-                is_dangerous = False
-                for p in _DANGEROUS_TARGET_PREFIXES:
-                    if norm_t == p or norm_t.startswith(p + "/") or norm_t.startswith(p + "*"):
-                        is_dangerous = True
-                        break
-                if tok.startswith("/") or tok.startswith("~") or tok.startswith("$"):
-                    parts = [p for p in norm_t.strip("/").split("/") if p]
-                    if len(parts) <= 2 and parts and parts[0] in ("Users", "home"):
-                        is_dangerous = True
-
-                if is_dangerous:
+                if _is_critical_system_target(norm_t, tok):
                     return SecurityDecision(
                         decision="deny",
                         reason=f"Recursive permission/ownership alteration on critical directory '{norm_t}' is prohibited",
