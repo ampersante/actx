@@ -717,10 +717,6 @@ _DANGEROUS_TARGET_PREFIXES = (
     "/dev",
     "/sys",
     "/proc",
-    "/Users",
-    "/Users/",
-    "/home",
-    "/home/",
     ".*",
 )
 
