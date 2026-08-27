@@ -1,6 +1,6 @@
 # Architecture — actx
 
-Living snapshot (v2.4.0). Product source of truth: `PRD.md`.
+Living snapshot (v2.5.0). Product source of truth: `PRD.md`.
 
 ## System Overview
 
@@ -15,7 +15,8 @@ Agent-agnostic core; per-agent thin adapters for transport only.
       ┌───────────────────────┼────────────────────────────┐
       ▼                       ▼                            ▼
  actx hook (JSON)      actx rewrite "<cmd>" (CLI)    actx init --agent X
- for Claude/Codex      for OpenCode plugin           (writes adapter X)
+ for Claude/Codex/     for OpenCode plugin           (writes adapter X)
+ Gemini/Copilot
 ```
 
 Data flow (hook/plugin agents):
@@ -48,8 +49,8 @@ Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); m
 
 ## Key Flows
 
-1. **Tier 1 hook (Claude/Codex)**: PreToolUse JSON hook → `actx hook` → `security_gate.evaluate_security()`:
-   - On violation (T1..T5) $\to$ structured `deny` with reason.
+1. **Tier 1 hook (Claude/Codex/Gemini/Copilot)**: PreToolUse JSON hook → `actx hook` → `security_gate.evaluate_security()`:
+   - On violation (T1..T5, T7) $\to$ structured `deny` with reason.
    - On high-risk mutation (T6) $\to$ structured `ask` for human confirmation.
    - On clean command $\to$ `rewriter.rewrite()`:
      - if eligible $\to$ `allow` with compressed `updatedInput`.

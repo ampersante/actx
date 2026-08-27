@@ -94,8 +94,8 @@ After installation, restart the agent.
 ### Via curl (release tarball)
 
 ```bash
-curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.4.0.tar.gz | tar xz
-cd actx-2.4.0
+curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.5.0.tar.gz | tar xz
+cd actx-2.5.0
 bash install.sh
 ```
 
@@ -232,6 +232,8 @@ One rewriter is the single source of truth for every adapter. It rewrites simple
 |---|---|---|---|
 | Claude Code | PreToolUse JSON hook | `actx init --agent claude` | ✅ deterministic |
 | Codex | PreToolUse JSON hook | `actx init --agent codex` | ✅ deterministic¹ |
+| Gemini / Antigravity | PreToolUse JSON hook | `actx init --agent gemini` | ✅ deterministic |
+| GitHub Copilot CLI | PreToolUse JSON hook | `actx init --agent copilot` | ✅ deterministic |
 | OpenCode | TypeScript plugin | `actx init --agent opencode` | ✅ deterministic |
 | Grok Build | Rules instruction | `actx init --agent grok` | soft (~70–85%) |
 | Cline / Roo | Rules file | `actx init --agent cline` | soft |
