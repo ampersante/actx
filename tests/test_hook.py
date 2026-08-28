@@ -57,7 +57,7 @@ class HookCliTests(unittest.TestCase):
         p = self.run_hook(payload)
         self.assertEqual(p.returncode, 0, p.stderr)
         data = json.loads(p.stdout)
-        self.assertEqual(data["decision"], "ask")
+        self.assertEqual(data["decision"], "force_ask")
         self.assertIn("Force-pushing to remote git repository requires human confirmation", data["reason"])
 
     def test_gemini_action_space_denied(self):

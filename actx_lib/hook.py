@@ -48,7 +48,7 @@ def process(text):
                 }
             if sec_res.decision == "ask":
                 return {
-                    "decision": "ask",
+                    "decision": "force_ask",
                     "reason": sec_res.reason,
                 }
 

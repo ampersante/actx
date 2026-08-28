@@ -1,6 +1,6 @@
 # Architecture — actx
 
-Living snapshot (v2.5.0). Product source of truth: `PRD.md`.
+Living snapshot (v2.5.1). Product source of truth: `PRD.md`.
 
 ## System Overview
 
@@ -40,7 +40,7 @@ Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); m
 | `actx_lib/rewriter.py` | stdlib (json/sys/shlex) | single source of truth: command → rewritten |
 | `actx_lib/cli.py` | argparse | CLI dispatch; lazy filter imports |
 | `actx_lib/runner.py` | stdlib | execute, exit-code, tee |
-| `actx_lib/hook.py` | stdlib | JSON PreToolUse hook (Claude/Codex): security evaluation + rewrite |
+| `actx_lib/hook.py` | stdlib | JSON PreToolUse hook (Claude/Codex/Gemini/Copilot): security evaluation + rewrite |
 | `actx_lib/rewrite_cmd.py` | stdlib | `actx rewrite "<cmd>"` |
 | `actx_lib/installer.py` | stdlib | `actx init/--show/--uninstall` |
 | `actx_lib/config.py` | stdlib | JSON config load/save |
@@ -51,7 +51,7 @@ Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); m
 
 1. **Tier 1 hook (Claude/Codex/Gemini/Copilot)**: PreToolUse JSON hook → `actx hook` → `security_gate.evaluate_security()`:
    - On violation (T1..T5, T7) $\to$ structured `deny` with reason.
-   - On high-risk mutation (T6) $\to$ structured `ask` for human confirmation.
+   - On high-risk mutation (T6) $\to$ structured `ask` (Claude/Codex) or `force_ask` (Gemini/Antigravity) for human confirmation.
    - On clean command $\to$ `rewriter.rewrite()`:
      - if eligible $\to$ `allow` with compressed `updatedInput`.
      - if not eligible $\to$ `None` (defer to native agent harness permissions).
