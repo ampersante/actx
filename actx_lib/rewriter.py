@@ -22,9 +22,88 @@ _NPM_MUTATE = frozenset({"install", "ci"})
 _DOCKER_RO = frozenset({"ps", "images", "logs"})
 _KUBECTL_RO = frozenset({"get", "logs"})
 _GH_RO = frozenset({"pr", "issue", "run"})
-_CARGO_OK = frozenset({"test", "build", "clippy"})
+_CARGO_PURE_RO = frozenset({"check", "test", "build", "tree"})
+_CARGO_1ARG_FLAGS = frozenset({
+    "-q", "--quiet", "-v", "-vv", "-vvv", "--verbose",
+    "--offline", "--locked", "--frozen",
+})
+_CARGO_2ARG_FLAGS = frozenset({
+    "--color", "--config", "-C", "-Z", "--manifest-path", "--target-dir",
+})
 
 _WRITE_TOKENS = frozenset({"--fix", "fix", "format"})
+
+
+def _parse_cargo(tokens):
+    """Extracts (subcmd, cargo_args, forwarded_args) from cargo tokens."""
+    idx = 1
+    n = len(tokens)
+    while idx < n:
+        tok = tokens[idx]
+        if tok == "--":
+            return None, [], []
+        if tok.startswith("+"):
+            idx += 1
+            continue
+        if tok in _CARGO_1ARG_FLAGS:
+            idx += 1
+            continue
+        if tok in _CARGO_2ARG_FLAGS:
+            idx += 2
+            continue
+        if tok.startswith("--color=") or tok.startswith("--config=") or tok.startswith("-C=") or tok.startswith("-Z="):
+            idx += 1
+            continue
+        if tok.startswith("-"):
+            idx += 1
+            continue
+        subcmd = tok
+        rest = tokens[idx + 1 :]
+        if "--" in rest:
+            dash_idx = rest.index("--")
+            cargo_args = rest[:dash_idx]
+            forwarded_args = rest[dash_idx + 1 :]
+        else:
+            cargo_args = rest
+            forwarded_args = []
+        return subcmd, cargo_args, forwarded_args
+    return None, [], []
+
+
+def _cargo_ok(tokens):
+    if len(tokens) < 2:
+        return False
+    subcmd, cargo_args, forwarded_args = _parse_cargo(tokens)
+    if subcmd is None:
+        return False
+
+    if subcmd in _CARGO_PURE_RO:
+        return True
+
+    if subcmd == "clippy":
+        return not any(tok == "--fix" or tok.startswith("--fix=") for tok in cargo_args)
+
+    if subcmd == "fmt":
+        all_args = cargo_args + forwarded_args
+        has_check = "--check" in all_args
+        has_emit_files = False
+        for i, tok in enumerate(all_args):
+            if tok in ("--emit=files", "--emit=file"):
+                has_emit_files = True
+                break
+            if tok == "--emit" and i + 1 < len(all_args) and all_args[i + 1] in ("files", "file"):
+                has_emit_files = True
+                break
+        return has_check and not has_emit_files
+
+    if subcmd == "metadata":
+        return "--no-deps" in cargo_args
+
+    if subcmd == "package":
+        return "--list" in cargo_args
+
+    return False
+
 
 
 def _has_write_token(tokens):
@@ -164,7 +243,7 @@ _DISPATCH = {
     "golangci-lint": lambda t: not _has_write_token(t),
     "tsc": lambda _t: True,
     "next": _next_ok,
-    "cargo": lambda t: len(t) >= 2 and t[1] in _CARGO_OK,
+    "cargo": _cargo_ok,
     "go": lambda t: len(t) >= 2 and t[1] == "test",
     "pip": _pip_ok,
     "uv": _uv_ok,

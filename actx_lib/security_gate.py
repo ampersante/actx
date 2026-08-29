@@ -1140,6 +1140,83 @@ def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecisio
 
 
 # ----------------------------------------------------------------------
+# T6: High-Risk Cargo Operations (Ask Confirmation)
+# ----------------------------------------------------------------------
+
+_CARGO_REGISTRY_MUTATE = frozenset({"publish", "yank", "owner", "login", "logout"})
+_CARGO_GATE_1ARG_FLAGS = frozenset({
+    "-q", "--quiet", "-v", "-vv", "-vvv", "--verbose",
+    "--offline", "--locked", "--frozen",
+})
+_CARGO_GATE_2ARG_FLAGS = frozenset({
+    "--color", "--config", "-C", "-Z", "--manifest-path", "--target-dir",
+})
+
+
+def _parse_cargo_subcommand(raw_tokens: list[str]):
+    """Extracts (subcmd, sub_args) for cargo commands, skipping wrapper and global options."""
+    tokens = _unwrap_tokens(raw_tokens)
+    if not tokens or os.path.basename(tokens[0]) != "cargo":
+        return None, []
+
+    idx = 1
+    n = len(tokens)
+    while idx < n:
+        tok = tokens[idx]
+        if tok == "--":
+            return None, []
+        if tok.startswith("+"):
+            idx += 1
+            continue
+        if tok in _CARGO_GATE_1ARG_FLAGS:
+            idx += 1
+            continue
+        if tok in _CARGO_GATE_2ARG_FLAGS:
+            idx += 2
+            continue
+        if tok.startswith("--color=") or tok.startswith("--config=") or tok.startswith("-C=") or tok.startswith("-Z="):
+            idx += 1
+            continue
+        if tok.startswith("-"):
+            idx += 1
+            continue
+        subcmd = tok
+        sub_args = tokens[idx + 1 :]
+        return subcmd, sub_args
+    return None, []
+
+
+def _check_high_risk_cargo(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
+    subcmd, sub_args = _parse_cargo_subcommand(raw_tokens)
+    if subcmd is None:
+        return None
+
+    if subcmd == "clean":
+        return SecurityDecision(
+            decision="ask",
+            reason="Executing cargo clean deletes build artifacts and caches, requiring human confirmation",
+            category="T6_HIGH_RISK_CARGO",
+        )
+    if subcmd in _CARGO_REGISTRY_MUTATE:
+        return SecurityDecision(
+            decision="ask",
+            reason=f"Executing cargo {subcmd} modifies remote registry state or credentials, requiring human confirmation",
+            category="T6_HIGH_RISK_CARGO",
+        )
+    if subcmd == "install":
+        # Check only before passthrough '--'
+        cargo_args = sub_args[: sub_args.index("--")] if "--" in sub_args else sub_args
+        if any(tok in ("-f", "--force") or tok.startswith("--force=") for tok in cargo_args):
+            return SecurityDecision(
+                decision="ask",
+                reason="Executing cargo install --force overwrites binaries, requiring human confirmation",
+                category="T6_HIGH_RISK_CARGO",
+            )
+
+    return None
+
+
+# ----------------------------------------------------------------------
 # T7: Action Space Backstop (§26a core-rules)
 # ----------------------------------------------------------------------
 
@@ -1534,6 +1611,11 @@ def _evaluate_chunk(chunk: str) -> SecurityDecision:
     t6 = _check_high_risk_git(chunk, tokens)
     if t6:
         return t6
+
+    # 8. T6: High-Risk Cargo Operations (Requires 'ask')
+    t6_cargo = _check_high_risk_cargo(chunk, tokens)
+    if t6_cargo:
+        return t6_cargo
 
     return _DECISION_ALLOW
 

@@ -368,6 +368,37 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_allow("git branch -d merged-feature")
         self.assert_allow("git branch -a")
 
+    def test_t6_high_risk_cargo_ask(self):
+        self.assert_ask("cargo clean", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo clean --release", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo +nightly clean", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo -v clean", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo --color always clean", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("/usr/bin/cargo clean", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("env cargo clean", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo check && cargo clean", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo publish", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo publish --dry-run", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo yank --version 1.0.0", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo owner --add user", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo login token123", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo logout", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo install --force ripgrep", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo install -f ripgrep", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo install --force=true ripgrep", "T6_HIGH_RISK_CARGO")
+
+    def test_t6_allowed_standard_cargo(self):
+        self.assert_allow("cargo check")
+        self.assert_allow("cargo check --all-targets")
+        self.assert_allow("cargo test")
+        self.assert_allow("cargo build")
+        self.assert_allow("cargo clippy")
+        self.assert_allow("cargo fmt --check")
+        self.assert_allow("cargo tree")
+        self.assert_allow("cargo metadata --no-deps")
+        self.assert_allow("cargo install ripgrep")
+
+
     # ------------------------------------------------------------------
     # T7: Action Space Backstop (§26a core-rules)
     # ------------------------------------------------------------------

@@ -267,5 +267,62 @@ class RewriteCliTests(unittest.TestCase):
         self.assertNotEqual(p.stderr, "")
 
 
+class CargoRewriteUnitTests(unittest.TestCase):
+    def test_cargo_pure_ro_rewritten(self):
+        self.assertEqual(rewrite("cargo check"), "actx cargo check")
+        self.assertEqual(rewrite("cargo test"), "actx cargo test")
+        self.assertEqual(rewrite("cargo build"), "actx cargo build")
+        self.assertEqual(rewrite("cargo tree"), "actx cargo tree")
+
+    def test_cargo_fmt_check_rewritten(self):
+        self.assertEqual(rewrite("cargo fmt --check"), "actx cargo fmt --check")
+        self.assertEqual(rewrite("cargo fmt -- --check"), "actx cargo fmt -- --check")
+        self.assertEqual(rewrite("cargo fmt --all -- --check"), "actx cargo fmt --all -- --check")
+
+    def test_cargo_fmt_plain_and_emit_rejected(self):
+        self.assertIsNone(rewrite("cargo fmt"))
+        self.assertIsNone(rewrite("cargo fmt --all"))
+        self.assertIsNone(rewrite("cargo fmt -- --emit files"))
+        self.assertIsNone(rewrite("cargo fmt -- --emit=files"))
+
+    def test_cargo_clippy_rewritten(self):
+        self.assertEqual(rewrite("cargo clippy"), "actx cargo clippy")
+        self.assertEqual(rewrite("cargo clippy --all-targets"), "actx cargo clippy --all-targets")
+        self.assertEqual(rewrite("cargo clippy -- -D warnings"), "actx cargo clippy -- -D warnings")
+
+    def test_cargo_clippy_fix_rejected(self):
+        self.assertIsNone(rewrite("cargo clippy --fix"))
+        self.assertIsNone(rewrite("cargo clippy --fix=allow-no-vcs"))
+        self.assertIsNone(rewrite("cargo clippy --all-targets --fix"))
+
+    def test_cargo_metadata_and_package(self):
+        self.assertEqual(rewrite("cargo metadata --no-deps"), "actx cargo metadata --no-deps")
+        self.assertIsNone(rewrite("cargo metadata"))
+        self.assertEqual(rewrite("cargo package --list"), "actx cargo package --list")
+        self.assertIsNone(rewrite("cargo package"))
+
+    def test_cargo_global_options_and_toolchains(self):
+        self.assertEqual(rewrite("cargo +nightly fmt --check"), "actx cargo +nightly fmt --check")
+        self.assertEqual(rewrite("cargo -q check"), "actx cargo -q check")
+        self.assertEqual(rewrite("cargo -v clippy"), "actx cargo -v clippy")
+        self.assertEqual(rewrite("cargo --color always check"), "actx cargo --color always check")
+        self.assertEqual(rewrite("cargo --color=always check"), "actx cargo --color=always check")
+        self.assertEqual(rewrite("cargo --offline check"), "actx cargo --offline check")
+        self.assertEqual(rewrite("cargo --locked test"), "actx cargo --locked test")
+
+    def test_cargo_mutating_and_destructive_rejected(self):
+        self.assertIsNone(rewrite("cargo fix"))
+        self.assertIsNone(rewrite("cargo clean"))
+        self.assertIsNone(rewrite("cargo publish"))
+        self.assertIsNone(rewrite("cargo yank"))
+        self.assertIsNone(rewrite("cargo owner"))
+        self.assertIsNone(rewrite("cargo login"))
+        self.assertIsNone(rewrite("cargo logout"))
+        self.assertIsNone(rewrite("cargo add serde"))
+        self.assertIsNone(rewrite("cargo rm serde"))
+        self.assertIsNone(rewrite("cargo update"))
+        self.assertIsNone(rewrite("cargo install ripgrep"))
+
+
 if __name__ == "__main__":
     unittest.main()
