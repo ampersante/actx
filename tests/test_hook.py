@@ -185,11 +185,15 @@ class HookCliTests(unittest.TestCase):
         self.assertEqual(output["permissionDecision"], "ask")
         self.assertIn("confirmation required", output["permissionDecisionReason"])
 
-    def test_safe_uncompressed_command_returns_empty_deferral(self):
-        # kubectl apply is safe (not denied), but not rewritable -> strictly returns None (empty stdout)
+    def test_t6_infra_ask_passthrough(self):
+        # TK-37: kubectl apply is a T6 ask (not denied, not rewritten)
         p = self.run_hook(hook_input("Bash", {"command": "kubectl apply -f f"}))
-        self.assertEqual(p.returncode, 0)
-        self.assertEqual(p.stdout, "")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "PreToolUse")
+        self.assertEqual(output["permissionDecision"], "ask")
+        self.assertIn("confirmation required", output["permissionDecisionReason"])
 
     def test_mutating_compound_empty(self):
         p = self.run_hook(hook_input("Bash", {"command": "git status && echo done"}))

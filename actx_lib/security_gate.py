@@ -6,7 +6,7 @@ Protects agentic coding sessions (Claude Code, Codex CLI) against:
 - T3: Shell obfuscation, dynamic eval & remote pipeline execution
 - T4: Destructive OS mutations & persistence hijacking
 - T5: Supply chain & insecure package lifecycle installations
-- T6: High-Risk Git operations requiring human confirmation ("ask")
+- T6: High-risk git/cargo/cloud-infra mutations requiring human confirmation ("ask")
 - T7: Action space backstop & prohibited file operations (§26a core-rules)
 
 Zero external dependencies (Python 3.14 stdlib only).
@@ -1335,6 +1335,68 @@ def _check_high_risk_cargo(command: str, raw_tokens: list[str]) -> SecurityDecis
 
 
 # ----------------------------------------------------------------------
+# T6: High-Risk Cloud/Infra CLI Mutations (Ask Confirmation)
+# ----------------------------------------------------------------------
+
+# Declarative verb table: tool -> tuple of specs; each spec is a token
+# subsequence that must appear in order among the command arguments.
+# A spec ending in a "--" token additionally requires that flag verbatim
+# (e.g. vercel deploy --prod; preview deploys stay allow).
+# Token equality is exact: "--rm" never matches "rm", "delete-target"
+# never matches "delete".
+# Known false positive (accepted, ask-tier): an argument value equal to a
+# spec verb (e.g. namespace "delete" in `kubectl -n delete get pods`)
+# triggers an ask; rare, and the human resolves it.
+T6_ASK_TABLE: dict[str, tuple[tuple[str, ...], ...]] = {
+    "wrangler": (("deploy",), ("publish",), ("delete",)),
+    "railway": (("up",), ("delete",), ("remove",), ("down",)),
+    "vercel": (("deploy", "--prod"), ("remove",)),
+    "netlify": (("deploy",), ("delete",)),
+    "supabase": (("delete",), ("db", "reset")),
+    "gcloud": (("delete",), ("undeploy",)),
+    "kubectl": (("delete",), ("scale",), ("rollout", "undo"), ("apply",)),
+    "helm": (("uninstall",), ("rollback",)),
+    "docker": (("system", "prune"), ("rm",), ("rmi",), ("compose", "down")),
+    "simctl": (("erase",), ("delete",)),
+    "flutter": (("clean",),),
+    "xcodebuild": (("clean",),),
+    "pod": (("deintegrate",),),
+    "terraform": (("apply",), ("destroy",)),
+}
+
+
+def _check_high_risk_tools(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
+    tokens = _unwrap_tokens(raw_tokens)
+    if not tokens:
+        return None
+    head = os.path.basename(tokens[0])
+    specs = T6_ASK_TABLE.get(head)
+    if specs is None:
+        return None
+
+    args = tokens[1:]
+    for spec in specs:
+        # Ordered subsequence scan: interleaved flags/args are skipped;
+        # spec tokens must match exactly and in order. A trailing "--"
+        # element is a mandatory flag matched by the same exact equality.
+        cursor = 0
+        for spec_tok in spec:
+            while cursor < len(args) and args[cursor] != spec_tok:
+                cursor += 1
+            if cursor == len(args):
+                break
+            cursor += 1
+        else:
+            return SecurityDecision(
+                decision="ask",
+                reason=f"Executing {head} {' '.join(spec)} requires human confirmation",
+                category="T6_HIGH_RISK_" + head.upper(),
+            )
+
+    return None
+
+
+# ----------------------------------------------------------------------
 # T7: Action Space Backstop (§26a core-rules)
 # ----------------------------------------------------------------------
 
@@ -1734,6 +1796,11 @@ def _evaluate_chunk(chunk: str) -> SecurityDecision:
     t6_cargo = _check_high_risk_cargo(chunk, tokens)
     if t6_cargo:
         return t6_cargo
+
+    # 9. T6: High-Risk Cloud/Infra CLI Mutations (Requires 'ask')
+    t6_tools = _check_high_risk_tools(chunk, tokens)
+    if t6_tools:
+        return t6_tools
 
     return _DECISION_ALLOW
 

@@ -399,6 +399,105 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_allow("cargo metadata --no-deps")
         self.assert_allow("cargo install ripgrep")
 
+    # ------------------------------------------------------------------
+    # T6: High-Risk Cloud/Infra CLI Mutations (Ask Confirmation) — TK-37
+    # ------------------------------------------------------------------
+    def test_t6_high_risk_tools_ask(self):
+        ask_cases = [
+            # wrangler
+            ("wrangler deploy", "T6_HIGH_RISK_WRANGLER"),
+            ("wrangler publish", "T6_HIGH_RISK_WRANGLER"),
+            ("wrangler delete", "T6_HIGH_RISK_WRANGLER"),
+            ("wrangler deploy worker.js", "T6_HIGH_RISK_WRANGLER"),
+            # railway
+            ("railway up", "T6_HIGH_RISK_RAILWAY"),
+            ("railway down", "T6_HIGH_RISK_RAILWAY"),
+            ("railway delete", "T6_HIGH_RISK_RAILWAY"),
+            ("railway remove", "T6_HIGH_RISK_RAILWAY"),
+            # vercel (prod deploy only; preview stays allow)
+            ("vercel deploy --prod", "T6_HIGH_RISK_VERCEL"),
+            ("vercel --cwd app deploy --prod", "T6_HIGH_RISK_VERCEL"),
+            ("vercel remove my-project", "T6_HIGH_RISK_VERCEL"),
+            # netlify
+            ("netlify deploy", "T6_HIGH_RISK_NETLIFY"),
+            ("netlify deploy --prod", "T6_HIGH_RISK_NETLIFY"),
+            ("netlify delete site", "T6_HIGH_RISK_NETLIFY"),
+            # supabase
+            ("supabase delete", "T6_HIGH_RISK_SUPABASE"),
+            ("supabase db reset", "T6_HIGH_RISK_SUPABASE"),
+            ("supabase db reset --local", "T6_HIGH_RISK_SUPABASE"),
+            # gcloud
+            ("gcloud projects delete my-proj", "T6_HIGH_RISK_GCLOUD"),
+            ("gcloud undeploy", "T6_HIGH_RISK_GCLOUD"),
+            # kubectl
+            ("kubectl delete pod x", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl -n ns delete pod x", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl scale deploy app --replicas=0", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl rollout undo deployment/app", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl apply -f f", "T6_HIGH_RISK_KUBECTL"),
+            # helm
+            ("helm uninstall my-release", "T6_HIGH_RISK_HELM"),
+            ("helm rollback my-release 1", "T6_HIGH_RISK_HELM"),
+            # docker
+            ("docker system prune", "T6_HIGH_RISK_DOCKER"),
+            ("docker rm x", "T6_HIGH_RISK_DOCKER"),
+            ("docker rmi img", "T6_HIGH_RISK_DOCKER"),
+            ("docker compose down", "T6_HIGH_RISK_DOCKER"),
+            ("docker --context x compose down", "T6_HIGH_RISK_DOCKER"),
+            ("docker compose -f stack.yml down", "T6_HIGH_RISK_DOCKER"),
+            # simctl
+            ("simctl erase", "T6_HIGH_RISK_SIMCTL"),
+            ("simctl erase all", "T6_HIGH_RISK_SIMCTL"),
+            ("simctl delete udid", "T6_HIGH_RISK_SIMCTL"),
+            # flutter / xcodebuild / pod
+            ("flutter clean", "T6_HIGH_RISK_FLUTTER"),
+            ("xcodebuild clean", "T6_HIGH_RISK_XCODEBUILD"),
+            ("xcodebuild clean -scheme App", "T6_HIGH_RISK_XCODEBUILD"),
+            ("pod deintegrate", "T6_HIGH_RISK_POD"),
+            # terraform
+            ("terraform apply", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform apply -auto-approve", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform destroy", "T6_HIGH_RISK_TERRAFORM"),
+            # wrappers and absolute paths still resolve through the table
+            ("env kubectl delete pod x", "T6_HIGH_RISK_KUBECTL"),
+            ("/usr/local/bin/terraform destroy", "T6_HIGH_RISK_TERRAFORM"),
+            # documented false positive: flag value equals a spec verb,
+            # ask-tier by design (human decides)
+            ("kubectl -n delete get pods", "T6_HIGH_RISK_KUBECTL"),
+        ]
+        for cmd, expected_category in ask_cases:
+            with self.subTest(cmd=cmd):
+                self.assert_ask(cmd, expected_category)
+
+    def test_t6_allowed_standard_tools(self):
+        allow_cases = [
+            # specified false positives
+            "gcloud projects describe x",
+            "kubectl get pods",
+            "kubectl rollout status",
+            "vercel deploy",
+            "wrangler deployments list",
+            "docker ps",
+            "docker run --rm alpine echo hi",
+            "terraform plan",
+            "xcodebuild build",
+            # exact-token and flag-neighbor negatives
+            "docker --rm run x",
+            "kubectl delete-target pod x",
+            "wrangler deployments status",
+            "vercel deploy --preprod",
+            "docker rmi-dangling",
+            "helm upgrade my-release",
+            "helm status",
+            "terraform apply=plan",
+            "terraform -destroy",
+            "flutter analyze",
+            "xcodebuild -scheme App build",
+        ]
+        for cmd in allow_cases:
+            with self.subTest(cmd=cmd):
+                self.assert_allow(cmd)
+
 
     # ------------------------------------------------------------------
     # T7: Action Space Backstop (§26a core-rules)
@@ -576,6 +675,20 @@ class SecurityGateTests(unittest.TestCase):
             per_op_ms,
             1.0,
             f"Gate evaluation took {per_op_ms:.4f} ms per op (exceeds 1.0 ms limit)",
+        )
+
+    def test_t6_tools_table_latency_under_1ms(self):
+        # 1000 evaluations of a T6_ASK_TABLE command (TK-37)
+        n = 1000
+        t0 = time.perf_counter()
+        for _ in range(n):
+            security_gate.evaluate_security("wrangler deploy")
+        elapsed = time.perf_counter() - t0
+        per_op_ms = (elapsed / n) * 1000.0
+        self.assertLess(
+            per_op_ms,
+            1.0,
+            f"T6 tools table evaluation took {per_op_ms:.4f} ms per op (exceeds 1.0 ms limit)",
         )
 
     def test_oversized_command_denied(self):
