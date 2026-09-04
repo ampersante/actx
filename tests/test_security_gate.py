@@ -1,3 +1,4 @@
+import os
 import time
 import unittest
 
@@ -586,6 +587,174 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_allow("echo 'unclosed quote")
         # Unclosed quote with dangerous secret pattern -> deny
         self.assert_deny("cat '.env", "T1_CREDENTIAL_ACCESS")
+
+
+class ProtectedPathsTableTests(unittest.TestCase):
+    """TK-35: data-driven _PROTECTED_PATHS table (cloud/data CLI credential stores)."""
+
+    def setUp(self):
+        self.gate = security_gate
+        # Suite hygiene: earlier test modules delete HOME without restoring;
+        # the $HOME/... expansion forms below require it to be set.
+        self._saved_home = os.environ.get("HOME")
+        if self._saved_home is None:
+            os.environ["HOME"] = os.path.expanduser("~")
+            self._home_patched = True
+
+    def tearDown(self):
+        if getattr(self, "_home_patched", False):
+            del os.environ["HOME"]
+            self._home_patched = False
+
+    def _assert_deny_all(self, cmds):
+        for cmd in cmds:
+            with self.subTest(cmd=cmd):
+                self.assert_deny(cmd, "T1_CREDENTIAL_ACCESS")
+
+    def assert_deny(self, cmd, expected_category=None):
+        res = self.gate.evaluate_security(cmd)
+        self.assertEqual(
+            res.decision,
+            "deny",
+            f"Expected 'deny' for '{cmd}', got '{res.decision}'",
+        )
+        if expected_category is not None:
+            self.assertEqual(
+                res.category,
+                expected_category,
+                f"Expected category '{expected_category}' for '{cmd}', got '{res.category}'",
+            )
+        self.assertIsNotNone(res.reason)
+
+    def assert_allow(self, cmd):
+        res = self.gate.evaluate_security(cmd)
+        self.assertEqual(
+            res.decision,
+            "allow",
+            f"Expected 'allow' for '{cmd}', got '{res.decision}': {res.reason}",
+        )
+
+    def test_t1_protected_basename_records_denied(self):
+        home = os.path.expanduser("~")
+        cases = [
+            ("~/.pgpass", "$HOME/.pgpass", f"{home}/.pgpass"),
+            ("~/.my.cnf", "$HOME/.my.cnf", f"{home}/.my.cnf"),
+            ("~/.databrickscfg", "$HOME/.databrickscfg", f"{home}/.databrickscfg"),
+            ("key.properties", "~/android/key.properties", f"{home}/android/key.properties"),
+            ("~/.mcp.json", "$HOME/.mcp.json", f"{home}/.mcp.json"),
+            ("mcp.json", "~/project/mcp.json", f"{home}/project/mcp.json"),
+            (
+                "~/Library/Application Support/Claude/claude_desktop_config.json",
+                "$HOME/Library/Application Support/Claude/claude_desktop_config.json",
+                f"{home}/Library/Application Support/Claude/claude_desktop_config.json",
+            ),
+        ]
+        for variants in cases:
+            self._assert_deny_all([f"cat {v}" for v in variants])
+
+    def test_t1_protected_glob_records_denied(self):
+        self._assert_deny_all([
+            "cat prod.tfstate",
+            "cat prod.tfstate.backup",
+            "cat infra/prod.tfstate",
+            "cat dev.tfvars",
+            "cat dev.tfvars.json",
+            "cat infra/envs/dev.tfvars",
+            "git show HEAD:prod.tfstate",
+            "git show HEAD:infra/dev.tfvars.json",
+        ])
+
+    def test_t1_protected_home_records_denied(self):
+        home = os.path.expanduser("~")
+        cases = [
+            "~/.railway/config.json",
+            "~/.config/clerk-cli/config.json",
+            "~/Library/Preferences/clerk-cli/config.json",
+            "~/.local/share/clerk-cli/credentials",
+            "~/Library/Application Support/clerk-cli/credentials",
+            "~/.config/netlify/config.json",
+            "~/Library/Preferences/netlify/config.json",
+            "~/.netlify/config.yml",
+            "~/.fly/config.yml",
+            "~/.supabase/access-token",
+            "~/.wrangler/config/default.toml",
+            "~/Library/Preferences/.wrangler/config/default.toml",
+            "~/.config/.wrangler/config/default.json",
+            "~/.config/gcloud/credentials.db",
+            "~/.config/gcloud/legacy_credentials/user@project.iam.gserviceaccount.com/adc.json",
+            "~/.config/gcloud/access_tokens.db",
+            "~/.vercel/auth.json",
+            "~/.snowsql/config",
+        ]
+        for rec in cases:
+            abs_path = f"{home}{rec[1:]}"
+            self._assert_deny_all([
+                f"cat {rec}",
+                f"cat $HOME{rec[1:]}",
+                f"cat {abs_path}",
+            ])
+        # Git HEAD: notation with a home-anchored record
+        self._assert_deny_all([
+            "git show HEAD:~/.snowsql/config",
+            "git show HEAD:.vercel/auth.json",
+        ])
+
+    def test_t1_protected_paths_template_suffixes_allowed(self):
+        self.assert_allow("cat terraform.tfvars.example")
+        self.assert_allow("cat prod.tfvars.example")
+        self.assert_allow("cat terraform.tfstate.example")
+        self.assert_allow("cat .env.example")
+        self.assert_allow("cat .env.sample")
+
+    def test_t1_protected_paths_negative_neighbors_allowed(self):
+        self.assert_allow("cat src/config.json")
+        self.assert_allow("cat somewhere/default.toml")
+        self.assert_allow("cat notes.md")
+        self.assert_allow("cat ~/.wrangler/wrangler.toml")
+        self.assert_allow("cat ~/.config/gcloud/configurations/config_default")
+        self.assert_allow("cat ~/.netlify/sites.json")
+        self.assert_allow("cat ~/.railway/account.json")
+
+    def test_prefilter_covers_all_new_tokens(self):
+        tokens_paths = {
+            "pgpass": "/home/u/.pgpass",
+            "my\\.cnf": "/home/u/.my.cnf",
+            "snowsql": "~/.snowsql/config",
+            "databrickscfg": "~/.databrickscfg",
+            "mcp\\.json": "~/.mcp.json",
+            "key\\.properties": "android/key.properties",
+            "wrangler": "~/.wrangler/config/default.toml",
+            "gcloud": "~/.config/gcloud/access_tokens.db",
+            "vercel": "~/.vercel/auth.json",
+            "netlify": "~/.netlify/config.yml",
+            "supabase": "~/.supabase/access-token",
+            "flyctl": "~/.fly/config.yml",
+            "railway": "~/.railway/config.json",
+            "clerk": "~/.config/clerk-cli/config.json",
+            "tfstate": "prod.tfstate",
+            "tfvars": "dev.tfvars",
+            "auth\\.json": "~/.vercel/auth.json",
+        }
+        for token, path in tokens_paths.items():
+            with self.subTest(token=token):
+                self.assertIsNotNone(
+                    security_gate._RE_SENSITIVE_QUICK_CHECK.search(path),
+                    f"Prefilter token '{token}' does not match path '{path}'",
+                )
+
+    def test_gate_protected_path_latency_under_1ms(self):
+        # 1000 evaluations hitting the _PROTECTED_PATHS table (home + glob entries)
+        n = 1000
+        t0 = time.perf_counter()
+        for _ in range(n):
+            security_gate.evaluate_security("cat ~/.snowsql/config")
+        elapsed = time.perf_counter() - t0
+        per_op_ms = (elapsed / n) * 1000.0
+        self.assertLess(
+            per_op_ms,
+            1.0,
+            f"Protected-path gate evaluation took {per_op_ms:.4f} ms per op (exceeds 1.0 ms limit)",
+        )
 
 
 if __name__ == "__main__":

@@ -14,6 +14,8 @@ Evaluation latency strictly < 1.0 ms wall time.
 """
 
 from collections import namedtuple
+import fnmatch
+import functools
 import os
 import posixpath
 import re
@@ -72,6 +74,80 @@ _ALLOWED_ENV_SUFFIXES = (
     ".defaults",
     ".schema",
 )
+
+# Data-driven table of cloud/data CLI credential stores (T1). Three record kinds:
+#   ("basename", name) -> exact basename match anywhere in the tree
+#   ("glob", pattern)  -> fnmatch on the basename, anywhere
+#   ("home", pattern)  -> path anchored at $HOME; '~' prefixes the template, tail
+#                         '*' segments are fnmatch globs and a '/**' suffix
+#                         protects everything inside that directory.
+# Paths verified against upstream CLI docs/sources (WRANGLER, gcloud, Railway,
+# Clerk, Vercel, Netlify, Supabase, flyctl, SnowSQL, psql, MySQL, Databricks).
+# Adding a new protected path is a one-line data edit.
+_PROTECTED_PATHS = (
+    # --- data tool configs holding plaintext credentials ---
+    ("basename", ".pgpass"),
+    ("basename", ".my.cnf"),
+    ("basename", ".databrickscfg"),
+    ("basename", "key.properties"),
+    # --- MCP / agent desktop configs holding API keys ---
+    ("basename", ".mcp.json"),
+    ("basename", "mcp.json"),
+    ("basename", "claude_desktop_config.json"),
+    # --- Terraform state & variable files (secrets in plaintext) ---
+    ("glob", "*.tfstate"),
+    ("glob", "*.tfstate.*"),
+    ("glob", "*.tfvars"),
+    ("glob", "*.tfvars.json"),
+    # --- Railway ---
+    ("home", "~/.railway/config.json"),
+    # --- Clerk ---
+    ("home", "~/.config/clerk-cli/config.json"),
+    ("home", "~/Library/Preferences/clerk-cli/config.json"),
+    ("home", "~/.local/share/clerk-cli/credentials"),
+    ("home", "~/Library/Application Support/clerk-cli/credentials"),
+    # --- Netlify ---
+    ("home", "~/.config/netlify/config.json"),
+    ("home", "~/Library/Preferences/netlify/config.json"),
+    ("home", "~/.netlify/config.yml"),
+    # --- Fly.io ---
+    ("home", "~/.fly/config.yml"),
+    # --- Supabase ---
+    ("home", "~/.supabase/access-token"),
+    # --- Cloudflare Wrangler ---
+    ("home", "~/.wrangler/config/default.*"),
+    ("home", "~/Library/Preferences/.wrangler/config/default.*"),
+    ("home", "~/.config/.wrangler/config/default.*"),
+    # --- Google Cloud SDK ---
+    ("home", "~/.config/gcloud/credentials*"),
+    ("home", "~/.config/gcloud/legacy_credentials/**"),
+    ("home", "~/.config/gcloud/access_tokens.db"),
+    # --- Vercel ---
+    ("home", "~/.vercel/auth.json"),
+    # --- Snowflake SnowSQL ---
+    ("home", "~/.snowsql/config"),
+)
+
+_PROTECTED_BASENAME_ENTRIES = tuple(e[1] for e in _PROTECTED_PATHS if e[0] == "basename")
+_PROTECTED_GLOB_ENTRIES = tuple(e[1] for e in _PROTECTED_PATHS if e[0] == "glob")
+
+
+@functools.lru_cache(maxsize=16)
+def _protected_home_entries(home: str) -> tuple:
+    """Expand home-anchored records for the given $HOME.
+
+    Derived lazily (not at import) so a mutated HOME in long-lived test or
+    agent processes is honored. Returns lowercase (abs_path, rel_path, deep)
+    triples for case-insensitive comparison; rel_path equals abs_path when
+    the template is not anchored under home.
+    """
+    entries = []
+    for rec, deep in ((e[1], e[1].endswith("/**")) for e in _PROTECTED_PATHS if e[0] == "home"):
+        template = rec[:-3] if deep else rec
+        abs_p = os.path.expandvars(os.path.expanduser(template)).rstrip("/").lower()
+        rel_p = abs_p[len(home) + 1:] if home and abs_p.startswith(home.lower() + "/") else abs_p
+        entries.append((abs_p, rel_p, deep))
+    return tuple(entries)
 
 _PERSISTENCE_FILES = {
     ".zshrc",
@@ -145,7 +221,8 @@ _RE_EXFIL_VARS = re.compile(
     re.IGNORECASE,
 )
 _RE_SENSITIVE_QUICK_CHECK = re.compile(
-    r"(?:\.env|\benv\b|\.e[\w?*]{2}|\.ssh|id_|credentials|shadow|gshadow|sudoers|passwd|password|token|key|cert|\.pem|\.pfx|\.p12|\.pkcs12|\.kdbx|\.netrc|\.npmrc|\.pypirc|\.codex-global-state|\.kube|~|\$|/etc|\[[a-z0-9]\])",
+    r"(?:\.env|\benv\b|\.e[\w?*]{2}|\.ssh|id_|credentials|shadow|gshadow|sudoers|passwd|password|token|key|cert|\.pem|\.pfx|\.p12|\.pkcs12|\.kdbx|\.netrc|\.npmrc|\.pypirc|\.codex-global-state|\.kube|~|\$|/etc|\[[a-z0-9]\]"
+    r"|pgpass|my\.cnf|snowsql|databrickscfg|mcp\.json|key\.properties|wrangler|gcloud|vercel|netlify|supabase|flyctl|\.fly|railway|clerk|tfstate|tfvars|auth\.json|claude_desktop_config)",
     re.IGNORECASE,
 )
 
@@ -177,6 +254,35 @@ def _unwrap_tokens(tokens: list[str]) -> list[str]:
             continue
         break
     return tokens[idx:] if idx < len(tokens) else []
+
+
+def _matches_protected_paths(candidate: str) -> bool:
+    """Match an expanded path candidate against the _PROTECTED_PATHS table."""
+    candidate = candidate.lower()
+    base = os.path.basename(candidate)
+    if base in _PROTECTED_BASENAME_ENTRIES:
+        return True
+    if any(fnmatch.fnmatch(base, pattern) for pattern in _PROTECTED_GLOB_ENTRIES):
+        return True
+    entries = _protected_home_entries(os.path.expanduser("~"))
+    for abs_p, rel_p, deep in entries:
+        if deep:
+            if candidate == abs_p or candidate == rel_p:
+                return True
+            if candidate.startswith(abs_p + "/") or candidate.startswith(rel_p + "/"):
+                return True
+        elif any(c in abs_p for c in "*?["):
+            # Tail segments may carry globs (default.*, credentials*) —
+            # match structurally against both the absolute and relative form.
+            if fnmatch.fnmatch(candidate, abs_p) or fnmatch.fnmatch(candidate, rel_p):
+                return True
+        elif candidate == abs_p or candidate == rel_p:
+            return True
+        elif candidate.endswith("/" + abs_p) or candidate.endswith("/" + rel_p):
+            # Relative candidates (e.g. git HEAD: notation stripped to a repo
+            # path) match on the tail so home configs are caught at any depth.
+            return True
+    return False
 
 
 def _is_sensitive_path(path: str) -> bool:
@@ -227,7 +333,19 @@ def _is_sensitive_path(path: str) -> bool:
     if base_lower.startswith(".env.") and any(base_lower.endswith(sfx) for sfx in _ALLOWED_ENV_SUFFIXES):
         return False
 
-    # Check .env variants (.env, .env.local, .env.production, .env.secret, etc.)
+    # Table-scoped template suffix exemption: terraform.tfvars.example and
+    # similar glob-record template files are safe to read (basename records
+    # intentionally keep denying: their template naming is not standardized).
+    _, ext = posixpath.splitext(base_lower)
+    if ext and any(base_lower.endswith(sfx) for sfx in _ALLOWED_ENV_SUFFIXES):
+        stem = base_lower[: -len(ext)]
+        if any(fnmatch.fnmatch(stem, pattern) for pattern in _PROTECTED_GLOB_ENTRIES):
+            return False
+
+    # Data-driven protected-path table (basename / glob / $HOME-anchored records)
+    candidate = os.path.expandvars(os.path.expanduser(norm_path))
+    if _matches_protected_paths(candidate):
+        return True
     if base_lower == ".env" or base_lower.startswith(".env.") or base_lower.startswith(".envrc"):
         return True
 
