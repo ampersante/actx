@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 
-from actx_lib import hang_policy, tracking, user_filter
+from actx_lib import hang_policy, redaction, tracking, user_filter
 
 _STREAM_LIMIT = 10 * 1024 * 1024
 
@@ -68,11 +68,43 @@ def _text_bytes(text):
     return len(text.encode("utf-8")) if text else 0
 
 
+def _redact_result(result):
+    """Masked view of a text CompletedProcess; None when redaction failed.
+
+    Masking covers the screen (print/cap/tracking decisions) and the tee via
+    _write_tee, so raw output never reaches disk on the happy path.
+    """
+    try:
+        return subprocess.CompletedProcess(
+            args=result.args,
+            returncode=result.returncode,
+            stdout=redaction.redact_text(result.stdout),
+            stderr=redaction.redact_text(result.stderr),
+        )
+    except Exception:
+        return None
+
+
+def _secret_bearing_result(result):
+    """True when stdout+stderr look secret-bearing; bytes decode lossily."""
+    try:
+        stdout = result.stdout
+        stderr = result.stderr
+        if isinstance(stdout, (bytes, bytearray)):
+            stdout = bytes(stdout).decode("utf-8", "replace")
+        if isinstance(stderr, (bytes, bytearray)):
+            stderr = bytes(stderr).decode("utf-8", "replace")
+        return redaction.secret_bearing((stdout or "") + (stderr or ""))
+    except Exception:
+        return True
+
+
 def record_raw(cmd, result, strategy, passthrough=0):
     raw = _text_bytes(result.stdout) + _text_bytes(result.stderr)
     tracking.record(
         cmd, cmd[0], raw, raw, result.returncode,
         passthrough=passthrough, strategy=strategy,
+        store_text=not _secret_bearing_result(result),
     )
 
 
@@ -83,6 +115,7 @@ def record_compacted(cmd, result, out_text, strategy, newline=True, extra_bytes=
         emitted += 1
     tracking.record(
         cmd, cmd[0], raw, emitted, result.returncode, strategy=strategy,
+        store_text=not _secret_bearing_result(result),
     )
 
 
@@ -187,6 +220,15 @@ def _print_transformed(stdout, stderr):
 
 
 def _write_tee(cmd, stdout, stderr, exit_code, tee_dir):
+    # Second redaction layer: every caller's streams are already masked in
+    # most paths; this covers the rest (e.g. compacted write_tee callers).
+    # A redaction failure here means the raw output must not hit disk —
+    # skip the file entirely.
+    try:
+        stdout = redaction.redact_text(stdout)
+        stderr = redaction.redact_text(stderr)
+    except Exception:
+        return None
     tee_dir = os.path.expanduser(tee_dir)
     os.makedirs(tee_dir, exist_ok=True)
     command_hash = hashlib.sha1(_join_cmd(cmd).encode("utf-8")).hexdigest()
@@ -260,6 +302,7 @@ def run_passthrough(cmd):
     tracking.record(
         cmd, cmd[0], raw_bytes, raw_bytes, result.returncode,
         passthrough=1, strategy="passthrough",
+        store_text=not _secret_bearing_result(result),
     )
     return result.returncode
 
@@ -285,6 +328,7 @@ def run_lossless(cmd, config, strategy="lossless"):
         tracking.record(
             cmd, cmd[0], raw_bytes, emitted, result.returncode,
             strategy=strategy,
+            store_text=not _secret_bearing_result(result),
         )
         if tee_decision(config, "auto", result.returncode):
             write_tee(cmd, result, config)
@@ -329,7 +373,18 @@ def run(cmd, config):
     max_lines = truncate.get("max_lines", 500)
     max_line_chars = truncate.get("max_line_chars", 300)
 
-    raw_stdout = result.stdout
+    # Fail-open contract: if redaction fails, print RAW output (the agent
+    # needs it), write no tee file and keep the command out of history.
+    masked = _redact_result(result)
+    if masked is None:
+        print_raw(result)
+        tracking.record(
+            cmd, cmd[0], 0, 0, result.returncode, strategy="generic",
+            store_text=False,
+        )
+        return result.returncode
+    raw_stdout = masked.stdout
+
     rules = user_filter.load()
     if rules is None:
         rules = []
@@ -343,7 +398,7 @@ def run(cmd, config):
         _lossless_transform(raw_stdout), max_lines, max_line_chars
     )
     stderr_compacted = _cap_lines_explicit(
-        _lossless_transform(result.stderr), max_lines, max_line_chars
+        _lossless_transform(masked.stderr), max_lines, max_line_chars
     )
 
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
@@ -364,16 +419,19 @@ def run(cmd, config):
             1 if stderr_compacted and not stderr_compacted.endswith("\n") else 0
         )
     else:
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-            if not result.stderr.endswith("\n"):
+        if masked.stderr:
+            print(masked.stderr, end="", file=sys.stderr)
+            if not masked.stderr.endswith("\n"):
                 print(file=sys.stderr)
         print("[exit: %d]" % result.returncode, file=sys.stderr)
-        emitted = _text_bytes(result.stderr)
-        emitted += 1 if result.stderr and not result.stderr.endswith("\n") else 0
+        emitted = _text_bytes(masked.stderr)
+        emitted += 1 if masked.stderr and not masked.stderr.endswith("\n") else 0
         emitted += _text_bytes("[exit: %d]\n" % result.returncode)
 
-    tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="generic")
+    tracking.record(
+        cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="generic",
+        store_text=not _secret_bearing_result(result),
+    )
 
     tee_config = config.get("tee", {})
     should_tee = bool(tee_config.get("enabled")) and (
@@ -386,12 +444,13 @@ def run(cmd, config):
     if should_tee:
         path = _write_tee(
             cmd,
-            result.stdout,
-            result.stderr,
+            masked.stdout,
+            masked.stderr,
             result.returncode,
             tee_config.get("dir", "~/.local/share/actx/tee"),
         )
-        print("[full output: %s]" % path, file=sys.stderr)
+        if path:
+            print("[full output: %s]" % path, file=sys.stderr)
 
     return result.returncode
 
@@ -485,7 +544,10 @@ def compacted_result(cmd, result, config, compact_fn, tee_policy="auto", strateg
                 print()
         emitted = _text_bytes(out) + (1 if out and not out.endswith("\n") else 0)
         raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-        tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy=strategy)
+        tracking.record(
+            cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy=strategy,
+            store_text=not _secret_bearing_result(result),
+        )
         if tee_decision(config, tee_policy, result.returncode):
             write_tee(cmd, result, config)
         return result.returncode
@@ -515,7 +577,10 @@ def run_errors(cmd):
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
     emitted = _text_bytes(result.stderr)
     emitted += 1 if result.stderr and not result.stderr.endswith("\n") else 0
-    tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="errors")
+    tracking.record(
+        cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="errors",
+        store_text=not _secret_bearing_result(result),
+    )
     return result.returncode
 
 
@@ -554,5 +619,8 @@ def run_digest(cmd, n=10):
     emitted += _text_bytes(result.stderr)
     emitted += 1 if result.stderr and not result.stderr.endswith("\n") else 0
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-    tracking.record(cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="digest")
+    tracking.record(
+        cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="digest",
+        store_text=not _secret_bearing_result(result),
+    )
     return result.returncode

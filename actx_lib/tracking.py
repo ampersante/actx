@@ -93,8 +93,11 @@ def connect():
     return conn
 
 
-def record(cmd, category, bytes_before, bytes_after, exit_code, passthrough=0, strategy=""):
-    """Store an aggregate; never the full command. Fail-open: any storage
+def record(cmd, category, bytes_before, bytes_after, exit_code, passthrough=0, strategy="",
+           store_text=True):
+    """Store an aggregate; never the full command. store_text=False keeps the
+    command out of history (e.g. secret-bearing output); the column is NOT NULL
+    so an empty string is written. Fail-open: any storage
     error is silently ignored so it cannot affect the command's exit code."""
     if not is_enabled():
         return
@@ -109,7 +112,7 @@ def record(cmd, category, bytes_before, bytes_after, exit_code, passthrough=0, s
                 "strategy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     command_hash,
-                    _join_cmd(cmd)[:4096],
+                    _join_cmd(cmd)[:4096] if store_text else "",
                     category,
                     int(bytes_before),
                     int(bytes_after),
