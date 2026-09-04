@@ -12,6 +12,12 @@ DEFAULT_CONFIG = {
         "max_lines": 500,
         "max_line_chars": 300,
     },
+    # Hang-policy timeouts (seconds): default for the general class,
+    # generous for known long builders (see actx_lib/hang_policy.py).
+    "timeouts": {
+        "default_s": 600,
+        "generous_s": 1800,
+    },
     "bypass_commands": [],
     "ignore_dirs": [".git", "node_modules", "target"],
     "ignore_files": ["*.lock"],

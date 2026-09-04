@@ -1,7 +1,9 @@
 import io
+import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -19,12 +21,21 @@ CONFIG = {
 
 
 class RunModeCliTests(unittest.TestCase):
-    def run_actx(self, args):
+    def run_actx(self, args, timeout=None):
         env = os.environ.copy()
         env["HOME"] = self.home.name
         return subprocess.run(
-            [ACTX] + args, capture_output=True, text=True, env=env
+            [ACTX] + args, capture_output=True, text=True, env=env,
+            timeout=timeout,
         )
+
+    def write_config(self, extra):
+        config = dict(CONFIG)
+        config.update(extra)
+        path = os.path.join(self.home.name, ".config", "actx", "config.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
 
     def setUp(self):
         self.home = tempfile.TemporaryDirectory()
@@ -55,6 +66,167 @@ class RunModeCliTests(unittest.TestCase):
         p = self.run_actx(["run", "--failures", "python3", "-c", "print('hello')"])
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout, "hello\n")
+
+
+class HangPolicyIntegrationTests(unittest.TestCase):
+    """Never-wrap refusal, timeouts, stdin guard — every case bounded."""
+
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.home.cleanup()
+
+    def run_actx(self, args):
+        env = os.environ.copy()
+        env["HOME"] = self.home.name
+        return subprocess.run(
+            [ACTX] + args, capture_output=True, text=True, env=env
+        )
+
+    def write_config(self, extra):
+        config = dict(CONFIG)
+        config.update(extra)
+        path = os.path.join(self.home.name, ".config", "actx", "config.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+
+    def test_tail_f_run_path_refused_before_start(self):
+        self.write_config({"timeouts": {"default_s": 1, "generous_s": 1}})
+        start = time.monotonic()
+        p = self.run_actx(["run", "tail", "-f", "/dev/null"])
+        elapsed = time.monotonic() - start
+        self.assertEqual(p.returncode, 125, p.stderr)
+        self.assertLess(elapsed, 2.0)
+        self.assertIn("выполнить вручную", p.stderr)
+        self.assertIn("tail -f /dev/null", p.stderr)
+
+    def test_tail_f_head_path_refused_before_start(self):
+        start = time.monotonic()
+        p = self.run_actx(["tail", "-f", "/dev/null"])
+        elapsed = time.monotonic() - start
+        self.assertEqual(p.returncode, 125, p.stderr)
+        self.assertLess(elapsed, 2.0)
+        self.assertIn("выполнить вручную", p.stderr)
+
+    def test_tail_f_passthrough_refused_before_start(self):
+        start = time.monotonic()
+        p = self.run_actx(["--raw", "tail", "-f", "/dev/null"])
+        elapsed = time.monotonic() - start
+        self.assertEqual(p.returncode, 125, p.stderr)
+        self.assertLess(elapsed, 2.0)
+
+    def test_default_timeout_returns_124(self):
+        self.write_config({"timeouts": {"default_s": 1, "generous_s": 30}})
+        start = time.monotonic()
+        p = self.run_actx(["run", "sleep", "30"])
+        elapsed = time.monotonic() - start
+        self.assertEqual(p.returncode, 124, p.stderr)
+        self.assertLess(elapsed, 3.0)
+        self.assertIn("timed out", p.stderr)
+
+    def test_generous_class_gets_generous_timeout(self):
+        # No stdlib builder exists, so assert the class -> timeout mapping
+        # directly: generous must not receive the short default timeout.
+        captured = {}
+        config = dict(CONFIG)
+        config["timeouts"] = {"default_s": 1, "generous_s": 30}
+
+        def fake_run(cmd, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            captured["stdin"] = kwargs.get("stdin")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch("actx_lib.runner.subprocess.run", side_effect=fake_run):
+            rc = runner.run(["flutter", "build", "apk"], config)
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["timeout"], 30)
+        self.assertIs(captured["stdin"], subprocess.DEVNULL)
+
+        captured.clear()
+        with mock.patch("actx_lib.runner.subprocess.run", side_effect=fake_run):
+            runner.run(["echo", "hi"], config)
+        self.assertEqual(captured["timeout"], 1)
+
+    def test_run_and_execute_pass_devnull_stdin(self):
+        config = dict(CONFIG)
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch("actx_lib.runner.subprocess.run", side_effect=fake_run) as m:
+            runner.run(["echo", "hi"], config)
+            runner.run_passthrough(["echo", "hi"])
+            runner.execute(["echo", "hi"])
+        for call in m.call_args_list:
+            self.assertIs(call.kwargs.get("stdin"), subprocess.DEVNULL)
+
+    def test_timeout_seconds_fail_open_to_defaults(self):
+        self.assertEqual(runner._timeout_seconds({}, "default"), 600)
+        self.assertEqual(runner._timeout_seconds({}, "generous"), 1800)
+        self.assertEqual(
+            runner._timeout_seconds({"timeouts": {"default_s": "banana"}}, "default"),
+            600,
+        )
+        self.assertEqual(
+            runner._timeout_seconds({"timeouts": {"default_s": 0}}, "default"),
+            600,
+        )
+        self.assertEqual(
+            runner._timeout_seconds({"timeouts": {"default_s": -5}}, "default"),
+            600,
+        )
+        self.assertEqual(
+            runner._timeout_seconds({"timeouts": {"generous_s": 5}}, "generous"),
+            5.0,
+        )
+
+    def test_timeout_on_errors_path_returns_124(self):
+        self.write_config({"timeouts": {"default_s": 1, "generous_s": 30}})
+        start = time.monotonic()
+        p = self.run_actx(["run", "--errors", "sleep", "30"])
+        elapsed = time.monotonic() - start
+        self.assertEqual(p.returncode, 124, p.stderr)
+        self.assertLess(elapsed, 3.0)
+        self.assertIn("timed out", p.stderr)
+
+    def test_never_wrap_on_errors_path_returns_125(self):
+        start = time.monotonic()
+        p = self.run_actx(["run", "--errors", "tail", "-f", "/dev/null"])
+        elapsed = time.monotonic() - start
+        self.assertEqual(p.returncode, 125, p.stderr)
+        self.assertLess(elapsed, 2.0)
+        self.assertIn("выполнить вручную", p.stderr)
+
+    def test_stdin_guard_devnull(self):
+        # Without the guard, `head -1` reading stdin would block; with
+        # DEVNULL it sees EOF immediately.
+        start = time.monotonic()
+        p = self.run_actx(["run", "head", "-1"])
+        elapsed = time.monotonic() - start
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertLess(elapsed, 5.0)
+
+    def test_interactive_prompt_hint_after_run(self):
+        script = "import sys; print('Proceed? [y/n]'); print('done')"
+        p = self.run_actx(["run", "python3", "-c", script])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("интерактивная команда — выполнить вручную", p.stderr)
+        # Command output itself is untouched.
+        self.assertIn("Proceed? [y/n]", p.stdout)
+        self.assertIn("done", p.stdout)
+
+    def test_no_hint_without_prompt(self):
+        p = self.run_actx(["run", "python3", "-c", "print('all good')"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNotIn("интерактивная команда", p.stderr)
+
+    def test_invalid_timeout_config_falls_open_to_default(self):
+        self.write_config({"timeouts": {"default_s": "banana"}})
+        p = self.run_actx(["run", "echo", "ok"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("ok", p.stdout)
 
 
 class DigestTextTests(unittest.TestCase):

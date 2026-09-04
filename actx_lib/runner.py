@@ -6,9 +6,62 @@ import subprocess
 import sys
 import time
 
-from actx_lib import tracking, user_filter
+from actx_lib import hang_policy, tracking, user_filter
 
 _STREAM_LIMIT = 10 * 1024 * 1024
+
+# actx-internal refusal (streaming/interactive command).
+NEVER_WRAP_EXIT_CODE = 125
+# actx-internal timeout (subprocess.TimeoutExpired).
+TIMEOUT_EXIT_CODE = 124
+
+
+def _timeout_seconds(config, timeout_class):
+    """Configured seconds for "default"/"generous"; defaults on bad values."""
+    defaults = {"default": 600, "generous": 1800}
+    value = (config.get("timeouts") or {}).get(
+        "%s_s" % timeout_class, defaults[timeout_class]
+    )
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return defaults[timeout_class]
+    if seconds <= 0:
+        return defaults[timeout_class]
+    return seconds
+
+
+def _refused(cmd, code, passthrough=False):
+    print(
+        "[actx] streaming/interactive command refused — выполнить вручную: %s"
+        % _join_cmd(cmd),
+        file=sys.stderr,
+    )
+    if passthrough:
+        tracking.record(
+            cmd, cmd[0], 0, 0, code, passthrough=1, strategy="passthrough",
+        )
+    return code
+
+
+def _synthetic_result(cmd, code, message):
+    return subprocess.CompletedProcess(args=cmd, returncode=code, stdout="", stderr=message)
+
+
+def _timed_out(cmd, seconds, passthrough=False):
+    print(_timed_out_message(cmd, seconds), file=sys.stderr)
+    if passthrough:
+        tracking.record(
+            cmd, cmd[0], 0, 0, TIMEOUT_EXIT_CODE,
+            passthrough=1, strategy="passthrough",
+        )
+    return TIMEOUT_EXIT_CODE
+
+
+def _timed_out_message(cmd, seconds):
+    return "[actx] command timed out after %gs — сузьте команду или выполните вручную: %s" % (
+        seconds, _join_cmd(cmd),
+    )
 
 
 def _text_bytes(text):
@@ -43,6 +96,16 @@ def _tee_min_bytes(config):
 
 def _join_cmd(cmd):
     return " ".join(cmd)
+
+
+def _load_config():
+    """Fresh config for paths that receive no config from their caller."""
+    try:
+        from actx_lib import config
+
+        return config.load()
+    except Exception:
+        return {}
 
 
 def _truncate_line(line, max_chars):
@@ -173,7 +236,17 @@ def _retain(tee_dir):
 def run_passthrough(cmd):
     """Execute without filtering; bytes mode preserves non-UTF-8 output."""
     try:
-        result = subprocess.run(cmd, capture_output=True)
+        timeout_class = hang_policy.classify(cmd)
+    except Exception:
+        timeout_class = "default"
+    if timeout_class == "never_wrap":
+        return _refused(cmd, NEVER_WRAP_EXIT_CODE, passthrough=True)
+
+    timeout = _timeout_seconds(_load_config(), timeout_class)
+    try:
+        result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return _timed_out(cmd, timeout, passthrough=True)
     except OSError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -222,10 +295,35 @@ def run_lossless(cmd, config, strategy="lossless"):
 
 def run(cmd, config):
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        timeout_class = hang_policy.classify(cmd)
+    except Exception:
+        timeout_class = "default"
+    if timeout_class == "never_wrap":
+        return _refused(cmd, NEVER_WRAP_EXIT_CODE)
+
+    timeout = _timeout_seconds(config, timeout_class)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        print(_timed_out_message(cmd, timeout), file=sys.stderr)
+        return TIMEOUT_EXIT_CODE
     except OSError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+    try:
+        combined = (result.stdout or "") + (result.stderr or "")
+        if hang_policy.is_interactive_prompt(combined):
+            print(
+                "[actx] интерактивная команда — выполнить вручную: %s"
+                % _join_cmd(cmd),
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
 
     truncate = config.get("truncate", {})
     max_lines = truncate.get("max_lines", 500)
@@ -301,7 +399,25 @@ def run(cmd, config):
 def execute(cmd):
     """Execute an exec-array, returning CompletedProcess or None on OSError."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True)
+        timeout_class = hang_policy.classify(cmd)
+    except Exception:
+        timeout_class = "default"
+    if timeout_class == "never_wrap":
+        return _synthetic_result(
+            cmd,
+            NEVER_WRAP_EXIT_CODE,
+            "[actx] streaming/interactive command refused — выполнить вручную: %s"
+            % _join_cmd(cmd),
+        )
+
+    timeout = _timeout_seconds(_load_config(), timeout_class)
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return _synthetic_result(cmd, TIMEOUT_EXIT_CODE, _timed_out_message(cmd, timeout))
     except OSError as exc:
         print(str(exc), file=sys.stderr)
         return None
