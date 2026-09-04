@@ -1,6 +1,7 @@
 import json
 
 from actx_lib import runner
+from actx_lib.filters import json_compactor
 from actx_lib.redaction import (
     _SECRET_PATTERNS,
     _drop_secret_json,
@@ -35,12 +36,12 @@ def _dedup_compact(text):
 
 
 def compact_aws(text):
-    stripped = text.strip()
-    try:
-        obj = json.loads(stripped)
-    except ValueError:
-        return _dedup_compact(text)
-    return json.dumps(_drop_secret_json(obj), indent=2, sort_keys=True)
+    compacted = json_compactor.compact_json(
+        text, indent=2, sort_keys=True, max_items=None
+    )
+    if compacted is not None:
+        return compacted
+    return _dedup_compact(text)
 
 
 def _run_compact(args, config, parser):

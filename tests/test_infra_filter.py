@@ -1,10 +1,12 @@
 import io
+import json
 import subprocess
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from actx_lib.filters import infra_filter
+from actx_lib.redaction import _drop_secret_json
 
 CONFIG = {
     "tee": {"enabled": False, "mode": "failures", "dir": "~/.local/share/actx/tee"},
@@ -84,6 +86,19 @@ class InfraParserTests(unittest.TestCase):
         out = infra_filter.compact_aws(AWS_TEXT)
         self.assertIn("normal line", out)
         self.assertNotIn("password", out)
+
+    def test_aws_json_matches_legacy_dump_byte_for_byte(self):
+        # compact_aws delegates to json_compactor; valid JSON must stay
+        # byte-identical to the pre-TK-38 dump: indent=2, sort_keys=True,
+        # no list trimming.
+        text = json.dumps(
+            {"zeta": [5, 1, 3], "arn": "a", "SecretAccessKey": "shhh",
+             "nested": {"b": 2, "a": 1}, "Rows": [{"y": 2, "x": 1}]}
+        )
+        self.assertEqual(
+            infra_filter.compact_aws(text),
+            json.dumps(_drop_secret_json(json.loads(text)), indent=2, sort_keys=True),
+        )
 
 
 class InfraExitCodeTests(unittest.TestCase):
