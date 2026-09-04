@@ -10,6 +10,10 @@ from actx_lib import hang_policy, redaction, tracking, user_filter
 
 _STREAM_LIMIT = 10 * 1024 * 1024
 
+# Auto-detect JSON output on the generic run() path only below this stdout
+# size; larger output stays on the line-based path (PRD.md 12 budget).
+JSON_AUTO_LIMIT = 2 * 1024 * 1024
+
 # actx-internal refusal (streaming/interactive command).
 NEVER_WRAP_EXIT_CODE = 125
 # actx-internal timeout (subprocess.TimeoutExpired).
@@ -369,6 +373,32 @@ def run(cmd, config):
     except Exception:
         pass
 
+    # Valid JSON output is compacted as a whole, on the raw stdout and before
+    # line-drop masking (a dropped secret line would break multi-line JSON).
+    # None / error -> normal line-based path below.
+    json_path = False
+    try:
+        stdout = result.stdout or ""
+        if (
+            stdout
+            and len(stdout) <= JSON_AUTO_LIMIT
+            and stdout.lstrip()[:1] in ("{", "[")
+        ):
+            from actx_lib.filters import json_compactor
+
+            json_out = json_compactor.compact_json(
+                stdout, indent=2, max_items=20
+            )
+            if json_out is not None:
+                json_path = True
+    except Exception:
+        json_path = False
+    if json_path:
+        try:
+            return _run_json_path(cmd, result, config, json_out)
+        except Exception:
+            pass
+
     truncate = config.get("truncate", {})
     max_lines = truncate.get("max_lines", 500)
     max_line_chars = truncate.get("max_line_chars", 300)
@@ -452,6 +482,65 @@ def run(cmd, config):
         if path:
             print("[full output: %s]" % path, file=sys.stderr)
 
+    return result.returncode
+
+
+def _run_json_path(cmd, result, config, json_out):
+    """Compact-JSON replacement for run()'s line-based stdout pipeline.
+
+    json_out is the compacted dump (already secret-masked). stderr and exit
+    code handling mirror the line path; user_filter applies to the dump as it
+    does to raw stdout. Raises propagate: run() fails open to the line path.
+    """
+    rules = user_filter.load()
+    if rules is None:
+        rules = []
+    if rules and result.returncode == 0:
+        json_out = user_filter.apply(rules, cmd[0], json_out)
+    if json_out:
+        print(json_out, end="")
+        if not json_out.endswith("\n"):
+            print()
+
+    stderr = ""
+    if result.stderr:
+        stderr = redaction.redact_text(result.stderr)
+        if stderr:
+            print(stderr, end="", file=sys.stderr)
+            if not stderr.endswith("\n"):
+                print(file=sys.stderr)
+    if result.returncode != 0:
+        print("[exit: %d]" % result.returncode, file=sys.stderr)
+
+    emitted = _text_bytes(json_out)
+    emitted += 1 if json_out and not json_out.endswith("\n") else 0
+    emitted += _text_bytes(stderr)
+    emitted += 1 if stderr and not stderr.endswith("\n") else 0
+    if result.returncode != 0:
+        emitted += _text_bytes("[exit: %d]\n" % result.returncode)
+    raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
+    tracking.record(
+        cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="generic",
+        store_text=not _secret_bearing_result(result),
+    )
+
+    tee_config = config.get("tee", {})
+    should_tee = bool(tee_config.get("enabled")) and (
+        tee_config.get("mode") == "always"
+        or (tee_config.get("mode") == "failures" and result.returncode != 0)
+    )
+    if should_tee and raw_bytes < _tee_min_bytes(config):
+        should_tee = False
+    if should_tee:
+        path = _write_tee(
+            cmd,
+            json_out,
+            stderr,
+            result.returncode,
+            tee_config.get("dir", "~/.local/share/actx/tee"),
+        )
+        if path:
+            print("[full output: %s]" % path, file=sys.stderr)
     return result.returncode
 
 
