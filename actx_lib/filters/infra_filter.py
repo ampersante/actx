@@ -1,27 +1,15 @@
 import json
 
 from actx_lib import runner
-
-_SECRET_PATTERNS = (
-    "secret",
-    "token",
-    "password",
-    "accesskey",
-    "credential",
-    "aws_access_key_id",
-    "aws_secret_access_key",
+from actx_lib.redaction import (
+    _SECRET_PATTERNS,
+    _drop_secret_json,
+    _drop_secret_lines,
+    _is_secret_key,
 )
 
-
-def _is_secret_key(key):
-    lowered = key.lower()
-    return any(pattern in lowered for pattern in _SECRET_PATTERNS)
-
-
-def _drop_secret_lines(text):
-    return "\n".join(
-        line for line in text.split("\n") if not any(p in line.lower() for p in _SECRET_PATTERNS)
-    )
+# Mask widened in actx_lib.redaction (api_key, apikey, private_key, ...);
+# redacts more of aws/docker/kubectl/gh output — safe direction.
 
 
 def _rle(text):
@@ -44,18 +32,6 @@ def _rle(text):
 
 def _dedup_compact(text):
     return _rle(_drop_secret_lines(text))
-
-
-def _drop_secret_json(obj):
-    if isinstance(obj, dict):
-        return {
-            key: _drop_secret_json(value)
-            for key, value in obj.items()
-            if not _is_secret_key(key)
-        }
-    if isinstance(obj, list):
-        return [_drop_secret_json(value) for value in obj]
-    return obj
 
 
 def compact_aws(text):
