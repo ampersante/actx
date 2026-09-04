@@ -67,13 +67,17 @@ def _is_docker(argv):
     if argv[0] != "docker" or len(argv) < 2:
         return False
     rest = argv[1:]
-    sub = rest[0]
-    if sub == "compose" and len(rest) >= 2:
-        compose_sub = rest[1]
-        if compose_sub == "up":
+    if "compose" in rest:
+        # Subcommand may sit behind global flags and compose-level flags
+        # (docker --context x compose up, docker compose -f stack.yml up).
+        after = rest[rest.index("compose") + 1:]
+        if "attach" in after:
+            return True
+        if "up" in after:
             # detached form terminates; anything else streams
-            return not any(t in ("-d", "--detach") for t in rest[2:])
-        return compose_sub == "attach"
+            return not any(t in ("-d", "--detach") for t in after)
+        return False
+    sub = rest[0]
     if sub == "logs":
         return any(t in _STREAM_FLAGS for t in rest[1:])
     if sub == "stats":

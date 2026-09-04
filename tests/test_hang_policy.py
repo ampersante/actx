@@ -98,6 +98,29 @@ class DockerTests(unittest.TestCase):
             hang_policy.classify(["docker", "compose", "attach", "x"]), NEVER_WRAP
         )
 
+    def test_compose_up_behind_flags_is_never_wrap(self):
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "-f", "stack.yml", "up"]),
+            NEVER_WRAP,
+        )
+        self.assertEqual(
+            hang_policy.classify(["docker", "--context", "x", "compose", "up"]),
+            NEVER_WRAP,
+        )
+
+    def test_compose_up_detached_behind_flags_is_not_never_wrap(self):
+        self.assertEqual(
+            hang_policy.classify(
+                ["docker", "compose", "-f", "stack.yml", "up", "-d"]
+            ),
+            DEFAULT,
+        )
+
+    def test_compose_ps_is_default(self):
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "-f", "x.yml", "ps"]), DEFAULT
+        )
+
     def test_attach_is_never_wrap(self):
         self.assertEqual(hang_policy.classify(["docker", "attach", "c"]), NEVER_WRAP)
 
