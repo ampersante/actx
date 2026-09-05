@@ -19,8 +19,10 @@ _GIT_RO = frozenset({"status", "diff", "log", "show", "blame", "rev-parse"})
 _GIT_MUTATE = frozenset({"add", "commit", "push", "pull", "fetch"})
 
 _PIP_RO = frozenset({"list", "show", "freeze", "outdated"})
+# TK-51 (user policy 2026-09-05): install-class verbs left the mutator
+# allow-list (roll-back of v2.3.0) — package installs are never rewritten;
+# the T5 security gate escalates them to "ask" on the hook path instead.
 _NPM_RO = frozenset({"list"})
-_NPM_MUTATE = frozenset({"install", "ci"})
 _GH_RO = frozenset({"pr", "issue", "run"})
 _CARGO_PURE_RO = frozenset({"check", "test", "build", "tree"})
 _CARGO_1ARG_FLAGS = frozenset({
@@ -174,28 +176,21 @@ def _wc_family_ok(tokens):
 def _pip_ok(tokens):
     if len(tokens) < 2:
         return False
-    sub = tokens[1]
-    if sub in _PIP_RO:
-        return True
-    if sub == "install":
-        return True
-    return False
+    return tokens[1] in _PIP_RO
 
 
 def _uv_ok(tokens):
+    # TK-51: `uv pip install` left the allow-list; `uv run` stays (primary
+    # semantics: run — the install matrix lives in the T5 gate).
     if len(tokens) < 2:
         return False
-    if tokens[1] == "run":
-        return True
-    if tokens[1] == "pip" and len(tokens) >= 3 and tokens[2] == "install":
-        return True
-    return False
+    return tokens[1] == "run"
 
 
 def _npm_ok(tokens):
     if len(tokens) < 2:
         return False
-    return tokens[1] in _NPM_RO or tokens[1] in _NPM_MUTATE
+    return tokens[1] in _NPM_RO
 
 
 def _ruff_ok(tokens):

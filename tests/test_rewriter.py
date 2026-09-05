@@ -153,11 +153,27 @@ class RewriteUnitTests(unittest.TestCase):
     def test_kubectl_apply_rejected(self):
         self.assertIsNone(rewrite("kubectl apply -f f"))
 
-    def test_pip_install_rewritten(self):
-        self.assertEqual(rewrite("pip install x"), "actx pip install x")
+    def test_pip_install_not_rewritten(self):
+        # TK-51 (2026-09-05): installs left the mutator allow-list — the
+        # T5 gate asks instead; the rewriter must not touch them.
+        self.assertIsNone(rewrite("pip install x"))
 
-    def test_npm_install_rewritten(self):
-        self.assertEqual(rewrite("npm install"), "actx npm install")
+    def test_uv_pip_install_not_rewritten(self):
+        self.assertIsNone(rewrite("uv pip install x"))
+
+    def test_npm_install_not_rewritten(self):
+        self.assertIsNone(rewrite("npm install"))
+        self.assertIsNone(rewrite("npm install lodash"))
+        self.assertIsNone(rewrite("pnpm add express"))
+
+    def test_npm_list_rewritten(self):
+        self.assertEqual(rewrite("npm list"), "actx npm list")
+
+    def test_pip_list_rewritten(self):
+        self.assertEqual(rewrite("pip list"), "actx pip list")
+
+    def test_uv_run_rewritten(self):
+        self.assertEqual(rewrite("uv run pytest"), "actx uv run pytest")
 
     def test_aws_rejected(self):
         self.assertIsNone(rewrite("aws s3 ls"))
