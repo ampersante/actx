@@ -19,6 +19,9 @@ DEFAULT_CONFIG = {
         "generous_s": 1800,
     },
     "bypass_commands": [],
+    # User-declared command heads (TK-39): `actx <head> args` behaves like
+    # `actx run <head> args`; never extends the §7 rewriter whitelist.
+    "custom_heads": [],
     "ignore_dirs": [".git", "node_modules", "target"],
     "ignore_files": ["*.lock"],
     "tracking": {"enabled": True, "history_days": 90},

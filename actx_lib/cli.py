@@ -10,6 +10,7 @@ commands:
   git, ls, grep, find, wc, head, tail, sort, uniq, rg, cat, read, smart, tree
   pytest, cargo, go, jest, vitest, ruff, tsc, eslint, golangci-lint, next
   pip, uv, npm, pnpm, docker, kubectl, gh, aws
+  vercel, netlify, railway, wrangler, supabase, flyctl, gcloud
   run [--errors|--failures|--digest] <cmd...>
   gain [--graph|--history|--daily|--breakdown] [--format json]
   discover
@@ -19,6 +20,9 @@ commands:
   rewrite "<command>"
   hook
   init [--agent <name>] [--show] [--uninstall]
+
+user-declared heads from the "custom_heads" list in
+~/.config/actx/config.json behave like `actx run <head> ...`.
 """
 
 
@@ -81,6 +85,37 @@ def _parse_run_args(args):
             continue
         break
     return mode, args[index:]
+
+
+_BUILTIN_COMMANDS = frozenset({
+    "rewrite", "run", "gain", "discover", "session", "insights",
+    "hook", "init", "tracking",
+})
+
+
+def _custom_head_requested(command, config, registry):
+    """True when command is a user-declared custom head (TK-39).
+
+    Validation: only a list of non-empty strings counts; names reserved for
+    builtin commands or REGISTRY heads are ignored with a stderr warning
+    (they keep their native semantics). custom_heads never extends the §7
+    rewriter whitelist - it only gives `actx <head> args` the semantics of
+    `actx run <head> args`."""
+    heads = config.get("custom_heads", [])
+    if not isinstance(heads, list):
+        return False
+    for head in heads:
+        if not isinstance(head, str) or not head:
+            continue
+        if head in _BUILTIN_COMMANDS or head in registry:
+            print(
+                "actx: ignoring reserved custom head: %s" % head,
+                file=sys.stderr,
+            )
+            continue
+        if head == command:
+            return True
+    return False
 
 
 def _run(args, raw):
@@ -210,7 +245,15 @@ def main(argv):
             cfg["ultra_compact"] = True
         return REGISTRY[command](args, cfg)
 
+    # Order is fixed (TK-39): raw/bypass -> REGISTRY -> custom_heads ->
+    # unknown. cfg is already loaded in main; calling runner.run directly
+    # (not _run) avoids a second config load. raw/bypass for custom heads
+    # are handled by the shared branches above.
+    if _custom_head_requested(command, cfg, REGISTRY):
+        return runner.run([command] + args, cfg)
+
     print("error: unknown command: %s" % command, file=sys.stderr)
+    print("hint: run it through actx: actx run %s" % command, file=sys.stderr)
     return 1
 
 
