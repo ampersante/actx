@@ -1,5 +1,7 @@
 import shlex
 
+from actx_lib import cli_families
+
 _FORBIDDEN = set("\n\r\t\0;&&|<>$`(){}#")
 
 # Owned here so rewriter never imports filters (hook/rewrite perf boundary).
@@ -252,6 +254,33 @@ _DISPATCH = {
     "docker": _docker_ok,
     "kubectl": lambda t: len(t) >= 2 and t[1] in _KUBECTL_RO,
 }
+
+
+def _cloud_family_ok(tokens, global_flags, ro_verbs):
+    """Family predicate: skip boolean global flags (exact tokens), then the
+    remaining tokens must start with one of the ro_verbs sequences (exact
+    token equality on every element). Stream/secret verbs are simply absent
+    from ro_verbs, so they never match here."""
+    rest = tokens[1:]
+    idx = 0
+    while idx < len(rest) and rest[idx] in global_flags:
+        idx += 1
+    rest = rest[idx:]
+    for verb in ro_verbs:
+        if tuple(rest[: len(verb)]) == verb:
+            return True
+    return False
+
+
+# Cloud families join the dispatch from the declarative table (TK-39);
+# manual predicates above are never overwritten.
+for _head, _spec in cli_families.FAMILIES.items():
+    if _head not in _DISPATCH:
+        _DISPATCH[_head] = (
+            lambda t, _spec=_spec: _cloud_family_ok(
+                t, _spec["global_flags"], _spec["ro_verbs"]
+            )
+        )
 
 
 def rewrite(command):
