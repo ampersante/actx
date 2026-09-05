@@ -152,7 +152,9 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_allow("pytest -k .env")
         self.assert_allow("grep -e 'id_rsa' src/auth.py")
         self.assert_allow("docker exec -it my_container pytest")
-        self.assert_allow("kubectl exec my-pod -- ls -la")
+        # TK-40 (REQ-02): kubectl exec is a shell escape into a container -
+        # T6 ask (not a T1/T3 eval false positive, not an allow).
+        self.assert_ask("kubectl exec my-pod -- ls -la", "T6_HIGH_RISK_KUBECTL")
         self.assert_allow("find . -name '*.py' -exec wc -l {} +")
         self.assert_allow("bundle exec rspec")
         self.assert_allow("API_URL=http://localhost:8000 python3 app.py")
@@ -453,9 +455,16 @@ class SecurityGateTests(unittest.TestCase):
             ("kubectl scale deploy app --replicas=0", "T6_HIGH_RISK_KUBECTL"),
             ("kubectl rollout undo deployment/app", "T6_HIGH_RISK_KUBECTL"),
             ("kubectl apply -f f", "T6_HIGH_RISK_KUBECTL"),
+            # kubectl exec (TK-40, REQ-02): shell escape bypassing every
+            # actx gate - any form must ask.
+            ("kubectl exec my-pod -- ls -la", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl exec my-pod -- sh", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl -n x exec pod -- ls", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl -it exec pod -- sh", "T6_HIGH_RISK_KUBECTL"),
             # helm
             ("helm uninstall my-release", "T6_HIGH_RISK_HELM"),
             ("helm rollback my-release 1", "T6_HIGH_RISK_HELM"),
+            ("helm -n prod uninstall my-release", "T6_HIGH_RISK_HELM"),
             # docker (specs generated from cli_families since TK-41;
             # volume rm/prune are new in TK-41)
             ("docker system prune", "T6_HIGH_RISK_DOCKER"),
@@ -512,6 +521,12 @@ class SecurityGateTests(unittest.TestCase):
             "docker rmi-dangling",
             "helm upgrade my-release",
             "helm status",
+            "helm template mychart",
+            "helm get metadata my-release",
+            "helm get values my-release",
+            "kubectl get pods -o wide",
+            "kubectl top pods",
+            "kubectl events",
             "terraform apply=plan",
             "terraform -destroy",
             "flutter analyze",

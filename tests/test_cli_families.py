@@ -51,7 +51,9 @@ CLOUD_HEADS = (
 
 # docker joined the table in TK-41 (dispatch, T6 specs and hang-policy all
 # read the same record); its streaming forms stay in hang_policy._is_docker.
-FAMILY_HEADS = CLOUD_HEADS + ("docker",)
+# kubectl and helm followed in TK-40, migrating from hand-written rewriter
+# predicates and the non-cloud T6 table into FAMILIES.
+FAMILY_HEADS = CLOUD_HEADS + ("docker", "helm", "kubectl")
 
 # Secret-bearing connection string whose key AND value contain none of the
 # redaction pattern words (secret/token/password/...) - the Q2 adversarial
@@ -78,6 +80,17 @@ class FamilyDataTests(unittest.TestCase):
                 self.assertIsInstance(spec[key], tuple)
             for flag in spec["global_flags"]:
                 self.assertTrue(flag.startswith("-"), (head, flag))
+            # value_flags is optional (TK-40); when declared it must be a
+            # tuple of flags disjoint from the boolean global_flags.
+            if "value_flags" in spec:
+                self.assertIsInstance(spec["value_flags"], tuple)
+                self.assertEqual(
+                    set(spec["value_flags"]) & set(spec["global_flags"]),
+                    set(),
+                    head,
+                )
+                for flag in spec["value_flags"]:
+                    self.assertTrue(flag.startswith("-"), (head, flag))
             for group in ("ro_verbs", "ask_specs", "stream_specs"):
                 for seq in spec[group]:
                     self.assertIsInstance(seq, tuple)
@@ -236,32 +249,45 @@ class RewriterCloudTests(unittest.TestCase):
 
 class T6ConsolidationTests(unittest.TestCase):
     def test_final_table_superset_of_pre_tk39(self):
-        # Red-gate 11/12: every pre-existing entry carried over verbatim.
-        # docker moved to FAMILIES in TK-41 and gained volume rm/prune, so
-        # its check is per-spec containment (final ⊇ previous), while the
-        # untouched heads stay pinned by exact equality.
+        # Red-gate 11/12: every pre-existing spec carried over verbatim (the
+        # final table is a SUPERSET). docker gained volume rm/prune in TK-41
+        # and kubectl gained ("exec",) in TK-40, so grown heads are checked by
+        # per-spec containment, untouched heads stay pinned by exact equality.
         for head, specs in PRE_TK39_T6_ASK_TABLE.items():
             final = security_gate.T6_ASK_TABLE.get(head)
             self.assertIsNotNone(final, head)
             for spec in specs:
                 self.assertIn(spec, final, (head, spec))
-            if head != "docker":
+            if head not in ("docker", "kubectl"):
                 self.assertEqual(final, specs, head)
         self.assertEqual(len(security_gate.T6_ASK_TABLE), 15)
 
-    def test_docker_ask_specs_generated_from_families(self):
-        # N-F1 / red-gate 12: had the docker entry stayed in
-        # _T6_NON_CLOUD_ASK_TABLE, the setdefault generation below would be
-        # shadowed and these assertions would fail — the snapshot alone
-        # would pass vacuously on the stale 4-spec entry.
+    def test_migrated_heads_left_the_non_cloud_table(self):
+        # N-F1 red-gate: a docker/kubectl/helm record left in
+        # _T6_NON_CLOUD_ASK_TABLE would shadow the family specs via
+        # setdefault (("volume","rm") / ("exec",) would die) — the snapshot
+        # alone would pass vacuously on the stale entries.
         self.assertNotIn("docker", security_gate._T6_NON_CLOUD_ASK_TABLE)
-        self.assertEqual(
-            security_gate.T6_ASK_TABLE["docker"],
-            cli_families.FAMILIES["docker"]["ask_specs"],
-        )
+        self.assertNotIn("kubectl", security_gate._T6_NON_CLOUD_ASK_TABLE)
+        self.assertNotIn("helm", security_gate._T6_NON_CLOUD_ASK_TABLE)
+
+    def test_migrated_specs_generated_from_families(self):
+        # Red-gate 12 positive assertions: the specs come from FAMILIES.
+        for head in ("docker", "kubectl", "helm"):
+            self.assertEqual(
+                security_gate.T6_ASK_TABLE[head],
+                cli_families.FAMILIES[head]["ask_specs"],
+                head,
+            )
         self.assertIn(("volume", "rm"), security_gate.T6_ASK_TABLE["docker"])
         self.assertIn(("volume", "prune"), security_gate.T6_ASK_TABLE["docker"])
         self.assertIn(("compose", "down"), security_gate.T6_ASK_TABLE["docker"])
+        self.assertIn(("exec",), security_gate.T6_ASK_TABLE["kubectl"])
+        self.assertIn(("uninstall",), security_gate.T6_ASK_TABLE["helm"])
+        # The pre-wave-2 specs of all three migrated heads are verbatim.
+        for head in ("docker", "kubectl", "helm"):
+            for spec in PRE_TK39_T6_ASK_TABLE[head]:
+                self.assertIn(spec, security_gate.T6_ASK_TABLE[head], (head, spec))
 
     def test_flyctl_ask_specs(self):
         self.assertEqual(

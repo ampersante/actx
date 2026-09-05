@@ -21,7 +21,6 @@ _GIT_MUTATE = frozenset({"add", "commit", "push", "pull", "fetch"})
 _PIP_RO = frozenset({"list", "show", "freeze", "outdated"})
 _NPM_RO = frozenset({"list"})
 _NPM_MUTATE = frozenset({"install", "ci"})
-_KUBECTL_RO = frozenset({"get", "logs"})
 _GH_RO = frozenset({"pr", "issue", "run"})
 _CARGO_PURE_RO = frozenset({"check", "test", "build", "tree"})
 _CARGO_1ARG_FLAGS = frozenset({
@@ -240,35 +239,34 @@ _DISPATCH = {
     "uv": _uv_ok,
     "npm": _npm_ok,
     "pnpm": _npm_ok,
-    "kubectl": lambda t: len(t) >= 2 and t[1] in _KUBECTL_RO,
 }
 
 
-def _cloud_family_ok(tokens, global_flags, ro_verbs):
-    """Family predicate: skip boolean global flags (exact tokens), then the
-    remaining tokens must start with one of the ro_verbs sequences (exact
-    token equality on every element). Stream/secret verbs are simply absent
-    from ro_verbs, so they never match here."""
-    rest = tokens[1:]
-    idx = 0
-    while idx < len(rest) and rest[idx] in global_flags:
-        idx += 1
-    rest = rest[idx:]
+def _cloud_family_ok(tokens, ro_verbs):
+    """Family predicate: the effective verb tokens (head dropped; boolean
+    global flags and value-flags-with-their-value skipped by
+    cli_families.effective_verbs - the single skip-logic source) must start
+    with one of the ro_verbs sequences (exact token equality on every
+    element). Stream/secret verbs are simply absent from ro_verbs, so they
+    never match here."""
+    verbs = cli_families.effective_verbs(tokens)
+    if verbs is None:
+        return False
     for verb in ro_verbs:
-        if tuple(rest[: len(verb)]) == verb:
+        if tuple(verbs[: len(verb)]) == verb:
             return True
     return False
 
 
 # CLI families join the dispatch from the declarative table (TK-39; docker
-# joined in TK-41, its manual predicate removed); manual predicates above
+# in TK-41 and kubectl/helm in TK-40 — their manual predicates removed: no
+# manual predicate may shadow a family head, or the generated predicate
+# would silently never run); manual predicates above
 # are never overwritten.
 for _head, _spec in cli_families.FAMILIES.items():
     if _head not in _DISPATCH:
         _DISPATCH[_head] = (
-            lambda t, _spec=_spec: _cloud_family_ok(
-                t, _spec["global_flags"], _spec["ro_verbs"]
-            )
+            lambda t, _ro=_spec["ro_verbs"]: _cloud_family_ok(t, _ro)
         )
 
 

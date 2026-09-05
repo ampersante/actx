@@ -12,6 +12,15 @@ from actx_lib import cli_families
 # Flags that make a command stream forever (exact tokens).
 _STREAM_FLAGS = frozenset({"-f", "--follow"})
 
+# kubectl watch flags after get/events (N-F4): `kubectl get pods -w` streams
+# until interrupted - a guaranteed 600s hang under the default timeout.
+_KUBECTL_WATCH_FLAGS = frozenset({"-w", "--watch", "--watch-only"})
+
+# kubectl object types whose payloads are secret-bearing (N-F3a): base64
+# secret values carry no pattern words, so redaction cannot catch them -
+# the only safe verdict is never-wrap (exit 125, nothing captured).
+_KUBECTL_SECRET_TYPES = frozenset({"secret", "secrets", "configmap", "cm"})
+
 _LOGIN_HEADS = frozenset({
     "wrangler", "railway", "gcloud", "vercel", "netlify", "supabase",
     "flyctl", "fly",
@@ -67,6 +76,19 @@ def _is_kubectl(argv):
             return True
         if tok == "logs":
             return any(t in _STREAM_FLAGS for t in rest[idx + 1:])
+    # TK-40: effective verbs (head dropped, -n prod / --namespace=prod /
+    # -A skipped via cli_families.effective_verbs - one skip-logic source).
+    verbs = cli_families.effective_verbs(argv)
+    if not verbs:
+        return False
+    if verbs[0] in ("get", "events") and any(
+        t in _KUBECTL_WATCH_FLAGS for t in verbs[1:]
+    ):
+        return True  # N-F4: watch streams forever
+    if verbs[0] in ("get", "describe") and any(
+        t in _KUBECTL_SECRET_TYPES for t in verbs[1:]
+    ):
+        return True  # N-F3a: base64 secrets dodge pattern redaction
     return False
 
 
@@ -107,20 +129,20 @@ def _is_wrangler_tail(argv):
 
 def _is_cloud_stream(argv):
     """Cloud-family stream/secret verbs (TK-39): skip the family's boolean
-    global flags, then a stream_specs prefix must match exactly. Covers
-    `railway logs -f`, `vercel logs --follow` and the env/variables/secret
-    verbs of every family (Q2: never-wrap, exit 125). Logins and
-    `wrangler tail` are kept in their dedicated predicates above - the table
-    does not duplicate them."""
-    spec = cli_families.FAMILIES.get(argv[0])
-    if spec is None:
+    global flags and value-flags-with-values (cli_families.effective_verbs -
+    one skip-logic source), then a stream_specs prefix must match exactly.
+    Covers `railway logs -f`, `vercel logs --follow`, `helm get values`
+    (TK-40: deployed values are the standard home of credentials) and the
+    env/variables/secret verbs of every family (Q2: never-wrap, exit 125).
+    Logins and `wrangler tail` are kept in their dedicated predicates above -
+    the table does not duplicate them."""
+    verbs = cli_families.effective_verbs(argv)
+    if verbs is None:
         return False
-    rest = argv[1:]
-    idx = 0
-    while idx < len(rest) and rest[idx] in spec["global_flags"]:
-        idx += 1
-    rest = rest[idx:]
-    return any(tuple(rest[: len(seq)]) == seq for seq in spec["stream_specs"])
+    return any(
+        tuple(verbs[: len(seq)]) == seq
+        for seq in cli_families.FAMILIES[argv[0]]["stream_specs"]
+    )
 
 
 def _is_redis_monitor(argv):

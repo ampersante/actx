@@ -1,18 +1,28 @@
-"""Declarative table of CLI families (TK-39, TK-41).
+"""Declarative table of CLI families (TK-39; docker TK-41, kubectl/helm TK-40).
 
-Pure data, zero imports: rewriter, security_gate and hang_policy all read it
-directly, so the cheap hook/rewrite import boundary must not gain transitive
-modules. Connecting a new CLI family is a data edit here, not a new
-predicate. Not only cloud CLIs live here: docker joined in TK-41, and its
-flag-sensitive streaming forms stay in dedicated hang_policy predicates
-(`_is_docker`) because a plain prefix table cannot express them.
+Pure data + one pure function (effective_verbs), zero imports: rewriter,
+security_gate and hang_policy all read it directly, so the cheap hook/rewrite
+import boundary must not gain transitive modules. Connecting a new CLI family
+is a data edit here, not a new predicate. Not only cloud CLIs live here:
+docker joined in TK-41 and kubectl/helm in TK-40; their flag-sensitive
+streaming forms stay in dedicated hang_policy predicates (`_is_docker`,
+`_is_kubectl`) because a plain prefix table cannot express them.
 
 Family record schema:
   global_flags  -- boolean-only global flags allowed between head and verb
                    (exact token equality). Value-taking flags are deliberately
-                   NOT listed: the scan stops at the first unknown token, so
-                   `vercel --token list` (flag value that looks like a verb)
-                   can never be mistaken for `vercel list`.
+                   NOT listed here: the scan skips them via value_flags below
+                   or stops at the first unknown token, so `vercel --token
+                   list` (flag value that looks like a verb) can never be
+                   mistaken for `vercel list`.
+  value_flags   -- OPTIONAL: value-taking flags of the family. The effective
+                   verb scan skips the flag plus its following token
+                   (`kubectl -n prod get pods`); `=`-forms
+                   (`--namespace=prod`) are skipped whole via the part before
+                   `=` (the value never leaves the token, so a value equal to
+                   a verb cannot fake a match - rewriter.py cargo precedent).
+                   Absent means "no value flags declared" and the scan treats
+                   every token as significant.
   ro_verbs      -- full verb sequences that are purely observational; the
                    rewriter auto-prefixes them with "actx ".
   ask_specs     -- T6 ask specs (ordered token subsequences) merged verbatim
@@ -30,8 +40,9 @@ Invariant: ro_verbs, ask_specs and stream_specs are pairwise disjoint as
 tuple sets inside each family (tested).
 
 Verb lists verified against the official CLI docs on 2026-09-05 (Vercel,
-Netlify, Railway, Cloudflare Wrangler, Supabase, fly.io, gcloud, docker);
-additions stay conservative - when in doubt, leave the verb out.
+Netlify, Railway, Cloudflare Wrangler, Supabase, fly.io, gcloud); docker
+joined in TK-41, kubectl and helm in TK-40 (wave-2 plan). Additions stay
+conservative - when in doubt, leave the verb out.
 """
 
 FAMILIES = {
@@ -152,7 +163,69 @@ FAMILIES = {
         ),
         "stream_specs": (),
     },
+    # kubectl (TK-40). RO verbs are the observational set; `logs` without -f
+    # was already rewritten pre-TK-40 (N-F12b) - the -f form is refused by
+    # hang_policy._is_kubectl, not by this table. Watch flags (-w/--watch)
+    # and secret/configmap object types are likewise never-wrap in
+    # _is_kubectl (N-F4/N-F3a): base64 secret values dodge pattern redaction.
+    # `-A/--all-namespaces` are boolean globals; the rest of the listed
+    # flags take a value (`-n prod`, `--context ctx`, `--namespace=prod`).
+    # ask_specs: the 4 pre-TK-40 non-cloud specs verbatim + ("exec",)
+    # (REQ-02: shell escape bypassing every actx gate).
+    "kubectl": {
+        "global_flags": ("-A", "--all-namespaces"),
+        "value_flags": ("-n", "--namespace", "--context", "--cluster",
+                        "--kubeconfig"),
+        "ro_verbs": (("get",), ("describe",), ("top",), ("events",), ("logs",)),
+        "ask_specs": (("delete",), ("scale",), ("rollout", "undo"),
+                      ("apply",), ("exec",)),
+        "stream_specs": (),
+    },
+    # helm (TK-40). `helm template` renders a local chart (a --set secret is
+    # already visible in argv) -> RO; `helm get values` prints DEPLOYED
+    # values - the standard home of credentials - so it goes to stream_specs
+    # by the wave-1 N-F4 qualification rule, never-wrap. ask_specs are the
+    # pre-TK-40 non-cloud specs verbatim.
+    "helm": {
+        "global_flags": (),
+        "ro_verbs": (("template",), ("get", "metadata"), ("list",),
+                     ("show", "values"), ("show", "chart"), ("status",),
+                     ("history",)),
+        "ask_specs": (("uninstall",), ("rollback",)),
+        "stream_specs": (("get", "values"),),
+    },
 }
+
+
+def effective_verbs(argv):
+    """Effective verb tokens of an argv: everything after the head with the
+    family's boolean global_flags skipped (exact token equality) and its
+    value_flags skipped together with their value token; `=`-forms
+    (`--namespace=prod`) are skipped whole by the part before `=`, so a flag
+    value can never impersonate a verb. Returns None when the head is not a
+    declared family; [] for a bare family head. Pure: no imports, no I/O."""
+    spec = FAMILIES.get(argv[0]) if argv else None
+    if spec is None:
+        return None
+    value_flags = spec.get("value_flags", ())
+    out = []
+    i = 1
+    n = len(argv)
+    while i < n:
+        tok = argv[i]
+        if tok in spec["global_flags"]:
+            i += 1
+            continue
+        if tok in value_flags:
+            i += 2  # the flag and its separate value token
+            continue
+        if "=" in tok and tok.split("=", 1)[0] in value_flags:
+            i += 1  # --flag=value: the value stays inside the token
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
 
 # Literal skip sets for unwrapping an `actx` prefix in security_gate
 # (mirrors cli.py flag parsing: global flags, then an optional `run`
