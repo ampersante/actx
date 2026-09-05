@@ -7,6 +7,8 @@ for the general class, generous_s (1800) for known long builders; defaults
 live in config.DEFAULT_CONFIG.
 """
 
+from actx_lib import cli_families
+
 # Flags that make a command stream forever (exact tokens).
 _STREAM_FLAGS = frozenset({"-f", "--follow"})
 
@@ -91,6 +93,24 @@ def _is_wrangler_tail(argv):
     return argv[0] == "wrangler" and len(argv) >= 2 and argv[1] == "tail"
 
 
+def _is_cloud_stream(argv):
+    """Cloud-family stream/secret verbs (TK-39): skip the family's boolean
+    global flags, then a stream_specs prefix must match exactly. Covers
+    `railway logs -f`, `vercel logs --follow` and the env/variables/secret
+    verbs of every family (Q2: never-wrap, exit 125). Logins and
+    `wrangler tail` are kept in their dedicated predicates above - the table
+    does not duplicate them."""
+    spec = cli_families.FAMILIES.get(argv[0])
+    if spec is None:
+        return False
+    rest = argv[1:]
+    idx = 0
+    while idx < len(rest) and rest[idx] in spec["global_flags"]:
+        idx += 1
+    rest = rest[idx:]
+    return any(tuple(rest[: len(seq)]) == seq for seq in spec["stream_specs"])
+
+
 def _is_redis_monitor(argv):
     return argv[0] == "redis-cli" and any(
         tok.upper() == "MONITOR" for tok in argv[1:]
@@ -146,6 +166,7 @@ _NEVER_WRAP_PREDICATES = (
     _is_login,
     _is_repl,
     _is_swift_repl,
+    _is_cloud_stream,
 )
 
 
