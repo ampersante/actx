@@ -40,6 +40,7 @@ REGISTRY = {
     "pnpm": package_filter.run_pnpm,
     "docker": infra_filter.run_docker,
     "kubectl": infra_filter.run_kubectl,
+    "helm": infra_filter.run_helm,
     "gh": infra_filter.run_gh,
     "aws": infra_filter.run_aws,
 }

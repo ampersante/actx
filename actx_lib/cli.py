@@ -9,7 +9,7 @@ USAGE = """usage: actx [--raw] [--ultra-compact] [-v|-vv|-vvv] <command> [args..
 commands:
   git, ls, grep, find, wc, head, tail, sort, uniq, rg, cat, read, smart, tree
   pytest, cargo, go, jest, vitest, ruff, tsc, eslint, golangci-lint, next
-  pip, uv, npm, pnpm, docker, kubectl, gh, aws
+  pip, uv, npm, pnpm, docker, kubectl, helm, gh, aws
   vercel, netlify, railway, wrangler, supabase, flyctl, gcloud
   run [--errors|--failures|--digest] <cmd...>
   gain [--graph|--history|--daily|--breakdown] [--format json]

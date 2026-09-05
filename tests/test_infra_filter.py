@@ -33,6 +33,61 @@ web-abc   1/1     Running  0          2h
 web-def   1/1     Running  0          2h
 """
 
+KUBECTL_DESCRIBE = """\
+Name:         web-abc
+Namespace:    prod
+Priority:     0
+Node:         node-1/10.0.0.5
+Start Time:   Mon, 05 Sep 2026 00:00:00 +0000
+Labels:       app=web
+Annotations:  deployment.kubernetes.io/revision: 3
+Status:       Running
+IP:           10.244.0.17
+"""
+
+KUBECTL_TOP = """\
+NAME      CPU(cores)   MEMORY(bytes)
+web-abc   12m          128Mi
+web-def   12m          128Mi
+"""
+
+KUBECTL_EVENTS = """\
+default/web-abc.17a Pod spec sync succeeded
+default/web-abc.17a Pod spec sync succeeded
+default/web-abc.17b Scheduled successfully on node-1
+"""
+
+KUBECTL_GET_JSON = json.dumps({
+    "apiVersion": "v1",
+    "kind": "PodList",
+    "metadata": {"resourceVersion": "12345"},
+    "items": [
+        {"metadata": {"name": "web-abc"}, "status": {"phase": "Running"}},
+        {"metadata": {"name": "web-def"}, "status": {"phase": "Running"}},
+    ],
+})
+
+HELM_TEMPLATE = """\
+---
+# Source: mychart/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: mychart-svc
+spec:
+  ports:
+    - port: 80
+    - port: 80
+    - port: 80
+      name: http
+"""
+
+HELM_LIST = """\
+NAME      	NAMESPACE	REVISION	UPDATED             	STATUS  	CHART
+my-release	default  	3       	2026-09-05 00:00:00	deployed	mychart-1.0.0
+other     	default  	1       	2026-09-04 00:00:00	deployed	other-0.1.0
+"""
+
 GH_PR_LIST = """\
 ID   TITLE         BRANCH   STATE   CREATED AT
 123  Fix bug       fix/bug  OPEN    2026-08-14
@@ -106,6 +161,42 @@ class InfraParserTests(unittest.TestCase):
         out = infra_filter._dedup_compact(KUBECTL_GET)
         self.assertIn("web-abc", out)
         self.assertIn("web-def", out)
+
+    def test_kubectl_describe_keeps_fields(self):
+        out = infra_filter._dedup_compact(KUBECTL_DESCRIBE)
+        self.assertIn("web-abc", out)
+        self.assertIn("node-1/10.0.0.5", out)
+
+    def test_kubectl_top_keeps_rows(self):
+        out = infra_filter._dedup_compact(KUBECTL_TOP)
+        self.assertIn("CPU(cores)", out)
+        self.assertIn("128Mi", out)
+
+    def test_kubectl_events_dedups_consecutive_lines(self):
+        out = infra_filter._dedup_compact(KUBECTL_EVENTS)
+        self.assertIn("(x2)", out)
+        self.assertIn("node-1", out)
+
+    def test_kubectl_json_output_compacts(self):
+        out = infra_filter._compact_json_output(KUBECTL_GET_JSON)
+        self.assertIsNotNone(out)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["kind"], "PodList")
+        self.assertEqual(parsed["items"][0]["metadata"]["name"], "web-abc")
+
+    def test_kubectl_json_parser_falls_back_to_dedup(self):
+        out = infra_filter._compact_json_output(KUBECTL_GET)
+        self.assertIn("web-abc", out)  # not JSON -> dedup path, no crash
+
+    def test_helm_template_dedups_repeated_lines(self):
+        out = infra_filter._dedup_compact(HELM_TEMPLATE)
+        self.assertIn("- port: 80 (x3)", out)
+        self.assertIn("mychart-svc", out)
+
+    def test_helm_list_keeps_rows(self):
+        out = infra_filter._dedup_compact(HELM_LIST)
+        self.assertIn("my-release", out)
+        self.assertIn("mychart-1.0.0", out)
 
     def test_gh_pr_list_keeps_rows(self):
         out = infra_filter._dedup_compact(GH_PR_LIST)
@@ -267,6 +358,19 @@ class DockerEffectiveVerbTests(unittest.TestCase):
                 self._assert_passthrough(args)
 
 
+def _run_filter(run_fn, args, stdout, returncode=0):
+    """Run a filter with a mocked execute(); capture rc/stdout/stderr."""
+    result = subprocess.CompletedProcess(
+        [run_fn.__name__.replace("run_", "")] + args, returncode, stdout, ""
+    )
+    out = io.StringIO()
+    err = io.StringIO()
+    with mock.patch("actx_lib.runner.execute", return_value=result):
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = run_fn(args, CONFIG)
+    return rc, out.getvalue(), err.getvalue()
+
+
 class InfraExitCodeTests(unittest.TestCase):
     def test_docker_preserves_exit_code(self):
         result = subprocess.CompletedProcess(["docker", "ps"], 1, DOCKER_PS, "")
@@ -300,6 +404,147 @@ class InfraExitCodeTests(unittest.TestCase):
                     with redirect_stdout(out), redirect_stderr(err):
                         rc = infra_filter.run_docker(args, CONFIG)
                 self.assertEqual(rc, 3)
+
+
+class KubectlDispatchTests(unittest.TestCase):
+    """TK-40 / H-F4: dispatch by EFFECTIVE verbs, not args[0]."""
+
+    def test_verb_behind_value_flag_compacts_not_passthrough(self):
+        rc, out, err = _run_filter(
+            infra_filter.run_kubectl, ["-n", "prod", "get", "pods"], KUBECTL_GET
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("web-abc", out)
+        self.assertIn("web-def", out)
+
+    def test_equals_form_value_flag_compacts(self):
+        rc, out, _ = _run_filter(
+            infra_filter.run_kubectl,
+            ["--namespace=prod", "get", "pods"],
+            KUBECTL_GET,
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("web-abc", out)
+
+    def test_boolean_global_flag_compacts(self):
+        rc, out, _ = _run_filter(
+            infra_filter.run_kubectl, ["-A", "get", "pods"], KUBECTL_GET
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("web-abc", out)
+
+    def test_describe_top_events_logs_compact(self):
+        for args, fixture in (
+            (["describe", "pod", "web-abc"], KUBECTL_DESCRIBE),
+            (["top", "pods"], KUBECTL_TOP),
+            (["events"], KUBECTL_EVENTS),
+            (["logs", "pod/web-abc"], DOCKER_LOGS),
+            (["--context", "ctx", "get", "pods"], KUBECTL_GET),
+        ):
+            with self.subTest(args=args):
+                rc, out, _ = _run_filter(
+                    infra_filter.run_kubectl, args, fixture
+                )
+                self.assertEqual(rc, 0)
+                self.assertTrue(out.strip(), args)
+
+    def test_dash_o_json_uses_json_parser(self):
+        rc, out, _ = _run_filter(
+            infra_filter.run_kubectl, ["get", "pods", "-o", "json"],
+            KUBECTL_GET_JSON,
+        )
+        self.assertEqual(rc, 0)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["kind"], "PodList")
+
+    def test_dash_o_jsonpath_falls_back_to_dedup(self):
+        # jsonpath output is not valid JSON -> compact_json returns None ->
+        # the dedup fallback still compacts (fail-open).
+        rc, out, _ = _run_filter(
+            infra_filter.run_kubectl,
+            ["get", "pods", "-o", "jsonpath={.items[*].metadata.name}"],
+            "web-abc\nweb-def\n",
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("web-abc", out)
+
+    def test_plain_table_output_is_not_json_parsed(self):
+        # The parser choice is flag-driven: table output takes the dedup
+        # path even though it is not JSON (same visible result, but the
+        # flag scan must not send tables through json.loads).
+        rc, out, _ = _run_filter(
+            infra_filter.run_kubectl, ["get", "pods"], KUBECTL_GET
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("READY", out)
+
+    def test_unknown_subcommand_passthrough(self):
+        result = subprocess.CompletedProcess(
+            ["kubectl", "edit", "deploy/x"], 0, "raw\n", ""
+        )
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch("actx_lib.runner.execute", return_value=result), mock.patch(
+            "actx_lib.runner.run_passthrough",
+            side_effect=lambda cmd: 0,
+        ) as passthrough:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = infra_filter.run_kubectl(["edit", "deploy/x"], CONFIG)
+        self.assertEqual(rc, 0)
+        passthrough.assert_called_once_with(["kubectl", "edit", "deploy/x"])
+
+    def test_non_zero_exit_code_preserved(self):
+        result = subprocess.CompletedProcess(
+            ["kubectl", "get", "pods"], 1, "", "error: boom\n"
+        )
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch("actx_lib.runner.execute", return_value=result):
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = infra_filter.run_kubectl(["get", "pods"], CONFIG)
+        self.assertEqual(rc, 1)
+
+
+class HelmFilterTests(unittest.TestCase):
+    def test_ro_subcommands_compact(self):
+        for args, fixture in (
+            (["template", "mychart"], HELM_TEMPLATE),
+            (["list"], HELM_LIST),
+            (["status", "my-release"], HELM_LIST),
+            (["history", "my-release"], HELM_LIST),
+            (["get", "metadata", "my-release"], HELM_LIST),
+        ):
+            with self.subTest(args=args):
+                rc, out, _ = _run_filter(
+                    infra_filter.run_helm, args, fixture
+                )
+                self.assertEqual(rc, 0)
+                self.assertTrue(out.strip(), args)
+
+    def test_get_values_is_not_a_filter_subcommand(self):
+        # stream_specs -> never-wrap upstream; if it ever reaches the filter
+        # it must passthrough raw, never compact.
+        result = subprocess.CompletedProcess(
+            ["helm", "get", "values", "rel"], 0, "replicas: 2\n", ""
+        )
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch("actx_lib.runner.execute", return_value=result), mock.patch(
+            "actx_lib.runner.run_passthrough",
+            side_effect=lambda cmd: 0,
+        ) as passthrough:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = infra_filter.run_helm(["get", "values", "rel"], CONFIG)
+        self.assertEqual(rc, 0)
+        passthrough.assert_called_once_with(["helm", "get", "values", "rel"])
+
+    def test_uninstall_passthrough(self):
+        with mock.patch(
+            "actx_lib.runner.run_passthrough", side_effect=lambda cmd: 0
+        ) as passthrough:
+            rc = infra_filter.run_helm(["uninstall", "rel"], CONFIG)
+        self.assertEqual(rc, 0)
+        passthrough.assert_called_once_with(["helm", "uninstall", "rel"])
 
 
 def _fail_open(run_fn, args, patch_target):
@@ -368,6 +613,22 @@ class InfraFailOpenTests(unittest.TestCase):
         rc, out, err = _fail_open(
             infra_filter.run_kubectl,
             ["get"],
+            "actx_lib.filters.infra_filter._dedup_compact",
+        )
+        self._assert_raw(rc, out, err)
+
+    def test_kubectl_json_path_fails_open(self):
+        rc, out, err = _fail_open(
+            infra_filter.run_kubectl,
+            ["get", "pods", "-o", "json"],
+            "actx_lib.filters.infra_filter._compact_json_output",
+        )
+        self._assert_raw(rc, out, err)
+
+    def test_helm_fails_open(self):
+        rc, out, err = _fail_open(
+            infra_filter.run_helm,
+            ["template", "mychart"],
             "actx_lib.filters.infra_filter._dedup_compact",
         )
         self._assert_raw(rc, out, err)

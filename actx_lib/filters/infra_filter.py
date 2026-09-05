@@ -1,6 +1,6 @@
 import json
 
-from actx_lib import runner
+from actx_lib import cli_families, runner
 from actx_lib.filters import json_compactor
 from actx_lib.redaction import (
     _SECRET_PATTERNS,
@@ -36,6 +36,17 @@ def _dedup_compact(text):
 
 
 def compact_aws(text):
+    compacted = json_compactor.compact_json(
+        text, indent=2, sort_keys=True, max_items=None
+    )
+    if compacted is not None:
+        return compacted
+    return _dedup_compact(text)
+
+
+def _compact_json_output(text):
+    """compact_aws pattern (TK-38/TK-40): valid JSON -> secret-masked
+    compact dump; anything else -> the dedup path (fail-open)."""
     compacted = json_compactor.compact_json(
         text, indent=2, sort_keys=True, max_items=None
     )
@@ -110,15 +121,59 @@ def run_docker(args, config):
     return runner.run_passthrough(["docker"] + args)
 
 
+def _has_json_output_flag(args):
+    """True when the argv asks kubectl for machine-readable JSON output
+    (`-o json`, `-o jsonpath...`). The jsonpath form is usually not valid
+    JSON - _compact_json_output then fails open to the dedup path."""
+    for i, tok in enumerate(args):
+        if tok == "-o" and i + 1 < len(args):
+            nxt = args[i + 1]
+            if nxt == "json" or nxt.startswith("jsonpath"):
+                return True
+    return False
+
+
+# TK-40: dispatch by EFFECTIVE verbs (cli_families.effective_verbs), not by
+# args[0] - `kubectl -n prod get pods` must compact, not passthrough (H-F4).
+_KUBECTL_COMPACT_SUBS = frozenset(
+    {"get", "describe", "top", "events", "logs"}
+)
+
+
 def run_kubectl(args, config):
     if not args:
         return runner.run_passthrough(["kubectl"])
-    sub = args[0]
-    if sub == "logs":
-        return _run_compact(["kubectl"] + args, config, _dedup_compact)
-    if sub == "get":
-        return _run_compact(["kubectl"] + args, config, _dedup_compact)
+    verbs = cli_families.effective_verbs(["kubectl"] + args)
+    sub = verbs[0] if verbs else None
+    if sub in _KUBECTL_COMPACT_SUBS:
+        parser = _dedup_compact
+        if _has_json_output_flag(args):
+            parser = _compact_json_output
+        return _run_compact(["kubectl"] + args, config, parser)
     return runner.run_passthrough(["kubectl"] + args)
+
+
+# TK-40: helm compaction subset (plan §4 E2). String dedup only - helm
+# template/values output is YAML and no parser is allowed here; `helm get
+# values` never reaches this list (stream_specs -> never-wrap, exit 125)
+# and `helm show values/chart` stay raw passthrough by spec.
+_HELM_COMPACT_SUBS = (
+    ("template",),
+    ("get", "metadata"),
+    ("list",),
+    ("status",),
+    ("history",),
+)
+
+
+def run_helm(args, config):
+    if not args:
+        return runner.run_passthrough(["helm"])
+    verbs = cli_families.effective_verbs(["helm"] + args)
+    for sub in _HELM_COMPACT_SUBS:
+        if tuple(verbs[: len(sub)]) == sub:
+            return _run_compact(["helm"] + args, config, _dedup_compact)
+    return runner.run_passthrough(["helm"] + args)
 
 
 def run_gh(args, config):
