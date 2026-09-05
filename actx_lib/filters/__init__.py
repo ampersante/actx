@@ -1,4 +1,4 @@
-from actx_lib import runner
+from actx_lib import cli_families, runner
 from actx_lib.filters import (
     git_filter,
     infra_filter,
@@ -63,3 +63,19 @@ def _run_go(args, config):
 
 REGISTRY["cargo"] = _run_cargo
 REGISTRY["go"] = _run_go
+
+
+def _cloud_entry(head):
+    """Generic registry entry for a cloud CLI family head (TK-39): the
+    generic runner path already gives JSON auto-detect, redaction and hang
+    policy. Transport only - no rewrite logic lives here."""
+
+    def run(args, config):
+        return runner.run([head] + args, config)
+
+    return run
+
+
+for _cloud_head in cli_families.FAMILIES:
+    REGISTRY.setdefault(_cloud_head, _cloud_entry(_cloud_head))
+del _cloud_head
