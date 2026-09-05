@@ -1,0 +1,8 @@
+    Checking foo v0.1.0
+warning: this if statement can be collapsed
+ --> src/main.rs:2:5
+  |
+2 | if x { }
+  | ^^^^^^^^^
+  |
+  = help: for further information visit https://rustc.dev

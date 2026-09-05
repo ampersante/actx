@@ -1,0 +1,24 @@
+   Compiling foo v0.1.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.5s
+     Running unittests src/lib.rs (target/debug/deps/foo-abc)
+
+running 5 tests
+test tests::test_pass ... ok
+test tests::test_fail ... FAILED
+test tests::test_another_pass ... ok
+test tests::test_third_pass ... ok
+test tests::test_fourth_pass ... ok
+
+failures:
+
+---- tests::test_fail stdout ----
+thread 'tests::test_fail' panicked at src/lib.rs:10:5:
+assertion `left == right` failed
+  left: 1
+ right: 2
+
+
+failures:
+    tests::test_fail
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

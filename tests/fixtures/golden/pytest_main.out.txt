@@ -1,0 +1,5 @@
+test_bar.py:
+  test_bar.py::test_other - assert 1 == 2
+test_foo.py:
+  test_foo.py::test_name - assert False
+2 failed, 23 passed

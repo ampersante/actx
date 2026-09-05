@@ -1,0 +1,13 @@
+   ▲ Next.js 14.2.3
+   Creating an optimized production build ...
+ ✓ Compiled successfully
+   Linting and checking validity of types ...
+Failed to compile.
+
+./src/app/page.tsx:10:5
+Type error: Type 'string' is not assignable to type 'number'.
+
+  3 | const x: number = 'a';
+    |                     ^
+
+> Build failed because of webpack errors

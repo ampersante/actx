@@ -1,0 +1,10 @@
+---- tests::test_fail stdout ----
+thread 'tests::test_fail' panicked at src/lib.rs:10:5:
+assertion `left == right` failed
+  left: 1
+ right: 2
+
+
+failures:
+    tests::test_fail
+1 failed, 4 passed

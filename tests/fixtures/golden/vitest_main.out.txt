@@ -1,0 +1,6 @@
+src/bar.test.ts (2 tests) 7ms
+   × adds wrong numbers 3ms
+     → expected 2 to be 3
+   × another wrong number 4ms
+     → expected 4 to be 5
+2 failed, 1 passed

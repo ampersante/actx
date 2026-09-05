@@ -1,0 +1,6 @@
+--- FAIL: TestBar (0.00s)
+    foo_test.go:12: expected 1, got 2
+FAIL
+FAIL    example.com/foo  0.123s
+FAIL
+1 failed, 2 passed

@@ -1,0 +1,3 @@
+pkg/foo.go:10:3: S1021: should merge variable declaration (gosimple)
+pkg/bar.go:20:5: revive: exported function Foo should have comment
+2 errors

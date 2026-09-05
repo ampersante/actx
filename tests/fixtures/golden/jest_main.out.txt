@@ -1,0 +1,19 @@
+FAIL src/bar.test.js
+  ● adds wrong numbers
+
+    expect(received).toBe(expected)
+
+    Expected: 2
+    Received: 3
+
+      10 | test('adds wrong numbers', () => {
+      11 |   expect(add(1, 1)).toBe(2);
+    > 12 |   expect(1 + 1).toBe(3);
+         |                 ^
+      13 | });
+
+  ● another wrong number
+
+    Expected: 4
+    Received: 5
+2 failed, 1 passed

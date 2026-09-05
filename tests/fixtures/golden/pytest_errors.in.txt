@@ -1,0 +1,23 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.2, pytest-8.3.5
+collected 10 items
+
+test_foo.py ..EF [ 50%]
+test_bar.py ..... [100%]
+
+==================================== ERRORS ====================================
+_____________________ ERROR collecting test_broken.py _________________________
+ImportError: cannot import name 'missing' from 'helpers'
+
+=================================== FAILURES ===================================
+_____________________________ test_half ________________________________________
+
+    def test_half():
+>       assert 1 == 2
+E       assert 1 == 2
+
+test_foo.py:4: AssertionError
+=========================== short test summary info ============================
+ERROR test_broken.py::test_broken - ImportError: cannot import name 'missing'...
+FAILED test_foo.py::test_half - assert 1 == 2
+======================== 1 failed, 1 error, 8 passed in 0.45s ==================

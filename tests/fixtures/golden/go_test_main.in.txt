@@ -1,0 +1,10 @@
+=== RUN   TestFoo
+--- PASS: TestFoo (0.00s)
+=== RUN   TestBar
+--- FAIL: TestBar (0.00s)
+    foo_test.go:12: expected 1, got 2
+=== RUN   TestBaz
+--- PASS: TestBaz (0.00s)
+FAIL
+FAIL    example.com/foo  0.123s
+FAIL
