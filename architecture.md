@@ -29,7 +29,7 @@ no shell) → filter → print compact / tee → original exit code
 
 Six-phase lifecycle (borrowed from RTK): parse → route → execute → filter → print → track.
 
-Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); metachar/write-flag rejects; no lexer; no `python3`/`aws` auto-rewrite.
+Rewriter (post-wave-2): observational CLI + narrow mutator allow-list (`PRD.md` §7); metachar/write-flag rejects (SQL heads psql/sqlite3/duckdb get the quote-aware guard instead of the raw metachar reject); no lexer; no `python3`/`aws` auto-rewrite; install-class verbs (npm/pip/uv) left the allow-list (TK-51 always-ask policy — installs escalate to T5-ask on the hook path).
 
 ## Components
 
@@ -37,15 +37,16 @@ Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); m
 |---|---|---|
 | `actx` | Python 3.14.2, stdlib | entrypoint; dispatch by `argv[1]` |
 | `actx_lib/security_gate.py` | stdlib (json/shlex/re) | L7 Security Gatekeeper: deterministic prompt-injection / secret access / exfiltration defense (<1ms) |
-| `actx_lib/cli_families.py` | stdlib (pure data) | declarative cloud-CLI family table (7 heads: ro_verbs/ask_specs/stream_specs/global_flags + actx-prefix skip lists); single data source for rewriter `_DISPATCH`, `T6_ASK_TABLE` and hang-policy stream specs |
-| `actx_lib/rewriter.py` | stdlib (json/sys/shlex) | single source of truth: command → rewritten |
+| `actx_lib/cli_families.py` | stdlib (pure data) | declarative CLI family table (13 heads: 7 cloud + docker/kubectl/helm/bq/terraform/redis-cli; ro_verbs/ask_specs/stream_specs + global_flags/value_flags + `effective_verbs` skip-logic); single data source for rewriter `_DISPATCH`, `T6_ASK_TABLE` and hang-policy stream specs |
+| `actx_lib/sql_verbs.py` | stdlib (re) | SQL payload classification data (TK-43): RO-verb class, worst-verb regex, psql/dot meta blacklist, default-deny; shared by rewriter predicates and the security gate |
+| `actx_lib/rewriter.py` | stdlib (json/sys/shlex) | single source of truth: command → rewritten; quote-aware guard for SQL heads (psql/sqlite3/duckdb — §7.4 exception) |
 | `actx_lib/cli.py` | argparse | CLI dispatch; lazy filter imports |
 | `actx_lib/runner.py` | stdlib | execute, exit-code, tee |
 | `actx_lib/hook.py` | stdlib | JSON PreToolUse hook (Claude/Codex/Gemini/Copilot): security evaluation + rewrite |
 | `actx_lib/rewrite_cmd.py` | stdlib | `actx rewrite "<cmd>"` |
 | `actx_lib/installer.py` | stdlib | `actx init/--show/--uninstall` |
 | `actx_lib/config.py` | stdlib | JSON config load/save |
-| `actx_lib/filters/` | stdlib | git_filter, system_filter (ls/grep/find), read_filter; compact_profiles (declarative test-runner/linter compaction profiles + engine, golden-dump byte contract), ascii_table_filter (framed-table → CSV-like, raw fallback), json_compactor |
+| `actx_lib/filters/` | stdlib | git_filter, system_filter (ls/grep/find), read_filter; compact_profiles (declarative test-runner/linter compaction profiles + engine, golden-dump byte contract), ascii_table_filter (framed-table → CSV-like, raw fallback), json_compactor; infra_filter (docker/kubectl/helm/gh/aws), mobile_filter (flutter/dart/swift/swiftlint/swiftformat/xcodebuild/xcrun/pod/gradlew), data_filter (psql/sqlite3/duckdb SQL tables w/ column masking, terraform, redis, dbt) |
 | `adapters/opencode.ts.template` | TS (OpenCode Bun runtime) | thin transport; delegates to `actx rewrite` |
 
 ## Key Flows
