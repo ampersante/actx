@@ -641,6 +641,59 @@ class CloudShimE2ETests(_ShimTestCase):
                     self.assertIn(decision, ("deny", "ask", "force_ask"))
 
 
+class DockerShimE2ETests(_ShimTestCase):
+    """TK-41 DoD on shims: bare `docker stats` refused fast (exit 125),
+    `stats --no-stream` rewritten + compacted, `inspect` JSON compacted."""
+
+    def test_bare_stats_refused_fast_without_execution(self):
+        # `docker stats` streams; the hook never rewrites it, and a manual
+        # `actx docker stats` is refused before launch.
+        self.assertIsNone(rewriter.rewrite("docker stats"))
+        self.install_shim(
+            "docker",
+            "import os, time\n"
+            "open(os.environ['ACTX_MARKER'], 'w').write('x')\n"
+            "time.sleep(30)\n",
+        )
+        start = time.monotonic()
+        p = self.run_actx(["docker", "stats"], timeout=10)
+        elapsed = time.monotonic() - start
+        self.assertEqual(p.returncode, 125, p.stderr)
+        self.assertLess(elapsed, 3.0)
+        self.assertIn("docker stats", p.stderr)
+        # Refused before launch: the shim never ran.
+        self.assertFalse(os.path.exists(self.marker))
+
+    def test_stats_no_stream_rewritten_and_compacted(self):
+        self.assertEqual(
+            rewriter.rewrite("docker stats --no-stream"),
+            "actx docker stats --no-stream",
+        )
+        self.install_shim(
+            "docker",
+            "import os\n"
+            "open(os.environ['ACTX_MARKER'], 'w').write('x')\n"
+            "for _ in range(60):\n"
+            "    print('web  0.15%  120MiB / 4GiB')\n",
+        )
+        p = self.run_actx(["docker", "stats", "--no-stream"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("(x60)", p.stdout)
+        self.assertTrue(os.path.exists(self.marker))
+
+    def test_inspect_json_compacted(self):
+        payload = json.dumps(
+            [{"Id": "abc123def456", "Image": "nginx:1",
+              "State": {"Status": "running", "Running": True}}]
+        )
+        self.install_shim("docker", "import sys\nprint(%r)\n" % payload)
+        p = self.run_actx(["docker", "inspect", "web"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        obj = json.loads(p.stdout)
+        self.assertEqual(obj[0]["Id"], "abc123def456")
+        self.assertEqual(obj[0]["State"]["Status"], "running")
+
+
 class CustomHeadsTests(_ShimTestCase):
     """TK-39 custom_heads UX; fixed precedence raw/bypass -> REGISTRY ->
     custom_heads -> unknown (asserted below in that order)."""
