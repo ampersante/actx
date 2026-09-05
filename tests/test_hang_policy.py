@@ -341,7 +341,7 @@ class ReplTests(unittest.TestCase):
         self.assertEqual(hang_policy.classify(["psql", "mydb"]), NEVER_WRAP)
         self.assertEqual(hang_policy.classify(["mongosh", "file.js"]), NEVER_WRAP)
         self.assertEqual(
-            hang_policy.classify(["snowsql", "-d mydb"]), NEVER_WRAP
+            hang_policy.classify(["snowsql", "-d", "mydb"]), NEVER_WRAP
         )
 
     def test_sqlite3_batch_form_is_not_a_repl(self):
