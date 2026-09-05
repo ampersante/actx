@@ -1,6 +1,6 @@
 import shlex
 
-from actx_lib import cli_families
+from actx_lib import cli_families, sql_verbs
 
 _FORBIDDEN = set("\n\r\t\0;&&|<>$`(){}#")
 
@@ -212,6 +212,9 @@ _SWIFT_RO = frozenset({"build", "test"})
 _XCODEBUILD_INFO_FLAGS = frozenset({"-list", "-showsdks", "-showBuildSettings"})
 _SWIFTFORMAT_READONLY = frozenset({"--lint", "--dryrun", "--dry-run"})
 
+# --- SQL CLIs (TK-43, REQ-06): the ONLY heads with the quote-aware guard ---
+_SQL_HEADS = frozenset({"psql", "sqlite3", "duckdb"})
+
 
 def _flutter_ok(tokens):
     if len(tokens) < 2:
@@ -246,6 +249,82 @@ def _xcodebuild_ok(tokens):
     # A build pinned to a scheme/destination compacts to diagnostics only;
     # the bare invocation stays unwrapped (interactive signing prompts).
     return "-scheme" in rest or "-destination" in rest
+
+
+def _quoted_token(tok):
+    """True when the token starts AND ends with a quote char (shlex
+    posix=False keeps the quotes inside the token)."""
+    return len(tok) >= 2 and tok[0] in "'\"" and tok[-1] in "'\""
+
+
+def _c_payload_tokens(rest):
+    """(index, token) of every -c/--command payload token; a missing value
+    yields (index, None)."""
+    out = []
+    i = 0
+    n = len(rest)
+    while i < n:
+        if rest[i] in ("-c", "--command"):
+            out.append((i + 1, rest[i + 1] if i + 1 < n else None))
+            i += 2
+            continue
+        i += 1
+    return out
+
+
+def _sql_guard_ok(command):
+    """Quote-aware guard for SQL heads (TK-43, wave-2 plan section 3 /
+    H-F1/N-F8). Replaces the raw metachar reject for `_SQL_HEADS` ONLY:
+
+    - `shlex.split(command, posix=False)` keeps the quotes in the tokens;
+      an unclosed quote raises ValueError -> reject.
+    - Every `_FORBIDDEN` metacharacter of the command must sit inside a
+      token that starts AND ends with a quote (shell-injected unquoted
+      metachars like `psql -c SELECT 1; rm -rf /` reject).
+    - The payload must be a SINGLE quoted token after `-c` (psql/duckdb,
+      every occurrence) or the last positional at >=2 positionals
+      (sqlite3) - else reject.
+
+    Structural only; the SQL class (RO vs dangerous) is decided by the
+    dispatch predicate below, so guard and predicate both must pass."""
+    try:
+        toks = shlex.split(command, posix=False)
+    except ValueError:
+        return False  # unclosed quote
+    if not toks or toks[0] not in _SQL_HEADS:
+        return False
+    for tok in toks:
+        if any(ch in _FORBIDDEN for ch in tok) and not _quoted_token(tok):
+            return False
+    rest = toks[1:]
+    payloads = _c_payload_tokens(rest)
+    if payloads:
+        return all(tok is not None and _quoted_token(tok) for _, tok in payloads)
+    if toks[0] == "sqlite3":
+        positionals = [tok for tok in rest if not tok.startswith("-")]
+        return len(positionals) >= 2 and _quoted_token(positionals[-1])
+    return False
+
+
+def _sql_cli_ok(tokens):
+    """psql/sqlite3/duckdb dispatch predicate (TK-43): every SQL payload
+    (sql_verbs.sql_payloads - one shared extraction with the security
+    gate) must classify RO; file-based SQL (`-f`/`--file`/`-init`) never
+    rewrites; no payload (bare REPL) never rewrites (hang policy owns it,
+    exit 125)."""
+    rest = tokens[1:]
+    if any(
+        tok in sql_verbs.SQL_FILE_FLAGS or tok.startswith("--file=")
+        for tok in rest
+    ):
+        return False
+    payloads = sql_verbs.sql_payloads(tokens[0], rest)
+    if not payloads:
+        return False
+    return all(sql_verbs.classify_payload(p) == "ro" for p in payloads)
+
+
+_DBT_RO = frozenset({"run", "test", "build"})
 
 
 # head -> predicate(tokens) ; None predicate means always rewrite when head matches
@@ -287,6 +366,11 @@ _DISPATCH = {
     "xcrun": lambda t: len(t) >= 3 and t[1] == "simctl" and t[2] == "list",
     "pod": lambda t: len(t) >= 2 and t[1] in ("outdated", "list"),
     "./gradlew": lambda _t: True,
+    # --- data stack (TK-43); bq/terraform/redis-cli join via FAMILIES ---
+    "psql": _sql_cli_ok,
+    "sqlite3": _sql_cli_ok,
+    "duckdb": _sql_cli_ok,
+    "dbt": lambda t: len(t) >= 2 and t[1] in _DBT_RO,
 }
 
 
@@ -326,7 +410,16 @@ def rewrite(command):
     if len(command) > 4096:
         return None
     if any(ch in _FORBIDDEN for ch in command):
-        return None
+        # TK-43 (wave-2 plan section 3, REQ-06): SQL heads swap the raw
+        # metachar reject for the quote-aware guard (real SQL almost always
+        # carries `;`/`()`); every other head keeps the strict byte-identical
+        # guard - `git commit -m "fix; drop"` still rejects (red-gate 13).
+        parts = command.split()
+        head = parts[0] if parts else ""
+        if head not in _SQL_HEADS:
+            return None
+        if not _sql_guard_ok(command):
+            return None
     try:
         tokens = shlex.split(command)
     except ValueError:

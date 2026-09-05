@@ -88,14 +88,14 @@ class LazyImportTests(unittest.TestCase):
         self.assertEqual(
             modules,
             {"actx_lib", "actx_lib.cli", "actx_lib.cli_families",
-             "actx_lib.rewriter"},
+             "actx_lib.rewriter", "actx_lib.sql_verbs"},
         )
 
     def test_rewrite_path_imports_only_allowed(self):
         self.assertEqual(
             self.run_path(["rewrite", "git status"]),
             {"actx_lib", "actx_lib.cli", "actx_lib.cli_families",
-             "actx_lib.rewriter"},
+             "actx_lib.rewriter", "actx_lib.sql_verbs"},
         )
 
     def test_hook_path_imports_only_allowed(self):
