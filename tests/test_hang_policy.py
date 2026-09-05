@@ -245,6 +245,66 @@ class FlutterTests(unittest.TestCase):
         self.assertEqual(hang_policy.classify(["flutter", "doctor"]), DEFAULT)
 
 
+class MobileHangPolicyTests(unittest.TestCase):
+    """TK-42: flutter/dart/swift/xcodebuild/pod/gradlew hang classes."""
+
+    def test_flutter_stream_subs_are_never_wrap(self):
+        for argv in (
+            ["flutter", "run"],
+            ["flutter", "attach"],
+            ["flutter", "logs"],
+            ["flutter", "channel"],
+            ["flutter", "channel", "stable"],
+            ["flutter", "upgrade"],
+            ["flutter", "downgrade"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), NEVER_WRAP)
+
+    def test_swift_repl_and_run_are_never_wrap(self):
+        self.assertEqual(hang_policy.classify(["swift", "repl"]), NEVER_WRAP)
+        self.assertEqual(hang_policy.classify(["swift", "run", "App"]), NEVER_WRAP)
+
+    def test_xcodebuild_interactive_is_never_wrap(self):
+        for argv in (
+            ["xcodebuild"],
+            ["xcodebuild", "-allowProvisioningUpdates", "-scheme", "App", "build"],
+            ["xcodebuild", "build"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), NEVER_WRAP)
+
+    def test_mobile_long_ops_are_generous(self):
+        for argv in (
+            ["flutter", "build", "apk"],
+            ["flutter", "test"],
+            ["flutter", "pub", "get"],
+            ["dart", "test"],
+            ["dart", "pub", "get"],
+            ["swift", "build"],
+            ["swift", "test"],
+            ["pod", "install"],
+            ["./gradlew", "build"],
+            ["./gradlew"],
+            ["xcodebuild", "-scheme", "App"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), GENEROUS)
+
+    def test_mobile_ro_commands_are_default(self):
+        for argv in (
+            ["flutter", "doctor"],
+            ["flutter", "analyze"],
+            ["dart", "analyze"],
+            ["swiftlint", "lint"],
+            ["pod", "outdated"],
+            ["pod", "list"],
+            ["xcrun", "simctl", "list", "devices"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), DEFAULT)
+
+
 class LoginTests(unittest.TestCase):
     def test_login_heads_are_never_wrap(self):
         for head in (
@@ -296,15 +356,23 @@ class ReplTests(unittest.TestCase):
             hang_policy.classify(["swift", "repl", "-c", "print(1)"]), DEFAULT
         )
 
+    def test_swift_run_is_never_wrap(self):
+        # TK-42: launches the built executable (interactive).
+        self.assertEqual(hang_policy.classify(["swift", "run"]), NEVER_WRAP)
+        self.assertEqual(
+            hang_policy.classify(["swift", "run", "App"]), NEVER_WRAP
+        )
+
     def test_swift_other_subcommand_is_default(self):
-        self.assertEqual(hang_policy.classify(["swift", "run"]), DEFAULT)
+        self.assertEqual(
+            hang_policy.classify(["swift", "package", "dump-package"]), DEFAULT
+        )
 
 
 class GenerousTests(unittest.TestCase):
     def test_long_ops_are_generous(self):
         cases = (
             ["flutter", "build", "apk"],
-            ["xcodebuild"],
             ["xcodebuild", "-scheme", "App", "build"],
             ["cargo", "build"],
             ["go", "build", "./..."],
@@ -333,7 +401,9 @@ class EdgeCaseTests(unittest.TestCase):
         self.assertEqual(hang_policy.classify([]), DEFAULT)
 
     def test_single_token_heads(self):
-        self.assertEqual(hang_policy.classify(["xcodebuild"]), GENEROUS)
+        # TK-42: bare xcodebuild builds the default scheme with interactive
+        # signing - never-wrap (pinned change from the previous generous).
+        self.assertEqual(hang_policy.classify(["xcodebuild"]), NEVER_WRAP)
         self.assertEqual(hang_policy.classify(["pytest"]), GENEROUS)
         self.assertEqual(hang_policy.classify(["psql"]), NEVER_WRAP)
 

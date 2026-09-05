@@ -26,7 +26,11 @@ _LOGIN_HEADS = frozenset({
     "flyctl", "fly",
 })
 _REPL_HEADS = frozenset({"psql", "sqlite3", "duckdb", "mongosh"})
-_FLUTTER_STREAM_SUBS = frozenset({"run", "attach", "logs"})
+# run/attach/logs stream; channel/upgrade/downgrade are long interactive
+# prompts (TK-42: never-wrap so they cannot stall a wrapped session).
+_FLUTTER_STREAM_SUBS = frozenset({
+    "run", "attach", "logs", "channel", "upgrade", "downgrade",
+})
 
 # Known long builders: generous timeout instead of the default one.
 _LONG_OPS = (
@@ -49,6 +53,14 @@ _LONG_OPS = (
     ("pytest",),
     ("cargo", "test"),
     ("go", "test"),
+    ("swift", "build"),
+    ("swift", "test"),
+    ("pod", "install"),
+    ("./gradlew",),
+    ("flutter", "pub", "get"),
+    ("dart", "pub", "get"),
+    ("flutter", "test"),
+    ("dart", "test"),
 )
 
 # Interactive confirmation prompts looked for in command output.
@@ -184,10 +196,28 @@ def _is_repl(argv):
     return any(not tok.startswith("-") for tok in rest)
 
 
-def _is_swift_repl(argv):
+def _is_swift(argv):
+    """swift repl is a REPL; swift run launches the built executable - both
+    interactive (TK-42). `swift build/test` stay on the generous builder
+    class via _LONG_OPS."""
     if argv[0] != "swift" or len(argv) < 2:
         return False
-    return argv[1] == "repl" and "-c" not in argv[2:]
+    if argv[1] == "repl":
+        return "-c" not in argv[2:]
+    return argv[1] == "run"
+
+
+def _is_xcodebuild_interactive(argv):
+    """Bare xcodebuild (including no arguments at all - no -scheme/
+    -destination) builds the default scheme and can stall on interactive
+    signing prompts; -allowProvisioningUpdates talks to Apple's signing UI.
+    Never-wrap both (TK-42)."""
+    if argv[0] != "xcodebuild":
+        return False
+    rest = argv[1:]
+    if "-allowProvisioningUpdates" in rest:
+        return True
+    return "-scheme" not in rest and "-destination" not in rest
 
 
 _NEVER_WRAP_PREDICATES = (
@@ -199,7 +229,8 @@ _NEVER_WRAP_PREDICATES = (
     _is_flutter,
     _is_login,
     _is_repl,
-    _is_swift_repl,
+    _is_swift,
+    _is_xcodebuild_interactive,
     _is_cloud_stream,
 )
 
