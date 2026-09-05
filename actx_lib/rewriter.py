@@ -327,6 +327,22 @@ def _sql_cli_ok(tokens):
 _DBT_RO = frozenset({"run", "test", "build"})
 
 
+def _terraform_ok(tokens):
+    """terraform dispatch (TK-43): the family ro_verbs generation EXCEPT the
+    flag-sensitive `plan -out <file>` form - a persisted plan is what a
+    later `terraform apply` executes without re-reading the diff. A plain
+    prefix table cannot express the exclusion, so terraform keeps a manual
+    predicate here (rewriter-side twin of the hang-policy dedicated
+    predicates; the T6 ask spec itself lives in FAMILIES). Limitation
+    (documented): the `-out=file` =-form is a single token and slips this
+    token check, same as the T6 matcher."""
+    if "-out" in tokens[1:]:
+        return False
+    return _cloud_family_ok(
+        tokens, cli_families.FAMILIES["terraform"]["ro_verbs"]
+    )
+
+
 # head -> predicate(tokens) ; None predicate means always rewrite when head matches
 _DISPATCH = {
     "git": _git_ok,
@@ -366,11 +382,14 @@ _DISPATCH = {
     "xcrun": lambda t: len(t) >= 3 and t[1] == "simctl" and t[2] == "list",
     "pod": lambda t: len(t) >= 2 and t[1] in ("outdated", "list"),
     "./gradlew": lambda _t: True,
-    # --- data stack (TK-43); bq/terraform/redis-cli join via FAMILIES ---
+    # --- data stack (TK-43); bq/redis-cli join via FAMILIES generation ---
     "psql": _sql_cli_ok,
     "sqlite3": _sql_cli_ok,
     "duckdb": _sql_cli_ok,
     "dbt": lambda t: len(t) >= 2 and t[1] in _DBT_RO,
+    # terraform: family ro_verbs minus the `plan -out` form (manual entry -
+    # the FAMILIES loop never overwrites manual predicates)
+    "terraform": _terraform_ok,
 }
 
 

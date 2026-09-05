@@ -52,8 +52,12 @@ CLOUD_HEADS = (
 # docker joined the table in TK-41 (dispatch, T6 specs and hang-policy all
 # read the same record); its streaming forms stay in hang_policy._is_docker.
 # kubectl and helm followed in TK-40, migrating from hand-written rewriter
-# predicates and the non-cloud T6 table into FAMILIES.
-FAMILY_HEADS = CLOUD_HEADS + ("docker", "helm", "kubectl")
+# predicates and the non-cloud T6 table into FAMILIES. bq/terraform/
+# redis-cli joined in TK-43 (terraform migrated out of the non-cloud T6
+# table the same N-F1 way).
+FAMILY_HEADS = CLOUD_HEADS + (
+    "docker", "helm", "kubectl", "bq", "terraform", "redis-cli",
+)
 
 # Secret-bearing connection string whose key AND value contain none of the
 # redaction pattern words (secret/token/password/...) - the Q2 adversarial
@@ -258,22 +262,24 @@ class T6ConsolidationTests(unittest.TestCase):
             self.assertIsNotNone(final, head)
             for spec in specs:
                 self.assertIn(spec, final, (head, spec))
-            if head not in ("docker", "kubectl"):
+            if head not in ("docker", "kubectl", "terraform"):
                 self.assertEqual(final, specs, head)
-        self.assertEqual(len(security_gate.T6_ASK_TABLE), 15)
+        # 4 non-cloud heads + 13 family heads (bq/terraform/redis-cli
+        # joined via FAMILIES in TK-43).
+        self.assertEqual(len(security_gate.T6_ASK_TABLE), 17)
 
     def test_migrated_heads_left_the_non_cloud_table(self):
-        # N-F1 red-gate: a docker/kubectl/helm record left in
+        # N-F1 red-gate: a docker/kubectl/helm/terraform record left in
         # _T6_NON_CLOUD_ASK_TABLE would shadow the family specs via
-        # setdefault (("volume","rm") / ("exec",) would die) — the snapshot
-        # alone would pass vacuously on the stale entries.
-        self.assertNotIn("docker", security_gate._T6_NON_CLOUD_ASK_TABLE)
-        self.assertNotIn("kubectl", security_gate._T6_NON_CLOUD_ASK_TABLE)
-        self.assertNotIn("helm", security_gate._T6_NON_CLOUD_ASK_TABLE)
+        # setdefault (("volume","rm") / ("exec",) / ("plan","-out") would
+        # die) — the snapshot alone would pass vacuously on the stale
+        # entries.
+        for head in ("docker", "kubectl", "helm", "terraform"):
+            self.assertNotIn(head, security_gate._T6_NON_CLOUD_ASK_TABLE)
 
     def test_migrated_specs_generated_from_families(self):
         # Red-gate 12 positive assertions: the specs come from FAMILIES.
-        for head in ("docker", "kubectl", "helm"):
+        for head in ("docker", "kubectl", "helm", "terraform"):
             self.assertEqual(
                 security_gate.T6_ASK_TABLE[head],
                 cli_families.FAMILIES[head]["ask_specs"],
@@ -284,8 +290,14 @@ class T6ConsolidationTests(unittest.TestCase):
         self.assertIn(("compose", "down"), security_gate.T6_ASK_TABLE["docker"])
         self.assertIn(("exec",), security_gate.T6_ASK_TABLE["kubectl"])
         self.assertIn(("uninstall",), security_gate.T6_ASK_TABLE["helm"])
-        # The pre-wave-2 specs of all three migrated heads are verbatim.
-        for head in ("docker", "kubectl", "helm"):
+        # TK-43: terraform grew ("state",) and ("plan","-out") on top of the
+        # two migrated specs.
+        self.assertIn(("apply",), security_gate.T6_ASK_TABLE["terraform"])
+        self.assertIn(("destroy",), security_gate.T6_ASK_TABLE["terraform"])
+        self.assertIn(("state",), security_gate.T6_ASK_TABLE["terraform"])
+        self.assertIn(("plan", "-out"), security_gate.T6_ASK_TABLE["terraform"])
+        # The pre-wave-2 specs of all four migrated heads are verbatim.
+        for head in ("docker", "kubectl", "helm", "terraform"):
             for spec in PRE_TK39_T6_ASK_TABLE[head]:
                 self.assertIn(spec, security_gate.T6_ASK_TABLE[head], (head, spec))
 
@@ -321,6 +333,123 @@ class T6ConsolidationTests(unittest.TestCase):
                 self.assertEqual(
                     security_gate.evaluate_security(command).decision, "allow"
                 )
+
+
+class DataFamiliesTests(unittest.TestCase):
+    """TK-43: bq / terraform / redis-cli family records end to end."""
+
+    def assert_rewrite(self, command):
+        self.assertEqual(rewriter.rewrite(command), "actx " + command, command)
+
+    def assert_none(self, command):
+        self.assertIsNone(rewriter.rewrite(command), command)
+
+    def test_bq_ro_verbs_rewrite(self):
+        self.assert_rewrite("bq ls")
+        self.assert_rewrite("bq ls mydataset")
+        self.assert_rewrite("bq show mydataset.mytable")
+        self.assert_rewrite("bq head mydataset.mytable")
+        self.assert_rewrite("bq --format=json ls")
+        self.assert_rewrite("bq --format=prettyjson show t")
+        self.assert_rewrite("bq --debug_mode ls")
+        self.assert_rewrite('bq query --dry_run "SELECT 1"')
+
+    def test_bq_non_ro_stay_unrewritten(self):
+        # The executing query form and mutations are TK-52 candidates.
+        self.assert_none('bq query "SELECT 1"')
+        self.assert_none("bq rm mydataset.mytable")
+        self.assert_none("bq update mydataset")
+        # Two-token --format form stops the scan (conservative).
+        self.assert_none("bq --format json ls")
+
+    def test_terraform_ro_verbs_rewrite(self):
+        for command in ("terraform plan", "terraform validate",
+                        "terraform show", "terraform version",
+                        "terraform graph"):
+            with self.subTest(command=command):
+                self.assert_rewrite(command)
+
+    def test_terraform_mutation_specs_ask(self):
+        for command, category in (
+            ("terraform apply", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform apply -auto-approve", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform destroy", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform state rm x", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform state pull", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform plan -out tfplan", "T6_HIGH_RISK_TERRAFORM"),
+            ("/usr/local/bin/terraform destroy", "T6_HIGH_RISK_TERRAFORM"),
+        ):
+            with self.subTest(command=command):
+                decision = security_gate.evaluate_security(command)
+                self.assertEqual(decision.decision, "ask", command)
+                self.assertEqual(decision.category, category, command)
+
+    def test_terraform_ro_stays_allow_and_plan_out_never_rewrites(self):
+        self.assertEqual(
+            security_gate.evaluate_security("terraform plan").decision, "allow"
+        )
+        self.assert_rewrite("terraform plan -input=false")
+        self.assert_none("terraform plan -out tfplan")
+        # Documented limitation: `-out=file` is a single token both the
+        # rewriter predicate and the T6 matcher cannot see (wave-2 plan
+        # E5.6) - conservative gap, human-approved.
+        self.assert_rewrite("terraform plan -out=tfplan")
+        self.assertEqual(
+            security_gate.evaluate_security("terraform plan -out=tfplan").decision,
+            "allow",
+        )
+
+    def test_redis_ro_verbs_rewrite_both_cases(self):
+        for verb in ("EXISTS", "TTL", "TYPE", "SCAN", "DBSIZE",
+                     "exists", "ttl", "type", "scan", "dbsize"):
+            with self.subTest(verb=verb):
+                self.assert_rewrite("redis-cli %s k" % verb)
+        self.assert_rewrite("redis-cli -h myhost EXISTS k")
+
+    def test_redis_destructive_specs_ask_both_cases(self):
+        for command in (
+            "redis-cli FLUSHALL",
+            "redis-cli flushall",
+            "redis-cli FLUSHDB",
+            "redis-cli flushdb",
+            "redis-cli config set maxmemory 100",
+            "redis-cli CONFIG SET maxmemory 100",
+            "redis-cli Config Set maxmemory 100",
+        ):
+            with self.subTest(command=command):
+                decision = security_gate.evaluate_security(command)
+                self.assertEqual(decision.decision, "ask", command)
+                self.assertEqual(
+                    decision.category, "T6_HIGH_RISK_REDIS-CLI", command
+                )
+
+    def test_redis_get_is_never_wrap_both_cases_and_behind_value_flags(self):
+        # Q2 wave-1 rule: GET prints raw values -> never-wrap (TK-52 reviews).
+        for argv in (["redis-cli", "GET", "k"], ["redis-cli", "get", "k"],
+                     ["redis-cli", "-h", "myhost", "GET", "k"],
+                     ["redis-cli", "-p", "6379", "get", "k"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), "never_wrap")
+
+    def test_redis_ro_and_monitor_classes(self):
+        self.assertEqual(
+            hang_policy.classify(["redis-cli", "EXISTS", "k"]), "default"
+        )
+        self.assertEqual(hang_policy.classify(["redis-cli", "DBSIZE"]), "default")
+        # MONITOR stays in the dedicated predicate, not stream_specs (the
+        # wrangler-tail precedent): still never-wrap in any case.
+        self.assertEqual(
+            hang_policy.classify(["redis-cli", "MONITOR"]), "never_wrap"
+        )
+        self.assertEqual(
+            hang_policy.classify(["redis-cli", "monitor"]), "never_wrap"
+        )
+
+    def test_redis_value_flags_skip_their_values(self):
+        # `-h EXISTS` is host "EXISTS": the value is consumed with the flag
+        # and can never impersonate a verb - GET alone is the effective verb.
+        verbs = cli_families.effective_verbs(["redis-cli", "-h", "EXISTS", "GET"])
+        self.assertEqual(verbs, ["GET"])
 
 
 class ActxUnwrapTests(unittest.TestCase):

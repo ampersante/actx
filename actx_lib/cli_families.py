@@ -4,9 +4,10 @@ Pure data + one pure function (effective_verbs), zero imports: rewriter,
 security_gate and hang_policy all read it directly, so the cheap hook/rewrite
 import boundary must not gain transitive modules. Connecting a new CLI family
 is a data edit here, not a new predicate. Not only cloud CLIs live here:
-docker joined in TK-41 and kubectl/helm in TK-40; their flag-sensitive
-streaming forms stay in dedicated hang_policy predicates (`_is_docker`,
-`_is_kubectl`) because a plain prefix table cannot express them.
+docker joined in TK-41, kubectl/helm in TK-40 and bq/terraform/redis-cli in
+TK-43 (wave-2 plan); flag-sensitive streaming forms stay in dedicated
+hang_policy predicates (`_is_docker`, `_is_kubectl`, `_is_redis_monitor`)
+because a plain prefix table cannot express them.
 
 Family record schema:
   global_flags  -- boolean-only global flags allowed between head and verb
@@ -193,6 +194,51 @@ FAMILIES = {
                      ("history",)),
         "ask_specs": (("uninstall",), ("rollback",)),
         "stream_specs": (("get", "values"),),
+    },
+    # bq (TK-43). Only the single-token `=`-forms of --format are declared
+    # as boolean globals (conservative: the two-token `--format json` form
+    # stops the scan -> no rewrite, safe); --debug_mode is boolean. The head
+    # runs through the generic registry entry (_cloud_entry): JSON output
+    # auto-detects on runner.run. `query` is RO only with --dry_run - the
+    # executing form stays unwritten (TK-52 reviews an ask).
+    "bq": {
+        "global_flags": ("--format=json", "--format=prettyjson", "--debug_mode"),
+        "ro_verbs": (("ls",), ("show",), ("head",), ("query", "--dry_run")),
+        "ask_specs": (),
+        "stream_specs": (),
+    },
+    # terraform (TK-43). RO verbs are the plan-inspection set; `plan -out`
+    # persists a plan file that a later `terraform apply` executes without
+    # re-reading the diff, and `state` mutates/pulls state (credentials
+    # live in it) -> ask. Limitation (documented): the `-out=file` =-form
+    # does not equal the "-out" token, so the token matcher misses it
+    # (N-F1 red-gate 12 checks the caught form).
+    "terraform": {
+        "global_flags": (),
+        "ro_verbs": (("plan",), ("validate",), ("show",), ("version",),
+                     ("graph",)),
+        "ask_specs": (("apply",), ("destroy",), ("state",), ("plan", "-out")),
+        "stream_specs": (),
+    },
+    # redis-cli (TK-43). Real redis commands are upper-case but the
+    # protocol is case-insensitive, so every entry carries its lower-case
+    # twin (tested both ways) - a lowercase FLUSHALL/`config set` must not
+    # evade the ask tier, a lowercase `get` must not dodge never-wrap.
+    # GET prints arbitrary VALUES (Q2 wave-1 rule: pattern redaction
+    # cannot catch value secrets) -> stream_specs, never-wrap; TK-52
+    # reviews the reverse. MONITOR is NOT duplicated here - the dedicated
+    # _is_redis_monitor predicate owns it (wrangler-tail precedent).
+    "redis-cli": {
+        "global_flags": (),
+        "value_flags": ("-h", "--host", "-p", "--port", "-s", "--socket",
+                        "-u", "--url", "-n"),
+        "ro_verbs": (("EXISTS",), ("TTL",), ("TYPE",), ("SCAN",),
+                     ("DBSIZE",), ("exists",), ("ttl",), ("type",),
+                     ("scan",), ("dbsize",)),
+        "ask_specs": (("FLUSHALL",), ("flushall",), ("FLUSHDB",),
+                      ("flushdb",), ("config", "set"), ("CONFIG", "SET"),
+                      ("Config", "Set")),
+        "stream_specs": (("GET",), ("get",)),
     },
 }
 

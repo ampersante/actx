@@ -1688,16 +1688,15 @@ def _check_high_risk_npm(command: str, raw_tokens: list[str]) -> SecurityDecisio
 #
 # Cloud/infra family specs are generated from the declarative cli_families
 # table (TK-39): the 6 pre-existing cloud entries live there byte-identically;
-# flyctl was new in TK-39. docker moved to FAMILIES in TK-41 and kubectl/helm
-# in TK-40 (N-F1): a stale entry here would shadow the family ask_specs
-# through the setdefault loop below — a record must live in exactly one
-# place. Non-cloud entries stay verbatim below.
+# flyctl was new in TK-39. docker moved to FAMILIES in TK-41, kubectl/helm in
+# TK-40 and terraform in TK-43 (N-F1): a stale entry here would shadow the
+# family ask_specs through the setdefault loop below — a record must live in
+# exactly one place. Non-cloud entries stay verbatim below.
 _T6_NON_CLOUD_ASK_TABLE: dict[str, tuple[tuple[str, ...], ...]] = {
     "simctl": (("erase",), ("delete",)),
     "flutter": (("clean",),),
     "xcodebuild": (("clean",),),
     "pod": (("deintegrate",),),
-    "terraform": (("apply",), ("destroy",)),
 }
 
 T6_ASK_TABLE: dict[str, tuple[tuple[str, ...], ...]] = dict(_T6_NON_CLOUD_ASK_TABLE)

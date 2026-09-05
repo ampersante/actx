@@ -203,9 +203,12 @@ class WranglerAndRedisTests(unittest.TestCase):
             hang_policy.classify(["redis-cli", "monitor"]), NEVER_WRAP
         )
 
-    def test_redis_cli_get_is_default(self):
+    def test_redis_cli_get_is_never_wrap(self):
+        # TK-43 (Q2 wave-1 rule): GET prints raw VALUES - pattern redaction
+        # cannot catch them, so never-wrap (exit 125). TK-52 reviews the
+        # reverse. Pinned change from the pre-TK-43 "default".
         self.assertEqual(
-            hang_policy.classify(["redis-cli", "GET", "k"]), DEFAULT
+            hang_policy.classify(["redis-cli", "GET", "k"]), NEVER_WRAP
         )
 
 
