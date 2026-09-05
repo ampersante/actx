@@ -35,6 +35,7 @@ To reduce context noise, prefix supported shell commands with `actx`:
 - `grep` / `rg` → `actx grep` / `actx rg`
 - `find` / `cat` / `tree` → `actx find` / `actx cat` / `actx tree`
 - `pytest` / `ruff` / `docker ps` / `gh pr list` → `actx <cmd>`
+- `vercel whoami` / `railway status` / `wrangler deployments list` / `gcloud projects list` → `actx <cmd>`
 
 Hook/plugin agents rewrite automatically when installed. For full output, run without `actx` or use `actx --raw <command>`.
 """
