@@ -1,6 +1,7 @@
 import re
 
 from actx_lib import runner
+from actx_lib.filters import compact_profiles
 
 
 def _run_compact(args, config, parser):
@@ -14,19 +15,19 @@ def _run_compact(args, config, parser):
 
 
 def compact_ruff(text):
-    out = [line for line in text.split("\n") if re.search(r"^\S+:\d+:\d+:", line)]
-    if out:
-        out.append("%d errors" % len(out))
-    return "\n".join(out)
+    # Migrated onto the declarative profile engine (TK-50); byte-identical
+    # output is enforced by the golden dumps in tests/fixtures/golden/.
+    return compact_profiles.parse_lint(text, compact_profiles.PROFILES["ruff"])
 
 
 def compact_tsc(text):
-    out = [line for line in text.split("\n") if re.search(r"\(\d+,\d+\):\s*error TS\d+", line)]
-    if out:
-        out.append("%d errors" % len(out))
-    return "\n".join(out)
+    return compact_profiles.parse_lint(text, compact_profiles.PROFILES["tsc"])
 
 
+# eslint/cargo/next stay hand-written: their keep rules are conditional on
+# line shape and cross-line state (indent+warning policy, fallback error
+# count, section-triggered state machine) that the profile vocabulary would
+# distort; see TK-50 report. Goldens still pin their output byte-for-byte.
 def compact_eslint(text):
     out = []
     errors = 0
@@ -48,10 +49,7 @@ def compact_eslint(text):
 
 
 def compact_golangci_lint(text):
-    out = [line for line in text.split("\n") if re.search(r"^\S+\.go:\d+:\d+:", line)]
-    if out:
-        out.append("%d errors" % len(out))
-    return "\n".join(out)
+    return compact_profiles.parse_lint(text, compact_profiles.PROFILES["golangci"])
 
 
 def _cargo_error_count(text):

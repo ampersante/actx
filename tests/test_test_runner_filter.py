@@ -231,6 +231,26 @@ class TestRunnerFailOpenTests(unittest.TestCase):
         self.assertEqual(out, "raw stdout\n")
         self.assertEqual(err, "raw stderr\n")
 
+    def test_profile_engine_exception_fails_open(self):
+        # RK-03: an exception inside the compact_profiles engine must reach
+        # the raw passthrough with the original exit code, not the caller.
+        result = subprocess.CompletedProcess(
+            ["pytest"], 0, "raw stdout\n", "raw stderr\n"
+        )
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch(
+            "actx_lib.runner.execute", return_value=result
+        ), mock.patch(
+            "actx_lib.filters.compact_profiles.parse_test",
+            side_effect=RuntimeError("boom"),
+        ):
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = test_runner_filter.run_pytest([], CONFIG)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue(), "raw stdout\n")
+        self.assertEqual(err.getvalue(), "raw stderr\n")
+
 
 if __name__ == "__main__":
     unittest.main()

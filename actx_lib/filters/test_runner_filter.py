@@ -1,26 +1,9 @@
 import re
 
 from actx_lib import runner
+from actx_lib.filters import compact_profiles
 
 TOOLS = ("pytest", "cargo", "go", "jest", "vitest")
-
-
-def _int_re(text, pattern):
-    match = re.search(pattern, text)
-    return int(match.group(1)) if match else 0
-
-
-def _strip_section(text, start, end=None):
-    index = text.find(start)
-    if index == -1:
-        return ""
-    index += len(start)
-    if end is None:
-        return text[index:]
-    end_index = text.find(end, index)
-    if end_index == -1:
-        return text[index:]
-    return text[index:end_index]
 
 
 def _counter(failed, passed):
@@ -28,38 +11,20 @@ def _counter(failed, passed):
 
 
 def parse_pytest(text):
-    block = _strip_section(
-        text, "=== FAILURES ===\n", "\n=== short test summary info ==="
-    ).strip()
-    groups = {}
-    summary = _strip_section(text, "=== short test summary info ===")
-    for line in summary.splitlines():
-        match = re.match(r"FAILED\s+(\S+)\s+-\s+(.*)", line)
-        if match:
-            spec, reason = match.groups()
-            file = spec.split("::", 1)[0]
-            groups.setdefault(file, []).append("%s - %s" % (spec, reason))
-    parts = []
-    if block:
-        parts.append(block)
-    for file in sorted(groups):
-        parts.append("%s:" % file)
-        parts.extend("  " + item for item in groups[file])
-    failed = _int_re(text, r"(\d+) failed") + _int_re(text, r"(\d+) error")
-    passed = _int_re(text, r"(\d+) passed")
-    return {"failures": "\n".join(parts), "failed": failed, "passed": passed}
+    # Migrated onto the declarative profile engine (TK-50); byte-identical
+    # output is enforced by the golden dumps in tests/fixtures/golden/.
+    return compact_profiles.parse_test(text, compact_profiles.PROFILES["pytest"])
 
 
 def parse_cargo_test(text):
-    failed = 0
-    passed = 0
-    for match in re.finditer(r"(\d+) passed; (\d+) failed", text):
-        passed += int(match.group(1))
-        failed += int(match.group(2))
-    block = _strip_section(text, "failures:", "test result:")
-    return {"failures": block.strip(), "failed": failed, "passed": passed}
+    return compact_profiles.parse_test(
+        text, compact_profiles.PROFILES["cargo_test"]
+    )
 
 
+# go/jest/vitest stay hand-written: their keep-block machines have per-tool
+# quirks (standalone FAIL lines, pending-file emission) the profile
+# vocabulary would distort; see TK-50 report. Goldens still pin them.
 def parse_go_test(text):
     out = []
     failed = 0
