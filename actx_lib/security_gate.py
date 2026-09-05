@@ -21,6 +21,8 @@ import posixpath
 import re
 import shlex
 
+from actx_lib import cli_families
+
 SecurityDecision = namedtuple("SecurityDecision", ["decision", "reason", "category"])
 
 _DECISION_ALLOW = SecurityDecision(decision="allow", reason=None, category=None)
@@ -233,8 +235,35 @@ def _strip_redirection(token: str) -> str:
     return clean.strip("&; \t")
 
 
+def _strip_actx_prefix(tokens: list[str]) -> list[str] | None:
+    """Slice a leading ``actx`` invocation off an exec-array.
+
+    Form (data in cli_families, mirroring cli.py): ``actx [global flags]
+    [run [leading run flags]] ...``. The skip lists are closed literal sets -
+    no generic ``startswith("-")``. ``actx rewrite`` / ``actx hook`` take a
+    command string / stdin, not an argv, so their literals are absent from
+    the skip lists and unwrapping stops at them (their argument is never
+    treated as an executable command). Returns the remaining tokens (possibly
+    empty) or None when the array is not actx-prefixed.
+    """
+    if not tokens or os.path.basename(tokens[0]) != "actx":
+        return None
+    idx = 1
+    n = len(tokens)
+    while idx < n and tokens[idx] in cli_families.ACTX_GLOBAL_FLAGS:
+        idx += 1
+    if idx < n and tokens[idx] == cli_families.ACTX_RUN_LITERAL:
+        idx += 1
+        while idx < n and tokens[idx] in cli_families.ACTX_RUN_FLAGS:
+            idx += 1
+    return tokens[idx:]
+
+
 def _unwrap_tokens(tokens: list[str]) -> list[str]:
-    """Strip wrapper commands and environment variable prefix assignments."""
+    """Strip actx invocations, wrapper commands and env assignments."""
+    stripped = _strip_actx_prefix(tokens)
+    if stripped is not None:
+        tokens = stripped
     idx = 0
     while idx < len(tokens):
         tok = tokens[idx]
@@ -421,6 +450,14 @@ def _is_sensitive_path(path: str) -> bool:
     return False
 
 
+def _env_is_effective_head(raw_tokens: list[str]) -> bool:
+    """True when `env` is the effective command head - directly or behind an
+    actx prefix (`env ...`, `actx run env ...`)."""
+    stripped = _strip_actx_prefix(raw_tokens)
+    base = raw_tokens if stripped is None else stripped
+    return bool(base) and os.path.basename(base[0]) == "env"
+
+
 def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
     # 0. Check subshell command substitutions & process substitutions <(...) only if triggers present
     if "$" in command or "`" in command or "<(" in command or ">(" in command:
@@ -439,8 +476,11 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
     tokens = _unwrap_tokens(raw_tokens)
     excluded_src = None
 
-    # Special case: 'env' or assignments alone without a subsequent command
-    if raw_tokens and os.path.basename(raw_tokens[0]) == "env" and not tokens:
+    # Special case: 'env' or assignments alone without a subsequent command.
+    # Parity behind an actx prefix (TK-39): `actx run env` / `actx --raw run
+    # env` must deny exactly like bare `env` - an empty remainder after the
+    # full strip is decided on the original tokens, never silently allowed.
+    if not tokens and _env_is_effective_head(raw_tokens):
         return SecurityDecision(
             decision="deny",
             reason="Dumping or setting process environment via 'env' without a command is prohibited",
@@ -1347,13 +1387,11 @@ def _check_high_risk_cargo(command: str, raw_tokens: list[str]) -> SecurityDecis
 # Known false positive (accepted, ask-tier): an argument value equal to a
 # spec verb (e.g. namespace "delete" in `kubectl -n delete get pods`)
 # triggers an ask; rare, and the human resolves it.
-T6_ASK_TABLE: dict[str, tuple[tuple[str, ...], ...]] = {
-    "wrangler": (("deploy",), ("publish",), ("delete",)),
-    "railway": (("up",), ("delete",), ("remove",), ("down",)),
-    "vercel": (("deploy", "--prod"), ("remove",)),
-    "netlify": (("deploy",), ("delete",)),
-    "supabase": (("delete",), ("db", "reset")),
-    "gcloud": (("delete",), ("undeploy",)),
+#
+# Cloud/infra family specs are generated from the declarative cli_families
+# table (TK-39): the 6 pre-existing cloud entries live there byte-identically;
+# flyctl is new. Non-cloud entries stay verbatim below.
+_T6_NON_CLOUD_ASK_TABLE: dict[str, tuple[tuple[str, ...], ...]] = {
     "kubectl": (("delete",), ("scale",), ("rollout", "undo"), ("apply",)),
     "helm": (("uninstall",), ("rollback",)),
     "docker": (("system", "prune"), ("rm",), ("rmi",), ("compose", "down")),
@@ -1363,6 +1401,11 @@ T6_ASK_TABLE: dict[str, tuple[tuple[str, ...], ...]] = {
     "pod": (("deintegrate",),),
     "terraform": (("apply",), ("destroy",)),
 }
+
+T6_ASK_TABLE: dict[str, tuple[tuple[str, ...], ...]] = dict(_T6_NON_CLOUD_ASK_TABLE)
+for _head, _spec in cli_families.FAMILIES.items():
+    T6_ASK_TABLE.setdefault(_head, _spec["ask_specs"])
+del _head, _spec
 
 
 def _check_high_risk_tools(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
