@@ -37,6 +37,7 @@ Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); m
 |---|---|---|
 | `actx` | Python 3.14.2, stdlib | entrypoint; dispatch by `argv[1]` |
 | `actx_lib/security_gate.py` | stdlib (json/shlex/re) | L7 Security Gatekeeper: deterministic prompt-injection / secret access / exfiltration defense (<1ms) |
+| `actx_lib/cli_families.py` | stdlib (pure data) | declarative cloud-CLI family table (7 heads: ro_verbs/ask_specs/stream_specs/global_flags + actx-prefix skip lists); single data source for rewriter `_DISPATCH`, `T6_ASK_TABLE` and hang-policy stream specs |
 | `actx_lib/rewriter.py` | stdlib (json/sys/shlex) | single source of truth: command → rewritten |
 | `actx_lib/cli.py` | argparse | CLI dispatch; lazy filter imports |
 | `actx_lib/runner.py` | stdlib | execute, exit-code, tee |
@@ -44,7 +45,7 @@ Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); m
 | `actx_lib/rewrite_cmd.py` | stdlib | `actx rewrite "<cmd>"` |
 | `actx_lib/installer.py` | stdlib | `actx init/--show/--uninstall` |
 | `actx_lib/config.py` | stdlib | JSON config load/save |
-| `actx_lib/filters/` | stdlib | git_filter, system_filter (ls/grep/find), read_filter |
+| `actx_lib/filters/` | stdlib | git_filter, system_filter (ls/grep/find), read_filter; compact_profiles (declarative test-runner/linter compaction profiles + engine, golden-dump byte contract), ascii_table_filter (framed-table → CSV-like, raw fallback), json_compactor |
 | `adapters/opencode.ts.template` | TS (OpenCode Bun runtime) | thin transport; delegates to `actx rewrite` |
 
 ## Key Flows
@@ -61,7 +62,7 @@ Rewriter (v2.3): observational CLI + narrow mutator allow-list (`PRD.md` §7); m
 
 ## Data Model
 
-- Config: `~/.config/actx/config.json` → `{"tee":{"enabled","mode","dir"},"truncate":{"max_lines","max_line_chars"},"bypass_commands":[],"tracking":{"enabled":true,"history_days":90}}`; created with defaults on first run.
+- Config: `~/.config/actx/config.json` → `{"tee":{"enabled","mode","dir"},"truncate":{"max_lines","max_line_chars"},"timeouts":{"default_s","generous_s"},"bypass_commands":[],"custom_heads":[],"tracking":{"enabled":true,"history_days":90}}`; created with defaults on first run. `custom_heads`: `actx <head>` gets `actx run` semantics (never extends the §7 rewriter whitelist).
 - Tracking: `~/.local/share/actx/history.db` stores `sha1(command)`, `category`, `strategy`, bytes before/after, exit code, timestamp.
 - Tee file: `~/.local/share/actx/tee/<unix_ts>_<sha1(cmd)[:8]>.log`, JSON `{"command","stdout","stderr","exit_code"}`; retention 100 files / 10 MB per stream.
 
