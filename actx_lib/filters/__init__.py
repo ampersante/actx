@@ -3,6 +3,7 @@ from actx_lib.filters import (
     git_filter,
     infra_filter,
     linter_filter,
+    mobile_filter,
     package_filter,
     read_filter,
     smart_filter,
@@ -43,6 +44,16 @@ REGISTRY = {
     "helm": infra_filter.run_helm,
     "gh": infra_filter.run_gh,
     "aws": infra_filter.run_aws,
+    # Mobile toolchains (TK-42); "./gradlew" matches the argv token verbatim.
+    "flutter": mobile_filter.run_flutter,
+    "dart": mobile_filter.run_dart,
+    "swift": mobile_filter.run_swift,
+    "swiftlint": mobile_filter.run_swiftlint,
+    "swiftformat": mobile_filter.run_swiftformat,
+    "xcodebuild": mobile_filter.run_xcodebuild,
+    "xcrun": mobile_filter.run_xcrun,
+    "pod": mobile_filter.run_pod,
+    "./gradlew": mobile_filter.run_gradlew,
 }
 
 
