@@ -1422,6 +1422,30 @@ def _check_high_risk_cargo(command: str, raw_tokens: list[str]) -> SecurityDecis
 
 
 # ----------------------------------------------------------------------
+# T6: swiftformat mutating mode (Ask Confirmation) — N-F11
+# ----------------------------------------------------------------------
+
+_SWIFTFORMAT_READONLY_FLAGS = ("--lint", "--dryrun", "--dry-run", "--version", "--help")
+
+
+def _check_swiftformat(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
+    """Bare `swiftformat` (or with paths/flags but no lint/dry mode) rewrites
+    Swift source files in place - a mutator. The absence of a lint/dry flag
+    is not expressible in the T6 verb table, hence this dedicated check in
+    the `_check_high_risk_cargo` style."""
+    tokens = _unwrap_tokens(raw_tokens)
+    if not tokens or os.path.basename(tokens[0]) != "swiftformat":
+        return None
+    if any(tok in _SWIFTFORMAT_READONLY_FLAGS for tok in tokens[1:]):
+        return None
+    return SecurityDecision(
+        decision="ask",
+        reason="Bare swiftformat rewrites Swift files in place, requiring human confirmation",
+        category="T6_HIGH_RISK_SWIFTFORMAT",
+    )
+
+
+# ----------------------------------------------------------------------
 # T6: High-Risk Cloud/Infra CLI Mutations (Ask Confirmation)
 # ----------------------------------------------------------------------
 
@@ -1886,6 +1910,11 @@ def _evaluate_chunk(chunk: str) -> SecurityDecision:
     t6_cargo = _check_high_risk_cargo(chunk, tokens)
     if t6_cargo:
         return t6_cargo
+
+    # 8b. T6: swiftformat in mutating mode (N-F11; no lint/dry flag)
+    t6_swiftformat = _check_swiftformat(chunk, tokens)
+    if t6_swiftformat:
+        return t6_swiftformat
 
     # 9. T6: High-Risk Cloud/Infra CLI Mutations (Requires 'ask')
     t6_tools = _check_high_risk_tools(chunk, tokens)

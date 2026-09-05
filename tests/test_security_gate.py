@@ -538,6 +538,34 @@ class SecurityGateTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assert_allow(cmd)
 
+    def test_t6_swiftformat_mutating_mode_asks(self):
+        # N-F11: bare swiftformat (or paths/flags without lint/dry) rewrites
+        # Swift files in place - mutator, ask. Lint/dry/version/help stay allow.
+        ask_cases = [
+            "swiftformat",
+            "swiftformat .",
+            "swiftformat Sources/",
+            "swiftformat Sources Tests",
+            "swiftformat --swiftversion 5.9 .",
+            "env swiftformat .",
+            "/usr/local/bin/swiftformat .",
+        ]
+        for cmd in ask_cases:
+            with self.subTest(cmd=cmd):
+                self.assert_ask(cmd, "T6_HIGH_RISK_SWIFTFORMAT")
+
+        allow_cases = [
+            "swiftformat --lint .",
+            "swiftformat --lint Sources Tests",
+            "swiftformat --dryrun",
+            "swiftformat --dry-run .",
+            "swiftformat --version",
+            "swiftformat --help",
+        ]
+        for cmd in allow_cases:
+            with self.subTest(cmd=cmd):
+                self.assert_allow(cmd)
+
     # ------------------------------------------------------------------
     # T7: Action Space Backstop (§26a core-rules)
     # ------------------------------------------------------------------
