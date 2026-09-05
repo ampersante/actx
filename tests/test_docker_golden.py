@@ -44,6 +44,16 @@ PRESCRIBED_CHANGES = {
     # Streams at runtime (N-F5 never-wrap in hang_policy), but the rewrite
     # verdict is "prefix" exactly like the `docker logs -f` precedent.
     ("rewrite", "docker compose logs -f"): ("none", "prefix"),
+    # hang_policy (N-F5): RO ("compose", "logs") must not hang the wrapper
+    # when followed by -f/--follow.
+    ("hang", "docker compose logs -f"): ("default", "never_wrap"),
+    ("hang", "docker compose logs --follow web"): ("default", "never_wrap"),
+    # hang_policy (H-F12): detached/flag-full compose up|build are long
+    # builders — generous class instead of the default one.
+    ("hang", "docker compose up -d"): ("default", "generous"),
+    ("hang", "docker compose up --detach"): ("default", "generous"),
+    ("hang", "docker compose -f x.yml up -d"): ("default", "generous"),
+    ("hang", "docker --context prod compose up -d"): ("default", "generous"),
 }
 
 

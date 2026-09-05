@@ -84,13 +84,14 @@ class DockerTests(unittest.TestCase):
         )
 
     def test_compose_up_detached_is_not_never_wrap(self):
+        # TK-41 (H-F12): detached compose up is a long builder -> generous.
         self.assertEqual(
-            hang_policy.classify(["docker", "compose", "up", "-d"]), DEFAULT
+            hang_policy.classify(["docker", "compose", "up", "-d"]), GENEROUS
         )
 
     def test_compose_up_detach_long_is_not_never_wrap(self):
         self.assertEqual(
-            hang_policy.classify(["docker", "compose", "up", "--detach"]), DEFAULT
+            hang_policy.classify(["docker", "compose", "up", "--detach"]), GENEROUS
         )
 
     def test_compose_attach_is_never_wrap(self):
@@ -113,12 +114,70 @@ class DockerTests(unittest.TestCase):
             hang_policy.classify(
                 ["docker", "compose", "-f", "stack.yml", "up", "-d"]
             ),
-            DEFAULT,
+            GENEROUS,
         )
 
     def test_compose_ps_is_default(self):
         self.assertEqual(
             hang_policy.classify(["docker", "compose", "-f", "x.yml", "ps"]), DEFAULT
+        )
+
+    def test_compose_logs_f_is_never_wrap(self):
+        # N-F5: RO ("compose","logs") would hang the wrapper for 600 s
+        # without this guard.
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "logs", "-f"]), NEVER_WRAP
+        )
+
+    def test_compose_logs_follow_is_never_wrap(self):
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "logs", "--follow", "web"]),
+            NEVER_WRAP,
+        )
+
+    def test_plain_compose_logs_is_default(self):
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "logs"]), DEFAULT
+        )
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "logs", "web"]), DEFAULT
+        )
+
+    def test_compose_file_flag_before_logs_is_not_follow(self):
+        # `-f x.yml` is a compose-level FILE flag: must not read as follow.
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "-f", "x.yml", "logs"]),
+            DEFAULT,
+        )
+
+    def test_detached_compose_up_is_generous(self):
+        # H-F12: detached compose runs are long builders, not default.
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "up", "-d"]), GENEROUS
+        )
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "up", "--detach"]), GENEROUS
+        )
+        self.assertEqual(
+            hang_policy.classify(
+                ["docker", "compose", "-f", "x.yml", "up", "-d"]
+            ),
+            GENEROUS,
+        )
+        self.assertEqual(
+            hang_policy.classify(
+                ["docker", "--context", "prod", "compose", "up", "-d"]
+            ),
+            GENEROUS,
+        )
+
+    def test_compose_build_is_generous(self):
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "build"]), GENEROUS
+        )
+        self.assertEqual(
+            hang_policy.classify(["docker", "compose", "-f", "x.yml", "build"]),
+            GENEROUS,
         )
 
     def test_attach_is_never_wrap(self):

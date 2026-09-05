@@ -32,6 +32,11 @@ _LONG_OPS = (
     ("pip", "install"),
     ("uv", "pip", "install"),
     ("docker", "build"),
+    # Detached `docker compose up -d` (generous via _is_generous). Only
+    # covers the flag-less form: compose-level flags (docker compose
+    # -f x.yml up -d) defeat a prefix match, so H-F12 adds the dedicated
+    # _is_docker_compose_long predicate below for the flag-full forms.
+    ("docker", "compose", "up"),
     ("pytest",),
     ("cargo", "test"),
     ("go", "test"),
@@ -78,6 +83,13 @@ def _is_docker(argv):
         if "up" in after:
             # detached form terminates; anything else streams
             return not any(t in ("-d", "--detach") for t in after)
+        for idx, tok in enumerate(after):
+            if tok == "logs":
+                # N-F5: RO ("compose", "logs") must not hang the wrapper;
+                # plain `compose logs` terminates, -f/--follow streams.
+                # Only flags AFTER the logs token count: a compose-level
+                # `-f x.yml` before it is a file flag, not --follow.
+                return any(t in _STREAM_FLAGS for t in after[idx + 1:])
         return False
     sub = rest[0]
     if sub == "logs":
@@ -170,11 +182,27 @@ _NEVER_WRAP_PREDICATES = (
 )
 
 
+def _is_docker_compose_long(argv):
+    """H-F12: `up`/`build` after the `compose` token -> long builder.
+    Covers the detached/flag-full forms (`docker compose -f x.yml up -d`,
+    `docker --context prod compose build`) that the prefix-based _LONG_OPS
+    entry ("docker", "compose", "up") cannot match; that entry still covers
+    the flag-less `docker compose up -d`. Never-wrap (streaming compose up)
+    is decided earlier in _classify, so this only widens the timeout."""
+    if argv[0] != "docker" or len(argv) < 2:
+        return False
+    rest = argv[1:]
+    if "compose" not in rest:
+        return False
+    after = rest[rest.index("compose") + 1:]
+    return any(tok in ("up", "build") for tok in after)
+
+
 def _is_generous(argv):
     for prefix in _LONG_OPS:
         if argv[: len(prefix)] == list(prefix):
             return True
-    return False
+    return _is_docker_compose_long(argv)
 
 
 def _classify(argv):
