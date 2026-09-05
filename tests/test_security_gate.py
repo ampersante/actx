@@ -456,13 +456,18 @@ class SecurityGateTests(unittest.TestCase):
             # helm
             ("helm uninstall my-release", "T6_HIGH_RISK_HELM"),
             ("helm rollback my-release 1", "T6_HIGH_RISK_HELM"),
-            # docker
+            # docker (specs generated from cli_families since TK-41;
+            # volume rm/prune are new in TK-41)
             ("docker system prune", "T6_HIGH_RISK_DOCKER"),
             ("docker rm x", "T6_HIGH_RISK_DOCKER"),
             ("docker rmi img", "T6_HIGH_RISK_DOCKER"),
             ("docker compose down", "T6_HIGH_RISK_DOCKER"),
             ("docker --context x compose down", "T6_HIGH_RISK_DOCKER"),
             ("docker compose -f stack.yml down", "T6_HIGH_RISK_DOCKER"),
+            ("docker volume rm x", "T6_HIGH_RISK_DOCKER"),
+            ("docker volume rm v1 v2", "T6_HIGH_RISK_DOCKER"),
+            ("docker volume prune", "T6_HIGH_RISK_DOCKER"),
+            ("docker volume prune --force", "T6_HIGH_RISK_DOCKER"),
             # simctl
             ("simctl erase", "T6_HIGH_RISK_SIMCTL"),
             ("simctl erase all", "T6_HIGH_RISK_SIMCTL"),

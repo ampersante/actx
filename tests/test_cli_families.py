@@ -236,12 +236,32 @@ class RewriterCloudTests(unittest.TestCase):
 
 class T6ConsolidationTests(unittest.TestCase):
     def test_final_table_superset_of_pre_tk39(self):
-        # Red-gate 11: every pre-existing entry carried over verbatim.
+        # Red-gate 11/12: every pre-existing entry carried over verbatim.
+        # docker moved to FAMILIES in TK-41 and gained volume rm/prune, so
+        # its check is per-spec containment (final ⊇ previous), while the
+        # untouched heads stay pinned by exact equality.
         for head, specs in PRE_TK39_T6_ASK_TABLE.items():
-            self.assertEqual(
-                security_gate.T6_ASK_TABLE.get(head), specs, head
-            )
+            final = security_gate.T6_ASK_TABLE.get(head)
+            self.assertIsNotNone(final, head)
+            for spec in specs:
+                self.assertIn(spec, final, (head, spec))
+            if head != "docker":
+                self.assertEqual(final, specs, head)
         self.assertEqual(len(security_gate.T6_ASK_TABLE), 15)
+
+    def test_docker_ask_specs_generated_from_families(self):
+        # N-F1 / red-gate 12: had the docker entry stayed in
+        # _T6_NON_CLOUD_ASK_TABLE, the setdefault generation below would be
+        # shadowed and these assertions would fail — the snapshot alone
+        # would pass vacuously on the stale 4-spec entry.
+        self.assertNotIn("docker", security_gate._T6_NON_CLOUD_ASK_TABLE)
+        self.assertEqual(
+            security_gate.T6_ASK_TABLE["docker"],
+            cli_families.FAMILIES["docker"]["ask_specs"],
+        )
+        self.assertIn(("volume", "rm"), security_gate.T6_ASK_TABLE["docker"])
+        self.assertIn(("volume", "prune"), security_gate.T6_ASK_TABLE["docker"])
+        self.assertIn(("compose", "down"), security_gate.T6_ASK_TABLE["docker"])
 
     def test_flyctl_ask_specs(self):
         self.assertEqual(
