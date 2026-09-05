@@ -21,7 +21,6 @@ _GIT_MUTATE = frozenset({"add", "commit", "push", "pull", "fetch"})
 _PIP_RO = frozenset({"list", "show", "freeze", "outdated"})
 _NPM_RO = frozenset({"list"})
 _NPM_MUTATE = frozenset({"install", "ci"})
-_DOCKER_RO = frozenset({"ps", "images", "logs"})
 _KUBECTL_RO = frozenset({"get", "logs"})
 _GH_RO = frozenset({"pr", "issue", "run"})
 _CARGO_PURE_RO = frozenset({"check", "test", "build", "tree"})
@@ -173,16 +172,6 @@ def _wc_family_ok(tokens):
     return True
 
 
-def _docker_ok(tokens):
-    if len(tokens) < 2:
-        return False
-    if tokens[1] in _DOCKER_RO:
-        return True
-    if tokens[1] == "compose" and len(tokens) >= 3 and tokens[2] == "ps":
-        return True
-    return False
-
-
 def _pip_ok(tokens):
     if len(tokens) < 2:
         return False
@@ -251,7 +240,6 @@ _DISPATCH = {
     "uv": _uv_ok,
     "npm": _npm_ok,
     "pnpm": _npm_ok,
-    "docker": _docker_ok,
     "kubectl": lambda t: len(t) >= 2 and t[1] in _KUBECTL_RO,
 }
 
@@ -272,8 +260,9 @@ def _cloud_family_ok(tokens, global_flags, ro_verbs):
     return False
 
 
-# Cloud families join the dispatch from the declarative table (TK-39);
-# manual predicates above are never overwritten.
+# CLI families join the dispatch from the declarative table (TK-39; docker
+# joined in TK-41, its manual predicate removed); manual predicates above
+# are never overwritten.
 for _head, _spec in cli_families.FAMILIES.items():
     if _head not in _DISPATCH:
         _DISPATCH[_head] = (

@@ -114,6 +114,42 @@ class RewriteUnitTests(unittest.TestCase):
     def test_docker_run_rejected(self):
         self.assertIsNone(rewrite("docker run x"))
 
+    def test_docker_ro_verbs_rewritten(self):
+        # TK-41: docker dispatch is generated from cli_families ro_verbs.
+        for command in (
+            "docker ps",
+            "docker images",
+            "docker logs web",
+            "docker inspect c",
+            "docker system df",
+            "docker stats --no-stream",
+            "docker compose ps",
+            "docker compose logs web",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(rewrite(command), "actx " + command)
+
+    def test_docker_non_ro_verbs_not_rewritten(self):
+        for command in (
+            "docker stats",
+            "docker compose up",
+            "docker compose up -d",
+            "docker rm x",
+            "docker rmi x",
+            "docker system prune",
+            "docker volume rm x",
+            "docker volume prune",
+            "docker exec x ls",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_docker_global_value_flag_not_skipped(self):
+        # global_flags is empty: the scan stops at --context (conservative),
+        # and compose-level flags defeat the ("compose", "ps") prefix.
+        self.assertIsNone(rewrite("docker --context prod ps"))
+        self.assertIsNone(rewrite("docker compose -f x.yml ps"))
+
     def test_kubectl_apply_rejected(self):
         self.assertIsNone(rewrite("kubectl apply -f f"))
 

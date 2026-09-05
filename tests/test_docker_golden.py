@@ -27,10 +27,24 @@ GOLDEN_PATH = os.path.join(
     "docker_tk41_golden.json",
 )
 
-# case -> (dumped pre-migration verdict, post-migration verdict).
-# Filled in by the commits that implement the prescribed change; a case
-# lands here only when the TK-41 spec explicitly mandates the new verdict.
-PRESCRIBED_CHANGES = {}
+# (mode, case) -> (dumped pre-migration verdict, post-migration verdict).
+# A case lands here only when the TK-41 spec explicitly mandates the new
+# verdict; the dump itself is never edited.
+PRESCRIBED_CHANGES = {
+    # rewriter migration (docker dispatch generated from cli_families):
+    # new ro_verbs become prefix-rewritten; everything else is unchanged.
+    ("rewrite", "docker inspect c"): ("none", "prefix"),
+    ("rewrite", "docker inspect c1 c2"): ("none", "prefix"),
+    ("rewrite", "docker inspect --size c"): ("none", "prefix"),
+    ("rewrite", "docker system df"): ("none", "prefix"),
+    ("rewrite", "docker system df -v"): ("none", "prefix"),
+    ("rewrite", "docker stats --no-stream"): ("none", "prefix"),
+    ("rewrite", "docker compose logs"): ("none", "prefix"),
+    ("rewrite", "docker compose logs web"): ("none", "prefix"),
+    # Streams at runtime (N-F5 never-wrap in hang_policy), but the rewrite
+    # verdict is "prefix" exactly like the `docker logs -f` precedent.
+    ("rewrite", "docker compose logs -f"): ("none", "prefix"),
+}
 
 
 def _load_dump():
@@ -58,8 +72,9 @@ class DockerGoldenCorpusTests(unittest.TestCase):
         for command, recorded in sorted(dump.items()):
             with self.subTest(mode=mode, command=command):
                 actual = verdict_fn(command)
-                if command in PRESCRIBED_CHANGES:
-                    old, new = PRESCRIBED_CHANGES[command]
+                prescribed = PRESCRIBED_CHANGES.get((mode, command))
+                if prescribed is not None:
+                    old, new = prescribed
                     # The dump must keep proving its pre-migration origin.
                     self.assertEqual(recorded, old, command)
                     self.assertEqual(actual, new, command)

@@ -227,9 +227,9 @@ class RewriterCloudTests(unittest.TestCase):
         self.assertEqual(rewriter.rewrite(command), "actx " + command)
 
     def test_manual_predicates_not_shadowed(self):
-        # docker's dispatch behavior is pinned regardless of whether it is
-        # a manual predicate or a FAMILIES-generated one (TK-41 migrates it
-        # to the table): the verdicts must not change.
+        # docker migrated to the FAMILIES table in TK-41 (the manual
+        # _docker_ok predicate is gone): the generated predicate must keep
+        # the exact same dispatch behavior.
         self.assertEqual(rewriter.rewrite("docker ps"), "actx docker ps")
         self.assertIsNone(rewriter.rewrite("docker exec x ls"))
 
