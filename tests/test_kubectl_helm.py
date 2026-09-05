@@ -7,14 +7,33 @@ test_hook.py. The pre-migration verdicts live in
 test_golden_kubectl_helm.py (physically frozen corpus, H-F10/N-F12a).
 """
 
+import json
+import os
 import shlex
+import sqlite3
+import stat
+import subprocess
+import tempfile
+import time
 import unittest
 
 from actx_lib import cli_families, hang_policy, rewriter, security_gate
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ACTX = os.path.join(ROOT, "actx")
+
+BASE_CONFIG = {
+    "tee": {"enabled": False, "mode": "failures", "dir": "~/.local/share/actx/tee"},
+    "truncate": {"max_lines": 500, "max_line_chars": 300},
+}
+
 NEVER_WRAP = "never_wrap"
 DEFAULT = "default"
 
+# Wave-1 adversarial pattern: a secret whose key AND value contain none of
+# the redaction pattern words. never-wrap is the only thing keeping it out
+# of tee/history (N-F3a: base64 secret values dodge pattern redaction).
+KUBECTL_SECRET_LINE = "db-creds: cHJvZDpOWnRlN3h1QGhvc3QvZGI="
 
 
 class EffectiveVerbsTests(unittest.TestCase):
@@ -328,6 +347,282 @@ class KubectlHelmHangTests(unittest.TestCase):
         # The watch rule covers get/events only (spec N-F4); describe
         # does not accept -w and the pre-TK-40 verdict is unchanged.
         self.assertEqual(self.classify("kubectl describe pod web-abc -w"), DEFAULT)
+
+
+class _ShimTestCase(unittest.TestCase):
+    """Common plumbing: tmp HOME, tmp bin dir on PATH, marker file."""
+
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory()
+        self.bin = tempfile.TemporaryDirectory()
+        os.environ["HOME"] = self.home.name
+        self.marker = os.path.join(self.bin.name, "shim-ran.marker")
+
+    def tearDown(self):
+        os.environ.pop("ACTX_BYPASS", None)
+        os.environ.pop("ACTX_MARKER", None)
+        del os.environ["HOME"]
+        self.bin.cleanup()
+        self.home.cleanup()
+
+    def install_shim(self, name, body):
+        path = os.path.join(self.bin.name, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("#!/usr/bin/env python3\n")
+            handle.write(body)
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+
+    def run_actx(self, args, stdin_text=None, extra_env=None, timeout=30):
+        env = os.environ.copy()
+        env["HOME"] = self.home.name
+        env["PATH"] = self.bin.name + os.pathsep + env.get("PATH", "")
+        env["ACTX_MARKER"] = self.marker
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            [ACTX] + args,
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout,
+        )
+
+    def write_config(self, extra=None):
+        config = json.loads(json.dumps(BASE_CONFIG))
+        config.update(extra or {})
+        path = os.path.join(self.home.name, ".config", "actx", "config.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+
+
+class KubectlHelmShimE2ETests(_ShimTestCase):
+    """DoD observable runs on shim executables (tmp PATH injection)."""
+
+    # -- H-F4: `actx kubectl -n prod get pods` -> COMPACT, not passthrough --
+
+    def test_kubectl_n_prod_get_pods_compacts_not_passthrough(self):
+        # 3 identical lines collapse to "(x3)": only the dedup compaction
+        # path can emit that marker - raw passthrough never would.
+        self.install_shim(
+            "kubectl",
+            "print('NAME READY STATUS RESTARTS AGE')\n"
+            "for _ in range(3):\n"
+            "    print('web-abc 1/1 Running 0 2h')\n"
+            "print('web-def 1/1 Running 0 2h')\n",
+        )
+        p = self.run_actx(["kubectl", "-n", "prod", "get", "pods"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("web-abc 1/1 Running 0 2h (x3)", p.stdout)
+        self.assertIn("web-def", p.stdout)
+
+    def test_kubectl_describe_compacts(self):
+        self.install_shim(
+            "kubectl",
+            "for _ in range(3):\n"
+            "    print('Name: web-abc')\n"
+            "print('Node: node-1/10.0.0.5')\n",
+        )
+        p = self.run_actx(["kubectl", "describe", "pod", "web-abc"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("Name: web-abc (x3)", p.stdout)
+        self.assertIn("node-1/10.0.0.5", p.stdout)
+
+    def test_kubectl_dash_o_json_compacts_as_json(self):
+        payload = json.dumps(
+            {"kind": "PodList", "items": [{"name": "web-%02d" % i}
+                                          for i in range(40)]}
+        )
+        self.install_shim("kubectl", "import json\nprint(%r)\n" % payload)
+        p = self.run_actx(["kubectl", "get", "pods", "-o", "json"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        parsed = json.loads(p.stdout)
+        self.assertEqual(parsed["kind"], "PodList")
+        self.assertEqual(parsed["items"][0]["name"], "web-00")
+
+    def test_kubectl_exit_code_preserved(self):
+        self.install_shim(
+            "kubectl", "import sys\nprint('boom')\nsys.exit(3)\n"
+        )
+        p = self.run_actx(["kubectl", "get", "pods"])
+        self.assertEqual(p.returncode, 3)
+        self.assertIn("boom", p.stdout)
+
+    def test_helm_template_compacts(self):
+        self.install_shim(
+            "helm",
+            "for _ in range(3):\n"
+            "    print('# Source: mychart/templates/svc.yaml')\n"
+            "print('kind: Service')\n",
+        )
+        p = self.run_actx(["helm", "template", "mychart"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("# Source: mychart/templates/svc.yaml (x3)", p.stdout)
+        self.assertIn("kind: Service", p.stdout)
+
+    def test_helm_list_compacts(self):
+        self.install_shim(
+            "helm",
+            "print('NAME NAMESPACE REVISION STATUS')\n"
+            "print('my-release default 3 deployed')\n",
+        )
+        p = self.run_actx(["helm", "list"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("my-release", p.stdout)
+
+    # -- never-wrap: exit 125 fast, the shim never runs -------------------
+
+    def _assert_refused_125(self, args, needle):
+        start = time.monotonic()
+        p = self.run_actx(args, timeout=10)
+        elapsed = time.monotonic() - start
+        self.assertEqual(p.returncode, 125, p.stderr)
+        self.assertLess(elapsed, 3.0)
+        self.assertIn(needle, p.stderr)
+        self.assertFalse(os.path.exists(self.marker))
+
+    def _install_sleeping_shim(self, name):
+        self.install_shim(
+            name,
+            "import os, time\n"
+            "open(os.environ['ACTX_MARKER'], 'w').write('x')\n"
+            "time.sleep(30)\n",
+        )
+
+    def test_get_w_refused_fast(self):
+        self._install_sleeping_shim("kubectl")
+        self._assert_refused_125(
+            ["kubectl", "get", "pods", "-w"], "kubectl get pods -w"
+        )
+
+    def test_events_watch_refused_fast(self):
+        self._install_sleeping_shim("kubectl")
+        self._assert_refused_125(
+            ["kubectl", "events", "--watch"], "kubectl events --watch"
+        )
+
+    def test_logs_f_refused_fast(self):
+        self._install_sleeping_shim("kubectl")
+        self._assert_refused_125(
+            ["kubectl", "logs", "-f", "pod/web-abc"], "kubectl logs -f pod/web-abc"
+        )
+
+    def test_port_forward_refused_fast(self):
+        self._install_sleeping_shim("kubectl")
+        self._assert_refused_125(
+            ["kubectl", "port-forward", "pod/web-abc", "8080:80"],
+            "kubectl port-forward",
+        )
+
+    def test_helm_get_values_refused_fast(self):
+        self._install_sleeping_shim("helm")
+        self._assert_refused_125(
+            ["helm", "get", "values", "my-release"], "helm get values"
+        )
+        # Red-gate 16 half 1: the rewriter never prefixes it either.
+        self.assertIsNone(rewriter.rewrite("helm get values my-release"))
+
+    # -- red-gate 16: secret object types never captured ------------------
+
+    def test_get_secret_refused_and_secret_never_captured(self):
+        # The rewriter prefixes it (family table), actx refuses at 125 BEFORE
+        # execution: no stdout, no tee, no history command_text.
+        self.write_config(
+            {"tee": {"enabled": True, "mode": "always",
+                     "dir": "~/.local/share/actx/tee", "min_bytes": 0}}
+        )
+        self.install_shim(
+            "kubectl",
+            "import os\n"
+            "open(os.environ['ACTX_MARKER'], 'w').write('x')\n"
+            "print(%r)\n" % KUBECTL_SECRET_LINE,
+        )
+        for args in (["kubectl", "get", "secret", "db-creds"],
+                     ["run", "kubectl", "get", "secret", "db-creds"],
+                     ["kubectl", "-n", "prod", "get", "secret", "db-creds"]):
+            with self.subTest(args=args):
+                p = self.run_actx(args, timeout=10)
+                self.assertEqual(p.returncode, 125, p.stderr)
+        self.assertFalse(os.path.exists(self.marker))
+
+        tee_dir = os.path.join(self.home.name, ".local", "share", "actx", "tee")
+        self.assertFalse(os.path.exists(tee_dir))
+
+        history = os.path.join(
+            self.home.name, ".local", "share", "actx", "history.db"
+        )
+        if os.path.exists(history):  # nothing is tracked on refusal; be strict
+            conn = sqlite3.connect(history)
+            try:
+                rows = [
+                    row[0]
+                    for row in conn.execute("SELECT command_text FROM calls")
+                ]
+            finally:
+                conn.close()
+            for text in rows:
+                self.assertNotIn("cHJvZDpOWnRlN3h1", text or "")
+
+    # -- hook JSON: ask / allow-rewrite -----------------------------------
+
+    def hook_decision(self, command):
+        p = self.run_actx(
+            ["hook"],
+            stdin_text=json.dumps(
+                {"tool_name": "Bash", "tool_input": {"command": command}}
+            ),
+        )
+        self.assertEqual(p.returncode, 0, p.stderr)
+        if not p.stdout.strip():
+            return None
+        return json.loads(p.stdout)["hookSpecificOutput"]
+
+    def test_hook_kubectl_exec_asks(self):
+        for command in ("kubectl exec pod -- sh",
+                        "kubectl -n x exec pod -- ls"):
+            with self.subTest(command=command):
+                decision = self.hook_decision(command)
+                self.assertEqual(decision["permissionDecision"], "ask")
+                self.assertIn("kubectl", decision["permissionDecisionReason"])
+
+    def test_hook_helm_uninstall_asks(self):
+        decision = self.hook_decision("helm uninstall my-release")
+        self.assertEqual(decision["permissionDecision"], "ask")
+
+    def test_hook_kubectl_delete_asks(self):
+        decision = self.hook_decision("kubectl delete pod x")
+        self.assertEqual(decision["permissionDecision"], "ask")
+
+    def test_hook_kubectl_get_rewritten(self):
+        decision = self.hook_decision("kubectl get pods")
+        self.assertEqual(decision["permissionDecision"], "allow")
+        self.assertEqual(
+            decision["updatedInput"]["command"], "actx kubectl get pods"
+        )
+
+    def test_hook_kubectl_n_prod_get_rewritten(self):
+        decision = self.hook_decision("kubectl -n prod get pods")
+        self.assertEqual(decision["permissionDecision"], "allow")
+        self.assertEqual(
+            decision["updatedInput"]["command"], "actx kubectl -n prod get pods"
+        )
+
+    def test_hook_helm_template_rewritten(self):
+        decision = self.hook_decision("helm template mychart")
+        self.assertEqual(decision["permissionDecision"], "allow")
+        self.assertEqual(
+            decision["updatedInput"]["command"], "actx helm template mychart"
+        )
+
+    def test_hook_helm_get_values_not_rewritten(self):
+        # Never an allow-with-rewrite: stream verbs must not gain a prefix.
+        decision = self.hook_decision("helm get values my-release")
+        self.assertIsNone(decision)
+
+    def test_hook_kubectl_port_forward_not_rewritten(self):
+        decision = self.hook_decision("kubectl port-forward pod 8080")
+        self.assertIsNone(decision)
 
 
 if __name__ == "__main__":
