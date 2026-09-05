@@ -25,7 +25,12 @@ _LOGIN_HEADS = frozenset({
     "wrangler", "railway", "gcloud", "vercel", "netlify", "supabase",
     "flyctl", "fly",
 })
-_REPL_HEADS = frozenset({"psql", "sqlite3", "duckdb", "mongosh"})
+# Interactive SQL/warehouse REPLs. TK-43 (N-F15): snowsql/databricks make
+# the PRD never-wrap fixation mechanical. sqlite3 leaves the set for the
+# db+SQL batch form via the positional-count rule in _is_repl.
+_REPL_HEADS = frozenset(
+    {"psql", "sqlite3", "duckdb", "mongosh", "snowsql", "databricks"}
+)
 # run/attach/logs stream; channel/upgrade/downgrade are long interactive
 # prompts (TK-42: never-wrap so they cannot stall a wrapped session).
 _FLUTTER_STREAM_SUBS = frozenset({
@@ -61,6 +66,12 @@ _LONG_OPS = (
     ("dart", "pub", "get"),
     ("flutter", "test"),
     ("dart", "test"),
+    # Data stack (TK-43): terraform plan walks providers/state and dbt
+    # run/test/build compile+execute whole projects - known long builders.
+    ("terraform", "plan"),
+    ("dbt", "run"),
+    ("dbt", "test"),
+    ("dbt", "build"),
 )
 
 # Interactive confirmation prompts looked for in command output.
@@ -193,7 +204,15 @@ def _is_repl(argv):
         return True
     if "-c" in rest:
         return False
-    return any(not tok.startswith("-") for tok in rest)
+    positional = [tok for tok in rest if not tok.startswith("-")]
+    if not positional:
+        return False
+    if argv[0] == "sqlite3" and len(positional) >= 2:
+        # H-F3/N-F6 (TK-43): `sqlite3 <db> "<SQL>"` runs one batch and
+        # exits - not a REPL (pinned change of the pre-TK-43 behavior;
+        # bare `sqlite3 <db>` below stays a REPL).
+        return False
+    return True
 
 
 def _is_swift(argv):

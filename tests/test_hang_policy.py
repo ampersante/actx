@@ -332,14 +332,33 @@ class LoginTests(unittest.TestCase):
 
 class ReplTests(unittest.TestCase):
     def test_bare_repls_are_never_wrap(self):
-        for head in ("psql", "sqlite3", "duckdb", "mongosh"):
+        for head in ("psql", "sqlite3", "duckdb", "mongosh",
+                     "snowsql", "databricks"):
             with self.subTest(head=head):
                 self.assertEqual(hang_policy.classify([head]), NEVER_WRAP)
 
     def test_repl_with_nonflag_query_argument_is_never_wrap(self):
         self.assertEqual(hang_policy.classify(["psql", "mydb"]), NEVER_WRAP)
+        self.assertEqual(hang_policy.classify(["mongosh", "file.js"]), NEVER_WRAP)
         self.assertEqual(
-            hang_policy.classify(["sqlite3", "db.sqlite", "SELECT 1"]), NEVER_WRAP
+            hang_policy.classify(["snowsql", "-d mydb"]), NEVER_WRAP
+        )
+
+    def test_sqlite3_batch_form_is_not_a_repl(self):
+        # Red-gate 17 (H-F3/N-F6, TK-43): db + SQL positionals run one
+        # batch and exit - the rewrite path owns them now. Pinned change
+        # from the pre-TK-43 never-wrap.
+        self.assertEqual(
+            hang_policy.classify(["sqlite3", "db.sqlite", "SELECT 1"]),
+            DEFAULT,
+        )
+        self.assertEqual(
+            hang_policy.classify(["sqlite3", "db.sqlite", ".tables"]),
+            DEFAULT,
+        )
+        # Bare db (1 positional) is still the interactive REPL.
+        self.assertEqual(
+            hang_policy.classify(["sqlite3", "db.sqlite"]), NEVER_WRAP
         )
 
     def test_repl_with_c_flag_is_default(self):
@@ -389,6 +408,12 @@ class GenerousTests(unittest.TestCase):
             ["pytest"],
             ["cargo", "test"],
             ["go", "test", "./..."],
+            # Data stack (TK-43): long builders.
+            ["terraform", "plan"],
+            ["terraform", "plan", "-out", "tfplan"],
+            ["dbt", "run"],
+            ["dbt", "test"],
+            ["dbt", "build"],
         )
         for argv in cases:
             with self.subTest(argv=argv):
