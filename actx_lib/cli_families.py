@@ -1,8 +1,11 @@
-"""Declarative table of cloud CLI families (TK-39).
+"""Declarative table of CLI families (TK-39, TK-41).
 
 Pure data, zero imports: rewriter, security_gate and hang_policy all read it
 directly, so the cheap hook/rewrite import boundary must not gain transitive
-modules. Connecting a new cloud CLI is a data edit here, not a new predicate.
+modules. Connecting a new CLI family is a data edit here, not a new
+predicate. Not only cloud CLIs live here: docker joined in TK-41, and its
+flag-sensitive streaming forms stay in dedicated hang_policy predicates
+(`_is_docker`) because a plain prefix table cannot express them.
 
 Family record schema:
   global_flags  -- boolean-only global flags allowed between head and verb
@@ -27,8 +30,8 @@ Invariant: ro_verbs, ask_specs and stream_specs are pairwise disjoint as
 tuple sets inside each family (tested).
 
 Verb lists verified against the official CLI docs on 2026-09-05 (Vercel,
-Netlify, Railway, Cloudflare Wrangler, Supabase, fly.io, gcloud); additions
-stay conservative - when in doubt, leave the verb out.
+Netlify, Railway, Cloudflare Wrangler, Supabase, fly.io, gcloud, docker);
+additions stay conservative - when in doubt, leave the verb out.
 """
 
 FAMILIES = {
@@ -124,6 +127,30 @@ FAMILIES = {
         "ro_verbs": (("projects", "list"),),
         "ask_specs": (("delete",), ("undeploy",)),
         "stream_specs": (("secrets",),),
+    },
+    # docker (TK-41): global value flags (--context/-H/--host) are
+    # deliberately NOT skipped here — the scan stops at the first unknown
+    # token, so `docker --context prod ps` stays unrewritten (conservative;
+    # the infra filter dispatches on effective verbs locally). Flag-sensitive
+    # streaming forms (bare `docker stats`, `compose up` without -d,
+    # `attach`, `logs -f`, `compose logs -f`) cannot be expressed as plain
+    # prefixes and live in the dedicated hang_policy._is_docker predicate
+    # (precedent: _is_wrangler_tail) — hence empty stream_specs.
+    "docker": {
+        "global_flags": (),
+        "ro_verbs": (
+            ("ps",), ("images",), ("logs",), ("inspect",),
+            ("system", "df"),
+            ("stats", "--no-stream"),
+            ("compose", "ps"), ("compose", "logs"),
+        ),
+        # First 4 specs verbatim from the pre-TK-41 _T6_NON_CLOUD_ASK_TABLE
+        # entry; volume rm/prune are new (TK-41).
+        "ask_specs": (
+            ("system", "prune"), ("rm",), ("rmi",), ("compose", "down"),
+            ("volume", "rm"), ("volume", "prune"),
+        ),
+        "stream_specs": (),
     },
 }
 

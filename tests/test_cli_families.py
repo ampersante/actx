@@ -49,6 +49,10 @@ CLOUD_HEADS = (
     "vercel", "netlify", "railway", "wrangler", "supabase", "flyctl", "gcloud",
 )
 
+# docker joined the table in TK-41 (dispatch, T6 specs and hang-policy all
+# read the same record); its streaming forms stay in hang_policy._is_docker.
+FAMILY_HEADS = CLOUD_HEADS + ("docker",)
+
 # Secret-bearing connection string whose key AND value contain none of the
 # redaction pattern words (secret/token/password/...) - the Q2 adversarial
 # fixture. The never-wrap decision is the only thing keeping it out of
@@ -64,7 +68,7 @@ JSON_ARRAY_SHIM = (
 class FamilyDataTests(unittest.TestCase):
     def test_seven_families_declared(self):
         self.assertEqual(
-            tuple(sorted(cli_families.FAMILIES)), tuple(sorted(CLOUD_HEADS))
+            tuple(sorted(cli_families.FAMILIES)), tuple(sorted(FAMILY_HEADS))
         )
 
     def test_schema_shape(self):
@@ -223,7 +227,9 @@ class RewriterCloudTests(unittest.TestCase):
         self.assertEqual(rewriter.rewrite(command), "actx " + command)
 
     def test_manual_predicates_not_shadowed(self):
-        # docker is a manual predicate and not a family head: unchanged.
+        # docker's dispatch behavior is pinned regardless of whether it is
+        # a manual predicate or a FAMILIES-generated one (TK-41 migrates it
+        # to the table): the verdicts must not change.
         self.assertEqual(rewriter.rewrite("docker ps"), "actx docker ps")
         self.assertIsNone(rewriter.rewrite("docker exec x ls"))
 
