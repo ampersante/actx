@@ -1,5 +1,6 @@
 from actx_lib import cli_families, runner
 from actx_lib.filters import (
+    data_filter,
     git_filter,
     infra_filter,
     linter_filter,
@@ -54,6 +55,14 @@ REGISTRY = {
     "xcrun": mobile_filter.run_xcrun,
     "pod": mobile_filter.run_pod,
     "./gradlew": mobile_filter.run_gradlew,
+    # Data stack (TK-43); bq stays on the generic _cloud_entry below (JSON
+    # auto-detect on runner.run).
+    "psql": data_filter.run_psql,
+    "sqlite3": data_filter.run_sqlite3,
+    "duckdb": data_filter.run_duckdb,
+    "redis-cli": data_filter.run_redis,
+    "terraform": data_filter.run_terraform,
+    "dbt": data_filter.run_dbt,
 }
 
 
