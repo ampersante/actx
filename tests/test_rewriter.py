@@ -360,5 +360,153 @@ class CargoRewriteUnitTests(unittest.TestCase):
         self.assertIsNone(rewrite("cargo install ripgrep"))
 
 
+class MobileRewriteTests(unittest.TestCase):
+    """TK-42: flutter/dart/swift/swiftlint/swiftformat/xcodebuild/xcrun/pod/
+    ./gradlew dispatch heads."""
+
+    def test_flutter_ro_rewritten(self):
+        self.assertEqual(rewrite("flutter doctor"), "actx flutter doctor")
+        self.assertEqual(rewrite("flutter analyze"), "actx flutter analyze")
+        self.assertEqual(rewrite("flutter analyze lib/"), "actx flutter analyze lib/")
+        self.assertEqual(rewrite("flutter test"), "actx flutter test")
+        self.assertEqual(
+            rewrite("flutter test --plain-name counter"),
+            "actx flutter test --plain-name counter",
+        )
+        self.assertEqual(
+            rewrite("flutter pub outdated"), "actx flutter pub outdated"
+        )
+        self.assertEqual(
+            rewrite("flutter pub deps --style=compact"),
+            "actx flutter pub deps --style=compact",
+        )
+
+    def test_flutter_interactive_and_mutating_rejected(self):
+        self.assertIsNone(rewrite("flutter run"))
+        self.assertIsNone(rewrite("flutter attach"))
+        self.assertIsNone(rewrite("flutter logs"))
+        self.assertIsNone(rewrite("flutter emulators --launch pixel"))
+        self.assertIsNone(rewrite("flutter doctor --android-licenses"))
+        self.assertIsNone(rewrite("flutter channel"))
+        self.assertIsNone(rewrite("flutter upgrade"))
+        self.assertIsNone(rewrite("flutter downgrade"))
+        self.assertIsNone(rewrite("flutter pub get"))
+        self.assertIsNone(rewrite("flutter pub add http"))
+        self.assertIsNone(rewrite("flutter clean"))
+        self.assertIsNone(rewrite("flutter build apk"))
+        self.assertIsNone(rewrite("flutter"))
+
+    def test_dart_ro_rewritten(self):
+        self.assertEqual(rewrite("dart analyze"), "actx dart analyze")
+        self.assertEqual(rewrite("dart analyze test/"), "actx dart analyze test/")
+        self.assertEqual(rewrite("dart test"), "actx dart test")
+        self.assertEqual(rewrite("dart test --name parser"), "actx dart test --name parser")
+
+    def test_dart_other_rejected(self):
+        self.assertIsNone(rewrite("dart run bin/tool.dart"))
+        self.assertIsNone(rewrite("dart pub get"))
+        self.assertIsNone(rewrite("dart compile exe bin/x.dart"))
+        self.assertIsNone(rewrite("dart"))
+
+    def test_swift_build_test_rewritten(self):
+        self.assertEqual(rewrite("swift build"), "actx swift build")
+        self.assertEqual(rewrite("swift build --product App"), "actx swift build --product App")
+        self.assertEqual(rewrite("swift test"), "actx swift test")
+        self.assertEqual(rewrite("swift test --filter Foo"), "actx swift test --filter Foo")
+
+    def test_swift_interactive_rejected(self):
+        self.assertIsNone(rewrite("swift repl"))
+        self.assertIsNone(rewrite("swift run App"))
+        self.assertIsNone(rewrite("swift package resolve"))
+        self.assertIsNone(rewrite("swift"))
+
+    def test_swiftlint_lint_rewritten(self):
+        self.assertEqual(rewrite("swiftlint lint"), "actx swiftlint lint")
+        self.assertEqual(
+            rewrite("swiftlint lint --strict"), "actx swiftlint lint --strict"
+        )
+
+    def test_swiftlint_mutating_rejected(self):
+        self.assertIsNone(rewrite("swiftlint"))
+        self.assertIsNone(rewrite("swiftlint autocorrect"))
+        self.assertIsNone(rewrite("swiftlint lint --fix"))
+
+    def test_swiftformat_lint_rewritten(self):
+        self.assertEqual(rewrite("swiftformat --lint ."), "actx swiftformat --lint .")
+        self.assertEqual(rewrite("swiftformat --dryrun"), "actx swiftformat --dryrun")
+        self.assertEqual(
+            rewrite("swiftformat Sources --dry-run"), "actx swiftformat Sources --dry-run"
+        )
+
+    def test_swiftformat_mutating_rejected(self):
+        self.assertIsNone(rewrite("swiftformat"))
+        self.assertIsNone(rewrite("swiftformat ."))
+        self.assertIsNone(rewrite("swiftformat Sources Tests"))
+        self.assertIsNone(rewrite("swiftformat --lint . --fix"))
+
+    def test_xcodebuild_ro_and_build_rewritten(self):
+        self.assertEqual(rewrite("xcodebuild -list"), "actx xcodebuild -list")
+        self.assertEqual(
+            rewrite("xcodebuild -project App.xcodeproj -list"),
+            "actx xcodebuild -project App.xcodeproj -list",
+        )
+        self.assertEqual(rewrite("xcodebuild -showsdks"), "actx xcodebuild -showsdks")
+        self.assertEqual(
+            rewrite("xcodebuild -showBuildSettings"),
+            "actx xcodebuild -showBuildSettings",
+        )
+        self.assertEqual(
+            rewrite("xcodebuild -scheme App build"),
+            "actx xcodebuild -scheme App build",
+        )
+        self.assertEqual(
+            rewrite("xcodebuild -destination 'platform=iOS Simulator,name=iPhone 15' test"),
+            "actx xcodebuild -destination 'platform=iOS Simulator,name=iPhone 15' test",
+        )
+
+    def test_xcodebuild_bare_and_interactive_rejected(self):
+        self.assertIsNone(rewrite("xcodebuild"))
+        self.assertIsNone(
+            rewrite("xcodebuild -allowProvisioningUpdates -scheme App build")
+        )
+        self.assertIsNone(rewrite("xcodebuild clean"))
+
+    def test_xcrun_simctl_list_rewritten(self):
+        self.assertEqual(
+            rewrite("xcrun simctl list"), "actx xcrun simctl list"
+        )
+        self.assertEqual(
+            rewrite("xcrun simctl list devices"), "actx xcrun simctl list devices"
+        )
+
+    def test_xcrun_other_rejected(self):
+        self.assertIsNone(rewrite("xcrun simctl boot udid"))
+        self.assertIsNone(rewrite("xcrun simctl erase udid"))
+        self.assertIsNone(rewrite("xcrun --find clang"))
+        self.assertIsNone(rewrite("xcrun"))
+
+    def test_pod_ro_rewritten(self):
+        self.assertEqual(rewrite("pod outdated"), "actx pod outdated")
+        self.assertEqual(rewrite("pod list"), "actx pod list")
+
+    def test_pod_mutating_rejected(self):
+        self.assertIsNone(rewrite("pod install"))
+        self.assertIsNone(rewrite("pod deintegrate"))
+        self.assertIsNone(rewrite("pod update"))
+
+    def test_gradlew_rewritten(self):
+        self.assertEqual(rewrite("./gradlew build"), "actx ./gradlew build")
+        self.assertEqual(rewrite("./gradlew test"), "actx ./gradlew test")
+        self.assertEqual(
+            rewrite("./gradlew :app:assembleDebug --console=plain"),
+            "actx ./gradlew :app:assembleDebug --console=plain",
+        )
+
+    def test_other_gradle_invocations_not_affected(self):
+        # Absolute/`gradle` paths are different argv heads - untouched.
+        self.assertIsNone(rewrite("gradle build"))
+        self.assertIsNone(rewrite("./gradlew --stop; ls"))
+
+
 if __name__ == "__main__":
     unittest.main()

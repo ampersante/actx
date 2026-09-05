@@ -210,6 +210,49 @@ def _next_ok(tokens):
     return not any(tok == "--fix" or tok.startswith("--fix") for tok in tokens[1:])
 
 
+# --- mobile toolchains (TK-42) ---
+_FLUTTER_RO = frozenset({"doctor", "analyze", "test"})
+_DART_RO = frozenset({"analyze", "test"})
+_SWIFT_RO = frozenset({"build", "test"})
+_XCODEBUILD_INFO_FLAGS = frozenset({"-list", "-showsdks", "-showBuildSettings"})
+_SWIFTFORMAT_READONLY = frozenset({"--lint", "--dryrun", "--dry-run"})
+
+
+def _flutter_ok(tokens):
+    if len(tokens) < 2:
+        return False
+    if tokens[1] == "doctor":
+        # License acceptance is an interactive prompt (never-wrap upstream).
+        return "--android-licenses" not in tokens[2:]
+    if tokens[1] in _FLUTTER_RO:
+        return True
+    return (
+        tokens[1] == "pub"
+        and len(tokens) >= 3
+        and tokens[2] in ("outdated", "deps")
+    )
+
+
+def _swiftformat_ok(tokens):
+    # Mutating mode (bare, paths, fix/format) never matches: the read-only
+    # lint/dry flags are required verbatim and write tokens reject outright.
+    if _has_write_token(tokens):
+        return False
+    return any(tok in _SWIFTFORMAT_READONLY for tok in tokens[1:])
+
+
+def _xcodebuild_ok(tokens):
+    rest = tokens[1:]
+    # Interactive signing update prompts (never-wrap upstream).
+    if "-allowProvisioningUpdates" in rest:
+        return False
+    if any(tok in _XCODEBUILD_INFO_FLAGS for tok in rest):
+        return True
+    # A build pinned to a scheme/destination compacts to diagnostics only;
+    # the bare invocation stays unwrapped (interactive signing prompts).
+    return "-scheme" in rest or "-destination" in rest
+
+
 # head -> predicate(tokens) ; None predicate means always rewrite when head matches
 _DISPATCH = {
     "git": _git_ok,
@@ -239,6 +282,16 @@ _DISPATCH = {
     "uv": _uv_ok,
     "npm": _npm_ok,
     "pnpm": _npm_ok,
+    # --- mobile toolchains (TK-42); "./gradlew" matches the argv token ---
+    "flutter": _flutter_ok,
+    "dart": lambda t: len(t) >= 2 and t[1] in _DART_RO,
+    "swift": lambda t: len(t) >= 2 and t[1] in _SWIFT_RO,
+    "swiftlint": lambda t: len(t) >= 2 and t[1] == "lint" and not _has_write_token(t),
+    "swiftformat": _swiftformat_ok,
+    "xcodebuild": _xcodebuild_ok,
+    "xcrun": lambda t: len(t) >= 3 and t[1] == "simctl" and t[2] == "list",
+    "pod": lambda t: len(t) >= 2 and t[1] in ("outdated", "list"),
+    "./gradlew": lambda _t: True,
 }
 
 
