@@ -325,6 +325,24 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_allow("pnpm add express")
         self.assert_allow("npm ci")
 
+    def test_t5_npx_dlx_auto_install_asks(self):
+        # TK-48: auto-confirmed one-shot package execution -> ask
+        self.assert_ask("npx -y create-expo-app", "T5_SUPPLY_CHAIN")
+        self.assert_ask("npx --yes foo", "T5_SUPPLY_CHAIN")
+        self.assert_ask("npx -y @modelcontextprotocol/server-filesystem .", "T5_SUPPLY_CHAIN")
+        self.assert_ask("pnpm dlx shadcn", "T5_SUPPLY_CHAIN")
+        self.assert_ask("yarn dlx foo", "T5_SUPPLY_CHAIN")
+
+    def test_t5_bare_npx_without_yes_not_asked(self):
+        # TK-48: bare npx (no -y/--yes) must NOT ask — a missing package
+        # stalls at npx's interactive install prompt, which the default
+        # hang-policy timeout already catches (see _check_supply_chain
+        # docstring). These stay on the allow path.
+        self.assert_allow("npx cowsay")
+        self.assert_allow("npx create-expo-app myapp")
+        self.assert_allow("pnpm add cowsay")
+        self.assert_allow("yarn add cowsay")
+
     # ------------------------------------------------------------------
     # T6: High-Risk Git Mutations (Ask Confirmation)
     # ------------------------------------------------------------------

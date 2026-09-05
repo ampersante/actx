@@ -1079,7 +1079,19 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> S
 # ----------------------------------------------------------------------
 
 def _check_supply_chain(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
-    if "=" not in command and not any(h in command for h in ("pip", "uv", "npm", "pnpm", "yarn", "python")):
+    """T5 supply-chain gate.
+
+    Denies installs configured against unencrypted HTTP/git indexes.
+    Asks (human confirmation) for auto-confirmed one-shot package execution:
+    `npx -y/--yes <pkg>`, `pnpm dlx <pkg>`, `yarn dlx <pkg>` — these fetch and
+    run an arbitrary package with no prompt, the exact supply-chain footgun
+    T5 exists for.
+
+    Bare `npx <tool>` WITHOUT -y/--yes is intentionally NOT asked: when the
+    package is not installed, npx stops at an interactive install prompt;
+    a stalled child is caught by the default hang-policy timeout instead.
+    """
+    if "=" not in command and not any(h in command for h in ("pip", "uv", "npm", "pnpm", "yarn", "python", "npx")):
         return None
 
     # Check for prefix environment variable registry overrides (PIP_INDEX_URL=http://, NPM_CONFIG_REGISTRY=http://)
@@ -1102,6 +1114,23 @@ def _check_supply_chain(command: str, raw_tokens: list[str]) -> SecurityDecision
         return None
 
     head = os.path.basename(tokens[0])
+
+    # Auto-confirmed one-shot package execution (TK-48, ask-tier): npx with
+    # -y/--yes skips the install prompt; pnpm/yarn `dlx` is prompt-free by
+    # design. Escalate to "ask" — see the function docstring for the bare
+    # `npx <tool>` counterpart (allow path, hang-policy timeout).
+    if head == "npx" and any(tok in ("-y", "--yes") for tok in tokens[1:]):
+        return SecurityDecision(
+            decision="ask",
+            reason="npx -y/--yes auto-installs and executes an arbitrary npm package, requiring human confirmation",
+            category="T5_SUPPLY_CHAIN",
+        )
+    if head in ("pnpm", "yarn") and "dlx" in tokens[1:]:
+        return SecurityDecision(
+            decision="ask",
+            reason=f"{head} dlx auto-installs and executes an arbitrary package, requiring human confirmation",
+            category="T5_SUPPLY_CHAIN",
+        )
 
     # Insecure pip / uv install over plain HTTP or unencrypted git
     is_pip = (
