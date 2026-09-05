@@ -480,7 +480,9 @@ class SecurityGateTests(unittest.TestCase):
             # simctl
             ("simctl erase", "T6_HIGH_RISK_SIMCTL"),
             ("simctl erase all", "T6_HIGH_RISK_SIMCTL"),
+            ("simctl erase x", "T6_HIGH_RISK_SIMCTL"),
             ("simctl delete udid", "T6_HIGH_RISK_SIMCTL"),
+            ("simctl delete x", "T6_HIGH_RISK_SIMCTL"),
             # flutter / xcodebuild / pod
             ("flutter clean", "T6_HIGH_RISK_FLUTTER"),
             ("xcodebuild clean", "T6_HIGH_RISK_XCODEBUILD"),
@@ -535,7 +537,6 @@ class SecurityGateTests(unittest.TestCase):
         for cmd in allow_cases:
             with self.subTest(cmd=cmd):
                 self.assert_allow(cmd)
-
 
     # ------------------------------------------------------------------
     # T7: Action Space Backstop (§26a core-rules)
