@@ -195,6 +195,34 @@ class InitTests(unittest.TestCase):
                 again = handle.read()
             self.assertEqual(again, content)
 
+    def test_tier2_package_discipline_present_and_deduped(self):
+        # TK-51: the Tier-2 section carries the package-manager discipline;
+        # double init keeps it exactly once (replace-in-place, TK-30 parity).
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, ".grok", "rules", "actx.md")
+            for _ in range(2):
+                p = self.run_actx(["init", "--agent", "grok"], home)
+                self.assertEqual(p.returncode, 0, p.stderr)
+            with open(path, encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertEqual(content.count("## Output compression (actx)"), 1)
+            self.assertEqual(content.count("Package manager discipline:"), 1)
+            self.assertIn("require human confirmation (ask)", content)
+            self.assertIn("npm ci", content)
+            self.assertIn("frozen-lockfile", content)
+
+            # A pre-TK-51 body (without the discipline) is replaced in place.
+            os.remove(path)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(_STALE_SECTION + "\n")
+            p = self.run_actx(["init", "--agent", "grok"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(path, encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertEqual(content.count("## Output compression (actx)"), 1)
+            self.assertIn("Package manager discipline:", content)
+
     def test_aider_scalar_other_becomes_list(self):
         with tempfile.TemporaryDirectory() as home:
             conf = os.path.join(home, ".aider.conf.yml")

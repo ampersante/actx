@@ -38,6 +38,11 @@ To reduce context noise, prefix supported shell commands with `actx`:
 - `vercel whoami` / `railway status` / `wrangler deployments list` / `gcloud projects list` → `actx <cmd>`
 
 Hook/plugin agents rewrite automatically when installed. For full output, run without `actx` or use `actx --raw <command>`.
+
+Package manager discipline:
+- Package installations always require human confirmation (ask) — never attempt to bypass it.
+- Prefer lockfile-strict forms (`npm ci` / `pnpm install --frozen-lockfile` / `uv sync --frozen`); avoid `latest`.
+- Do not switch the project's package manager on your own initiative.
 """
 
 _SECTION_HEADER = "## Output compression (actx)"
