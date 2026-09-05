@@ -1078,20 +1078,54 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> S
 # T5: Supply Chain & Package Lifecycle Security
 # ----------------------------------------------------------------------
 
+# Install-class verbs of the JS package managers (npm/pnpm/yarn/bun):
+# bare `install`, short `i`, tarball/git-URL forms all land here.
+_T5_JS_INSTALL_VERBS = frozenset({"install", "add", "i", "ci", "update", "upgrade"})
+
+
+def _first_positional(tokens: list[str], start: int = 1):
+    """Index of the first non-flag token at/after ``start`` (None when absent)."""
+    for i in range(start, len(tokens)):
+        if not tokens[i].startswith("-"):
+            return i
+    return None
+
+
 def _check_supply_chain(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
     """T5 supply-chain gate.
 
     Denies installs configured against unencrypted HTTP/git indexes.
+
     Asks (human confirmation) for auto-confirmed one-shot package execution:
     `npx -y/--yes <pkg>`, `pnpm dlx <pkg>`, `yarn dlx <pkg>` — these fetch and
     run an arbitrary package with no prompt, the exact supply-chain footgun
     T5 exists for.
 
+    TK-51 (user policy 2026-09-05, "always ask"): every agent-driven package
+    installation asks — npm/pnpm/yarn/bun install-class verbs (incl. bare
+    `install` and bare `yarn` = yarn install), `npm exec -y`, `npm init|create
+    <pkg>`, `yarn|pnpm create <pkg>`, `bunx`/`bun x` (bun has no interactive
+    install prompt, so the bare-npx rationale below does not apply), `deno
+    install|add|run npm:<pkg>`, pip/pip3/`python -m pip install`, `uv pip
+    install|add|sync|tool install`, `flutter|dart pub get|add`, `pod install`,
+    `dbt deps`. The boundary is the primary command semantics: build commands
+    that merely resolve locked dependencies (cargo build, uv run, ./gradlew
+    build) stay allow — documented asymmetry (wave-2 plan §7). `install|add
+    --dry-run` stays allow: lifecycle scripts are not executed.
+
     Bare `npx <tool>` WITHOUT -y/--yes is intentionally NOT asked: when the
     package is not installed, npx stops at an interactive install prompt;
     a stalled child is caught by the default hang-policy timeout instead.
     """
-    if "=" not in command and not any(h in command for h in ("pip", "uv", "npm", "pnpm", "yarn", "python", "npx")):
+    # Substring pre-filter (fast path): extended by TK-51 with the heads of
+    # the always-ask install matrix ("bun" covers bunx; "dbt" keeps the dbt
+    # deps row of the matrix reachable). Commands without any of these
+    # substrings cannot match anything below.
+    if "=" not in command and not any(
+        h in command
+        for h in ("pip", "uv", "npm", "pnpm", "yarn", "python", "npx",
+                  "bun", "cargo", "flutter", "pod", "deno", "dart", "dbt")
+    ):
         return None
 
     # Check for prefix environment variable registry overrides (PIP_INDEX_URL=http://, NPM_CONFIG_REGISTRY=http://)
@@ -1207,6 +1241,151 @@ def _check_supply_chain(command: str, raw_tokens: list[str]) -> SecurityDecision
                             reason="Configuring unencrypted HTTP package registry is prohibited",
                             category="T5_SUPPLY_CHAIN",
                         )
+
+    # ------------------------------------------------------------------
+    # TK-51 always-ask install matrix (user policy 2026-09-05, variant b):
+    # any agent-driven package installation requires human confirmation.
+    # The deny scans above run first, so HTTP endpoints keep denying while
+    # HTTPS tarballs / git URLs land here as "ask". --dry-run installs do
+    # not execute lifecycle scripts and stay allow.
+    # ------------------------------------------------------------------
+    dry_run = "--dry-run" in tokens[1:]
+
+    # JS package managers: npm / pnpm / yarn / bun
+    if head in ("npm", "pnpm", "yarn", "bun"):
+        vi = _first_positional(tokens)
+        verb = tokens[vi] if vi is not None else None
+        rest = tokens[vi + 1:] if vi is not None else []
+        has_pkg_arg = _first_positional(tokens, vi + 1) is not None if vi is not None else False
+
+        if verb in _T5_JS_INSTALL_VERBS and not dry_run:
+            return SecurityDecision(
+                decision="ask",
+                reason=f"'{head} {verb}' installs packages from a registry; agent-driven installs always require human confirmation",
+                category="T5_SUPPLY_CHAIN",
+            )
+        if head == "yarn" and vi is None and "--version" not in tokens[1:]:
+            # Bare `yarn` (flags-only form included) equals `yarn install`.
+            return SecurityDecision(
+                decision="ask",
+                reason="Bare 'yarn' equals 'yarn install' and installs project packages, requiring human confirmation",
+                category="T5_SUPPLY_CHAIN",
+            )
+        if head == "npm" and verb == "exec" and any(t in ("-y", "--yes") for t in rest):
+            return SecurityDecision(
+                decision="ask",
+                reason="npm exec -y/--yes auto-installs and executes an arbitrary npm package, requiring human confirmation",
+                category="T5_SUPPLY_CHAIN",
+            )
+        if verb in ("init", "create") and head in ("npm", "yarn", "pnpm") and has_pkg_arg:
+            return SecurityDecision(
+                decision="ask",
+                reason=f"'{head} {verb} <pkg>' fetches and executes a create-* package, requiring human confirmation",
+                category="T5_SUPPLY_CHAIN",
+            )
+        if head == "bun" and verb == "x" and has_pkg_arg:
+            return SecurityDecision(
+                decision="ask",
+                reason="'bun x <pkg>' auto-installs and executes an arbitrary package, requiring human confirmation",
+                category="T5_SUPPLY_CHAIN",
+            )
+
+    # bunx always asks: bun has no interactive install prompt, so the
+    # bare-npx allow rationale (hang-policy timeout) does not apply (N-F7e).
+    if head == "bunx":
+        if _first_positional(tokens) is not None:
+            return SecurityDecision(
+                decision="ask",
+                reason="'bunx <pkg>' auto-installs and executes an arbitrary package without an interactive prompt, requiring human confirmation",
+                category="T5_SUPPLY_CHAIN",
+            )
+
+    # deno: dependency additions and npm:-scheme one-shot execution
+    if head == "deno":
+        vi = _first_positional(tokens)
+        if vi is not None:
+            verb = tokens[vi]
+            if verb in ("install", "add"):
+                return SecurityDecision(
+                    decision="ask",
+                    reason=f"'deno {verb}' fetches packages, requiring human confirmation",
+                    category="T5_SUPPLY_CHAIN",
+                )
+            if verb == "run" and any(t.startswith("npm:") for t in tokens[vi + 1:]):
+                return SecurityDecision(
+                    decision="ask",
+                    reason="'deno run npm:<pkg>' fetches and executes an npm package, requiring human confirmation",
+                    category="T5_SUPPLY_CHAIN",
+                )
+
+    # Python: pip / pip3 / python -m pip (roll-back of the v2.3.0 mutator
+    # allow-list; user decision R2 2026-09-05)
+    if head in ("pip", "pip3"):
+        vi = _first_positional(tokens)
+        if vi is not None and tokens[vi] in ("install", "add") and not dry_run:
+            return SecurityDecision(
+                decision="ask",
+                reason="'pip install' installs packages from a registry; agent-driven installs always require human confirmation",
+                category="T5_SUPPLY_CHAIN",
+            )
+    if head.startswith("python") and len(tokens) >= 4 and tokens[1] == "-m" and tokens[2] in ("pip", "pip3"):
+        vi = _first_positional(tokens, 3)
+        if vi is not None and tokens[vi] in ("install", "add") and not dry_run:
+            return SecurityDecision(
+                decision="ask",
+                reason="'python -m pip install' installs packages from a registry; agent-driven installs always require human confirmation",
+                category="T5_SUPPLY_CHAIN",
+            )
+
+    # uv: installs/syncs ask; `uv run` stays allow (primary semantics: run)
+    if head == "uv":
+        vi = _first_positional(tokens)
+        if vi is not None:
+            verb = tokens[vi]
+            wi = _first_positional(tokens, vi + 1)
+            is_uv_install = (
+                (verb == "pip" and wi is not None and tokens[wi] == "install")
+                or (verb == "tool" and wi is not None and tokens[wi] == "install")
+                or verb in ("add", "sync")
+            )
+            if is_uv_install and not dry_run:
+                return SecurityDecision(
+                    decision="ask",
+                    reason="'uv' package installation/sync requires human confirmation",
+                    category="T5_SUPPLY_CHAIN",
+                )
+
+    # Mobile/Dart toolchains: pub get / pub add fetch dependencies
+    if head in ("flutter", "dart"):
+        vi = _first_positional(tokens)
+        if vi is not None and tokens[vi] == "pub":
+            wi = _first_positional(tokens, vi + 1)
+            if wi is not None and tokens[wi] in ("get", "add"):
+                return SecurityDecision(
+                    decision="ask",
+                    reason=f"'{head} pub {tokens[wi]}' fetches package dependencies, requiring human confirmation",
+                    category="T5_SUPPLY_CHAIN",
+                )
+
+    # CocoaPods
+    if head == "pod":
+        vi = _first_positional(tokens)
+        if vi is not None and tokens[vi] == "install":
+            return SecurityDecision(
+                decision="ask",
+                reason="'pod install' fetches CocoaPods dependencies, requiring human confirmation",
+                category="T5_SUPPLY_CHAIN",
+            )
+
+    # dbt (head itself ships with E5; the matrix row is live from TK-51)
+    if head == "dbt":
+        vi = _first_positional(tokens)
+        if vi is not None and tokens[vi] == "deps":
+            return SecurityDecision(
+                decision="ask",
+                reason="'dbt deps' fetches packages from git/package registries, requiring human confirmation",
+                category="T5_SUPPLY_CHAIN",
+            )
 
     return None
 
@@ -1408,15 +1587,22 @@ def _check_high_risk_cargo(command: str, raw_tokens: list[str]) -> SecurityDecis
             reason=f"Executing cargo {subcmd} modifies remote registry state or credentials, requiring human confirmation",
             category="T6_HIGH_RISK_CARGO",
         )
+    # TK-51 (user policy 2026-09-05): ANY cargo install asks — not just the
+    # historical --force overwrite. `cargo add` adds registry dependencies to
+    # Cargo.toml, the same install class. build/test/check merely resolve the
+    # lockfile and stay allow (primary-semantics boundary, wave-2 plan §7).
     if subcmd == "install":
-        # Check only before passthrough '--'
-        cargo_args = sub_args[: sub_args.index("--")] if "--" in sub_args else sub_args
-        if any(tok in ("-f", "--force") or tok.startswith("--force=") for tok in cargo_args):
-            return SecurityDecision(
-                decision="ask",
-                reason="Executing cargo install --force overwrites binaries, requiring human confirmation",
-                category="T6_HIGH_RISK_CARGO",
-            )
+        return SecurityDecision(
+            decision="ask",
+            reason="cargo install downloads, builds and installs crates.io binaries, requiring human confirmation",
+            category="T6_HIGH_RISK_CARGO",
+        )
+    if subcmd == "add":
+        return SecurityDecision(
+            decision="ask",
+            reason="cargo add adds registry dependencies to Cargo.toml, requiring human confirmation",
+            category="T6_HIGH_RISK_CARGO",
+        )
 
     return None
 
@@ -1443,6 +1629,47 @@ def _check_swiftformat(command: str, raw_tokens: list[str]) -> SecurityDecision 
         reason="Bare swiftformat rewrites Swift files in place, requiring human confirmation",
         category="T6_HIGH_RISK_SWIFTFORMAT",
     )
+
+
+# ----------------------------------------------------------------------
+# T6: High-Risk npm Registry Operations (Ask Confirmation) — TK-51
+# ----------------------------------------------------------------------
+
+_NPM_REGISTRY_MUTATE = frozenset({"owner", "access", "org", "team"})
+
+
+def _check_high_risk_npm(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
+    """T6 registry-mutation gate for npm, precedent ``_check_high_risk_cargo``.
+
+    `npm publish` uploads to the public registry; `owner`/`access`/`org`/
+    `team` mutate registry ownership and access metadata — all ask.
+    `publish --dry-run` performs no upload and stays allow. `npm token ...`
+    is denied earlier by the T1 credential gate (explicit regression test).
+    """
+    tokens = _unwrap_tokens(raw_tokens)
+    if not tokens or os.path.basename(tokens[0]) != "npm":
+        return None
+
+    vi = _first_positional(tokens)
+    if vi is None:
+        return None
+    verb = tokens[vi]
+
+    if verb == "publish":
+        if "--dry-run" in tokens[vi + 1:]:
+            return None
+        return SecurityDecision(
+            decision="ask",
+            reason="npm publish uploads a package to the public registry, requiring human confirmation",
+            category="T6_HIGH_RISK_NPM",
+        )
+    if verb in _NPM_REGISTRY_MUTATE:
+        return SecurityDecision(
+            decision="ask",
+            reason=f"npm {verb} mutates registry ownership or access metadata, requiring human confirmation",
+            category="T6_HIGH_RISK_NPM",
+        )
+    return None
 
 
 # ----------------------------------------------------------------------
@@ -1916,7 +2143,12 @@ def _evaluate_chunk(chunk: str) -> SecurityDecision:
     if t6_swiftformat:
         return t6_swiftformat
 
-    # 9. T6: High-Risk Cloud/Infra CLI Mutations (Requires 'ask')
+    # 9. T6: High-Risk npm Registry Operations (Requires 'ask')
+    t6_npm = _check_high_risk_npm(chunk, tokens)
+    if t6_npm:
+        return t6_npm
+
+    # 10. T6: High-Risk Cloud/Infra CLI Mutations (Requires 'ask')
     t6_tools = _check_high_risk_tools(chunk, tokens)
     if t6_tools:
         return t6_tools

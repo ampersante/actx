@@ -206,6 +206,27 @@ class HookCliTests(unittest.TestCase):
         self.assertIn("confirmation required", output["permissionDecisionReason"])
         self.assertNotIn("updatedInput", output)
 
+    def test_t5_supply_chain_install_asks(self):
+        # TK-51: agent-driven installs ask (JSON permissionDecision "ask").
+        for cmd in ("npm exec -y pkg", "npm init pkg", "npm install x"):
+            with self.subTest(cmd=cmd):
+                p = self.run_hook(hook_input("Bash", {"command": cmd}))
+                self.assertEqual(p.returncode, 0, p.stderr)
+                data = json.loads(p.stdout)
+                output = data["hookSpecificOutput"]
+                self.assertEqual(output["permissionDecision"], "ask")
+                self.assertIn("confirmation required", output["permissionDecisionReason"])
+
+    def test_t5_actx_prefixed_install_asks(self):
+        # actx-prefix is unwrapped before gate checks (TK-39/TK-51).
+        p = self.run_hook(hook_input("Bash", {"command": "actx run npm install x"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "ask")
+        self.assertIn("confirmation required", output["permissionDecisionReason"])
+        self.assertNotIn("updatedInput", output)
+
     def test_mutating_compound_empty(self):
         p = self.run_hook(hook_input("Bash", {"command": "git status && echo done"}))
         self.assertEqual(p.returncode, 0)
