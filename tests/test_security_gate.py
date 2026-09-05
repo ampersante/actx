@@ -812,6 +812,40 @@ class ProtectedPathsTableTests(unittest.TestCase):
             "git show HEAD:.vercel/auth.json",
         ])
 
+    def test_t1_mcp_edge_paths_denied(self):
+        # TK-48: MCP config edge paths — relative / tilde / $HOME / absolute
+        # forms must each deny. N-F2/H-F8: the absolute forms rely on the
+        # quick-check keywords (claude.json, config/mcp, Application
+        # Support/Claude); without them _is_sensitive_path early-returns
+        # before ever consulting _PROTECTED_PATHS (dead-code regression).
+        home = os.path.expanduser("~")
+        cases = [
+            # ~/.claude.json — Claude Code local/user-scoped mcpServers
+            ("~/.claude.json", ".claude.json", "$HOME/.claude.json",
+             f"{home}/.claude.json", "/Users/x/.claude.json"),
+            # ~/.config/mcp/** — xdg MCP config dir (whole directory)
+            ("~/.config/mcp/servers.json", ".config/mcp/servers.json",
+             "$HOME/.config/mcp/servers.json", f"{home}/.config/mcp/servers.json"),
+            # ~/Library/Application Support/Claude/** — Claude Desktop dir
+            ('"~/Library/Application Support/Claude/claude_desktop_config.json"',
+             '"$HOME/Library/Application Support/Claude/settings.json"',
+             f'"{home}/Library/Application Support/Claude/localstate.json"',
+             '"Library/Application Support/Claude/x.json"'),
+        ]
+        for variants in cases:
+            self._assert_deny_all([f"cat {v}" for v in variants])
+        # Escaped-space (backslash) absolute spelling as well
+        self.assert_deny(
+            "cat ~/Library/Application\\ Support/Claude/claude_desktop_config.json",
+            "T1_CREDENTIAL_ACCESS",
+        )
+
+    def test_t1_mcp_edge_paths_negative_neighbors_allowed(self):
+        self.assert_allow("cat src/config/mcp/README.md")
+        self.assert_allow("cat my-claude.json")
+        self.assert_allow("cat ~/.claude/projects.json")
+        self.assert_allow("cat ~/Library/Application Support/Google/Chrome/x.json")
+
     def test_t1_protected_paths_template_suffixes_allowed(self):
         self.assert_allow("cat terraform.tfvars.example")
         self.assert_allow("cat prod.tfvars.example")
@@ -847,6 +881,10 @@ class ProtectedPathsTableTests(unittest.TestCase):
             "tfstate": "prod.tfstate",
             "tfvars": "dev.tfvars",
             "auth\\.json": "~/.vercel/auth.json",
+            # TK-48: absolute forms match no other alternative (N-F2/H-F8)
+            "claude\\.json": "/home/u/.claude.json",
+            "config/mcp": "/home/u/.config/mcp/servers.json",
+            "application[ /]support/claude": "/home/u/Library/Application Support/Claude/x.json",
         }
         for token, path in tokens_paths.items():
             with self.subTest(token=token):

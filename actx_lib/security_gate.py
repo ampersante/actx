@@ -96,6 +96,20 @@ _PROTECTED_PATHS = (
     ("basename", ".mcp.json"),
     ("basename", "mcp.json"),
     ("basename", "claude_desktop_config.json"),
+    # --- Claude Code / Claude Desktop MCP stores (TK-48) ---
+    # ~/.claude.json: local- and user-scoped mcpServers + cached OAuth
+    #   metadata (verified: code.claude.com/docs/en/mcp).
+    # ~/.config/mcp/**: xdg variant for the proposed universal mcp.json
+    #   standard (modelcontextprotocol discussion #2218 standardizes the
+    #   filename; no ratified directory yet — defense-in-depth, near-zero
+    #   false-positive surface).
+    # ~/Library/Application Support/Claude/**: Claude Desktop data dir; the
+    #   config at .../claude_desktop_config.json embeds server API keys
+    #   (verified: modelcontextprotocol.io quickstart/user), the rest of the
+    #   directory holds desktop app state — protected as a whole.
+    ("home", "~/.claude.json"),
+    ("home", "~/.config/mcp/**"),
+    ("home", "~/Library/Application Support/Claude/**"),
     # --- Terraform state & variable files (secrets in plaintext) ---
     ("glob", "*.tfstate"),
     ("glob", "*.tfstate.*"),
@@ -224,7 +238,11 @@ _RE_EXFIL_VARS = re.compile(
 )
 _RE_SENSITIVE_QUICK_CHECK = re.compile(
     r"(?:\.env|\benv\b|\.e[\w?*]{2}|\.ssh|id_|credentials|shadow|gshadow|sudoers|passwd|password|token|key|cert|\.pem|\.pfx|\.p12|\.pkcs12|\.kdbx|\.netrc|\.npmrc|\.pypirc|\.codex-global-state|\.kube|~|\$|/etc|\[[a-z0-9]\]"
-    r"|pgpass|my\.cnf|snowsql|databrickscfg|mcp\.json|key\.properties|wrangler|gcloud|vercel|netlify|supabase|flyctl|\.fly|railway|clerk|tfstate|tfvars|auth\.json|claude_desktop_config)",
+    r"|pgpass|my\.cnf|snowsql|databrickscfg|mcp\.json|key\.properties|wrangler|gcloud|vercel|netlify|supabase|flyctl|\.fly|railway|clerk|tfstate|tfvars|auth\.json|claude_desktop_config"
+    # TK-48: without these the home records above are dead code — the absolute
+    # forms below match no other alternative, and _is_sensitive_path early-
+    # returns on a failed quick check before consulting _PROTECTED_PATHS.
+    r"|claude\.json|config/mcp|application[ /]support/claude)",
     re.IGNORECASE,
 )
 
