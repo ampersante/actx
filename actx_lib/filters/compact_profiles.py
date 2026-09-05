@@ -174,6 +174,66 @@ PROFILES = {
             "passed": ((r"PASS=(\d+)", 1, "first"),),
         },
     },
+    # --- mobile toolchains (TK-42) ---
+    # flutter/dart test share the package:test compact reporter format:
+    # "MM:SS +passed[-failed]: description" progress lines, failures marked
+    # "[E]" with indented expected/actual detail, terminal summary line
+    # ("All tests passed!" / "Some tests failed."). Counters read the +N/-N
+    # tokens of the summary line: progress lines carry cumulative counts.
+    "flutter_test": {
+        "kind": "test_runner",
+        "failure_start": (r"\[E\]",),
+        "failure_continue": (r"^\s+\S",),
+        "counters": {
+            "failed": ((r"-(\d+)[^:\n]*: Some tests failed", 1, "first"),),
+            "passed": (
+                (
+                    r"\+(\d+)[^:\n]*: (?:All tests passed|Some tests failed)",
+                    1,
+                    "first",
+                ),
+            ),
+        },
+    },
+    "dart_test": {
+        "kind": "test_runner",
+        "failure_start": (r"\[E\]",),
+        "failure_continue": (r"^\s+\S",),
+        "counters": {
+            "failed": ((r"-(\d+)[^:\n]*: Some tests failed", 1, "first"),),
+            "passed": (
+                (
+                    r"\+(\d+)[^:\n]*: (?:All tests passed|Some tests failed)",
+                    1,
+                    "first",
+                ),
+            ),
+        },
+    },
+    # flutter/dart analyze: "  error • message • path:line:col • rule".
+    "flutter_analyze": {
+        "kind": "linter",
+        "keep_line": r"(?:error|warning|info) • .+:\d+:\d+",
+        "suffix": "%d issues",
+    },
+    "dart_analyze": {
+        "kind": "linter",
+        "keep_line": r"(?:error|warning|info) • .+:\d+:\d+",
+        "suffix": "%d issues",
+    },
+    # swiftlint: "path:line:col: severity: message (rule)".
+    "swiftlint": {
+        "kind": "linter",
+        "keep_line": r"^\S+:\d+:\d+: (?:error|warning): ",
+        "suffix": "%d violations",
+    },
+    # xcodebuild (and swift-build diagnostics): keep compiler error:/warning:
+    # lines plus the "** BUILD" verdict; drop progress noise and caret context.
+    "xcodebuild": {
+        "kind": "linter",
+        "keep_line": r"error:|warning:|\*\* BUILD",
+        "suffix": "%d issues",
+    },
     # --- linter class ---
     "ruff": {
         "kind": "linter",

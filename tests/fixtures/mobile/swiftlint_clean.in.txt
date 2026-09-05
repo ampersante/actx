@@ -1,0 +1,2 @@
+Linting Swift files at paths in config "swiftlint.yml"
+Done linting! Found 0 violations, 0 serious in 12 files.

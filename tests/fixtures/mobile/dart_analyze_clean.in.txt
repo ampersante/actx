@@ -1,0 +1,3 @@
+Analyzing tool...
+
+No issues found! (ran in 1.2s)

@@ -1,0 +1,7 @@
+00:02 +1 -1: parse reads nested sections [E]
+  Expected: {a: {b: 1}}
+    Actual: {a: 1}
+00:04 +1 -2: parse rejects duplicate keys [E]
+  Expected: throws <ArgumentError>
+    Actual: <null>
+2 failed, 1 passed

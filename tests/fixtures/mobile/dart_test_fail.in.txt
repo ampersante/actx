@@ -1,0 +1,10 @@
+00:00 +0: loading test/tool_test.dart
+00:01 +1: parse returns empty map for blank input
+00:02 +1 -1: parse reads nested sections [E]
+  Expected: {a: {b: 1}}
+    Actual: {a: 1}
+00:03 +1 -1: parse keeps key order
+00:04 +1 -2: parse rejects duplicate keys [E]
+  Expected: throws <ArgumentError>
+    Actual: <null>
+00:04 +1 -2: Some tests failed.

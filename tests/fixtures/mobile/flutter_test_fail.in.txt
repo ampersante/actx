@@ -1,0 +1,13 @@
+00:00 +0: loading test/widget_test.dart
+00:01 +0: loading test/counter_test.dart
+00:02 +1: counter value starts at zero
+00:03 +2: counter value should be incremented
+00:04 +2 -1: counter value should be decremented [E]
+  Expected: <-1>
+    Actual: <1>
+00:05 +2 -1: loading test/parser_test.dart
+00:06 +3 -1: parser handles empty input
+00:06 +4 -1: parser rejects malformed json [E]
+  Expected: a <FormatException>
+    Actual: <Instance of 'TypeError'>
+00:07 +4 -2: Some tests failed.

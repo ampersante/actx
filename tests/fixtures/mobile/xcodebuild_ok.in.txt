@@ -1,0 +1,14 @@
+Command line invocation:
+    /usr/bin/xcodebuild -scheme App -destination 'generic/platform=iOS Simulator' build
+
+User defaults from command line:
+    IDEPackageSupportUseBuiltinSCM = YES
+
+ComputeTargetIntegrity
+Target Integrity: 3 tasks
+CompileSwiftSources normal arm64 (in target 'App' from project 'App')
+    cd /Users/dev/Projects/App
+CompileSwift normal arm64 /Users/dev/Projects/App/Sources/App/MainViewModel.swift (in target 'App' from project 'App')
+SwiftCompile normal arm64 Compiling\ MainViewModel.swift
+Ld /Users/dev/Library/Developer/Xcode/DerivedData/App-abc/Build/Intermediates.noindex/App.build/Debug-iphonesimulator/App.build/Objects-normal/arm64/Binary/App normal arm64 (in target 'App' from project 'App')
+** BUILD SUCCEEDED **

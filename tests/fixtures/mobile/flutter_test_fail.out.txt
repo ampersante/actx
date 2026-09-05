@@ -1,0 +1,7 @@
+00:04 +2 -1: counter value should be decremented [E]
+  Expected: <-1>
+    Actual: <1>
+00:06 +4 -1: parser rejects malformed json [E]
+  Expected: a <FormatException>
+    Actual: <Instance of 'TypeError'>
+2 failed, 4 passed

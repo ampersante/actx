@@ -1,0 +1,4 @@
+Lib/Sources/App/MainViewModel.swift:14:9: warning: Force Try Violation: Avoid using force try. (force_try)
+Lib/Sources/App/MainViewModel.swift:42:5: warning: Line Length Violation: Line should be 120 characters or less; currently 143 characters. (line_length)
+Lib/Sources/App/ApiClient.swift:8:1: error: Force Unwrap Violation: Avoid using force unwrap. (force_unwrap)
+3 violations

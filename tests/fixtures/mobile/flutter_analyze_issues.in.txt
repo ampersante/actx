@@ -1,0 +1,7 @@
+Analyzing actx_mobile...
+
+  error • 'fetchUserr' isn't defined • lib/main.dart:12:8 • undefined_getter
+  warning • Unused import: 'dart:math' • lib/util.dart:1:8 • unused_import
+  info • Prefer const with constant constructors • lib/widget.dart:10:5 • prefer_const_constructors
+
+3 issues found. (ran in 2.1s)

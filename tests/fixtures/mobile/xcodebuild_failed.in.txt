@@ -1,0 +1,23 @@
+Command line invocation:
+    /usr/bin/xcodebuild -scheme App -destination 'platform=iOS Simulator,name=iPhone 15' build
+
+User defaults from command line:
+    IDEPackageSupportUseBuiltinSCM = YES
+
+ComputeTargetIntegrity
+Target Integrity: 3 tasks
+CompileSwiftSources normal arm64 (in target 'App' from project 'App')
+    cd /Users/dev/Projects/App
+CompileSwift normal arm64 /Users/dev/Projects/App/Sources/App/MainViewModel.swift (in target 'App' from project 'App')
+/Users/dev/Projects/App/Sources/App/MainViewModel.swift:14:22: error: cannot find 'fetchUserr' in scope
+        let user = try await fetchUserr()
+                     ^~~~~~~~~
+ note: did you mean 'fetchUser'?
+/Users/dev/Projects/App/Sources/App/MainViewModel.swift:18:9: error: compilation failed: reference to generic type 'Result' requires arguments in <...>
+        let result: Result
+        ^
+/Users/dev/Projects/App/Sources/App/ApiClient.swift:31:7: warning: 'withUnsafeBytes' is deprecated: use `withUnsafeBytes<R>(_: (UnsafeRawBufferPointer) throws -> R)`
+      withUnsafeBytes(of: &value) { raw in
+      ^
+SwiftCompile normal arm64 Compiling\ ApiClient.swift
+** BUILD FAILED ** (2 errors)

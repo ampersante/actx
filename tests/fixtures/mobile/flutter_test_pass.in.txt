@@ -1,0 +1,6 @@
+00:00 +0: loading test/widget_test.dart
+00:01 +0: loading test/counter_test.dart
+00:02 +1: counter value starts at zero
+00:03 +2: counter value should be incremented
+00:03 +3: counter never goes negative
+00:03 +3: All tests passed!

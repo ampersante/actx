@@ -1,0 +1,5 @@
+/Users/dev/Projects/App/Sources/App/MainViewModel.swift:14:22: error: cannot find 'fetchUserr' in scope
+/Users/dev/Projects/App/Sources/App/MainViewModel.swift:18:9: error: compilation failed: reference to generic type 'Result' requires arguments in <...>
+/Users/dev/Projects/App/Sources/App/ApiClient.swift:31:7: warning: 'withUnsafeBytes' is deprecated: use `withUnsafeBytes<R>(_: (UnsafeRawBufferPointer) throws -> R)`
+** BUILD FAILED ** (2 errors)
+4 issues
