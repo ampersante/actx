@@ -95,42 +95,49 @@ def run_session(args):
         conn.close()
 
 
-_INSIGHTS_USAGE = "usage: actx insights [--days N] [--top N] [--json]\n"
+_INSIGHTS_USAGE = (
+    "usage: actx insights [--days N] [--top N] [--verbose-commands] [--json]\n"
+)
 
 
 def _parse_insights_args(args):
     days = 7
     top = 10
     fmt = "text"
+    verbose_commands = False
     index = 0
     while index < len(args):
         token = args[index]
         if token == "--days":
             if index + 1 >= len(args):
-                return None, None, None
+                return None, None, None, None
             try:
                 days = int(args[index + 1])
             except ValueError:
-                return None, None, None
+                return None, None, None, None
             index += 2
             continue
         if token == "--top":
             if index + 1 >= len(args):
-                return None, None, None
+                return None, None, None, None
             try:
                 top = int(args[index + 1])
             except ValueError:
-                return None, None, None
+                return None, None, None, None
             index += 2
+            continue
+        if token == "--verbose-commands":
+            verbose_commands = True
+            index += 1
             continue
         if token == "--json":
             fmt = "json"
             index += 1
             continue
-        return None, None, None
+        return None, None, None, None
     if days < 0 or top < 1:
-        return None, None, None
-    return days, top, fmt
+        return None, None, None, None
+    return days, top, fmt, verbose_commands
 
 
 def _repeated(conn, cutoff, top):
@@ -194,7 +201,57 @@ def _suggestions(repeated):
     return sorted(set(suggestions))
 
 
-def _print_insights_text(repeated, failing, passthrough, suggestions):
+def _suggested_convention(head):
+    """Advice line for a head from the shared conventions table, or None
+    (single source with hook/Tier-2, REQ-01/INV-01 - heads without a
+    CONVENTIONS record get no invented advice, W-F11)."""
+    from actx_lib import conventions
+
+    entries = conventions.CONVENTIONS.get(head)
+    if not entries:
+        return None
+    return entries[0][2]
+
+
+def _verbose(conn, cutoff, top):
+    """Heads with the largest raw (unfiltered) output - category level only,
+    command_text never leaves the DB in this report (REQ-05b)."""
+    return conn.execute(
+        "SELECT category, COUNT(*) AS n, SUM(bytes_before) AS raw "
+        "FROM calls WHERE timestamp >= ? AND passthrough = 1 "
+        "GROUP BY category ORDER BY raw DESC, category ASC LIMIT ?",
+        (cutoff, top),
+    ).fetchall()
+
+
+def _adoption(conn):
+    """Per wave-1-2 head: share of actx-mediated calls that were compressed.
+    Exit 124/125 rows are excluded from BOTH terms - actx-internal
+    refusals/timeouts are not an agent's choice to skip compression
+    (H-F5/N-F6). Heads with zero observable calls are omitted (W-F10)."""
+    from actx_lib import conventions
+
+    rows = conn.execute(
+        "SELECT category, COUNT(*) AS calls, "
+        "SUM(CASE WHEN passthrough = 0 THEN 1 ELSE 0 END) AS compressed "
+        "FROM calls WHERE exit_code NOT IN (124, 125) GROUP BY category"
+    ).fetchall()
+    by_head = {
+        row["category"]: (int(row["calls"]), int(row["compressed"]))
+        for row in rows
+        if row["category"] in conventions.WAVE_HEADS
+    }
+    report = [
+        (head, calls, compressed)
+        for head, (calls, compressed) in by_head.items()
+        if calls > 0
+    ]
+    report.sort(key=lambda item: (-item[1], item[0]))
+    return report
+
+
+def _print_insights_text(repeated, failing, passthrough, suggestions,
+                          verbose, adoption):
     print("repeated:")
     if repeated:
         for r in repeated:
@@ -228,10 +285,38 @@ def _print_insights_text(repeated, failing, passthrough, suggestions):
             print("  " + s)
     else:
         print("  none")
+    print(
+        "adoption: share of compressed among actx-mediated calls "
+        "(calls bypassing actx are not observed; exits 124/125 excluded)"
+    )
+    if adoption:
+        for head, calls, compressed in adoption:
+            print(
+                "  %s: %d calls, %d compressed, %.0f%%"
+                % (head, calls, compressed, compressed / calls * 100)
+            )
+    else:
+        print("  none")
+    if verbose is not None:
+        print("verbose_commands:")
+        if verbose:
+            for row in verbose:
+                suggested = _suggested_convention(row["category"])
+                print(
+                    "  %s  %d calls  %d raw bytes  suggested: %s"
+                    % (
+                        row["category"],
+                        int(row["n"]),
+                        int(row["raw"]),
+                        suggested if suggested else "none",
+                    )
+                )
+        else:
+            print("  none")
 
 
 def run_insights(args):
-    days, top, fmt = _parse_insights_args(args)
+    days, top, fmt, verbose_commands = _parse_insights_args(args)
     if days is None:
         print(_INSIGHTS_USAGE, end="", file=sys.stderr)
         return 1
@@ -242,6 +327,8 @@ def run_insights(args):
         failing = _failing(conn, cutoff, top)
         passthrough = _passthrough(conn, cutoff, top)
         suggestions = _suggestions(repeated)
+        adoption = _adoption(conn)
+        verbose = _verbose(conn, cutoff, top) if verbose_commands else None
         if fmt == "json":
             print(
                 json.dumps(
@@ -273,11 +360,33 @@ def run_insights(args):
                             for r in passthrough
                         ],
                         "suggestions": suggestions,
+                        "adoption": [
+                            {
+                                "head": head,
+                                "calls": calls,
+                                "compressed": compressed,
+                                "adoption_pct": compressed / calls * 100,
+                            }
+                            for head, calls, compressed in adoption
+                        ],
+                        "verbose_commands": [
+                            {
+                                "head": r["category"],
+                                "calls": int(r["n"]),
+                                "raw_bytes": int(r["raw"]),
+                                "suggested": _suggested_convention(
+                                    r["category"]
+                                ),
+                            }
+                            for r in (verbose or [])
+                        ],
                     }
                 )
             )
         else:
-            _print_insights_text(repeated, failing, passthrough, suggestions)
+            _print_insights_text(
+                repeated, failing, passthrough, suggestions, verbose, adoption
+            )
         return 0
     finally:
         conn.close()

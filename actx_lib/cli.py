@@ -15,7 +15,7 @@ commands:
   gain [--graph|--history|--daily|--breakdown] [--format json]
   discover
   session
-  insights [--days N] [--top N] [--json]
+  insights [--days N] [--top N] [--verbose-commands] [--json]
   tracking [on|off|status|clear]
   rewrite "<command>"
   hook
