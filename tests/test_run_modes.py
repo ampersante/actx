@@ -62,6 +62,53 @@ class RunModeCliTests(unittest.TestCase):
             self.assertIn("err", p.stderr)
             self.assertNotIn("out", p.stderr)
 
+    def test_errors_path_auth_hint(self):
+        # TK-47: run_errors prints the hint after the command's stderr;
+        # exit code stays the command's own.
+        command = (
+            "import sys; sys.stderr.write('not logged in — gh auth login\\n');"
+            " sys.exit(1)"
+        )
+        p = self.run_actx(["run", "--errors", "python3", "-c", command])
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.stderr.count("[actx] hint:"), 1)
+        self.assertIn("hint: auth error", p.stderr)
+
+    def test_digest_path_auth_hint(self):
+        command = (
+            "import sys; sys.stderr.write('ERROR: 401 Unauthorized\\n');"
+            " sys.exit(1)"
+        )
+        p = self.run_actx(["run", "--digest", "python3", "-c", command])
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.stderr.count("[actx] hint:"), 1)
+        self.assertIn("hint: auth error", p.stderr)
+
+    def test_digest_never_wrap_xcodebuild_no_hint(self):
+        # G6b: the never-wrap refusal is an early return (exit 125) — it
+        # never reaches a hint print, and stderr stays exactly the refusal.
+        p = self.run_actx(["run", "--digest", "xcodebuild"])
+        self.assertEqual(p.returncode, 125, p.stderr)
+        self.assertIn("выполнить вручную", p.stderr)
+        self.assertNotIn("[actx] hint:", p.stderr)
+
+    def test_errors_timeout_returns_124_without_hint(self):
+        # G6b: timeout is an early return (exit 124, synthetic stderr) —
+        # no hint on this path either.
+        self.write_config({"timeouts": {"default_s": 1, "generous_s": 30}})
+        start = time.monotonic()
+        p = self.run_actx(
+            ["run", "--errors", "python3", "-c",
+             "import sys; sys.stderr.write('not logged in\\n');"
+             " import time; time.sleep(30)"],
+            timeout=30,
+        )
+        elapsed = time.monotonic() - start
+        self.assertEqual(p.returncode, 124, p.stderr)
+        self.assertLess(elapsed, 3.0)
+        self.assertIn("timed out", p.stderr)
+        self.assertNotIn("[actx] hint:", p.stderr)
+
     def test_failures_unknown_runner_is_raw(self):
         p = self.run_actx(["run", "--failures", "python3", "-c", "print('hello')"])
         self.assertEqual(p.returncode, 0, p.stderr)

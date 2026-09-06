@@ -194,6 +194,63 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
         self.assertNotIn("SecretAccessKey", out)
         self.assertIn("prod", out)
 
+    def test_json_path_single_auth_hint_on_failing_exit(self):
+        # G4b (single emission): run() must NOT print a hint of its own when
+        # it delegates to _run_json_path — only the json path does, once.
+        result = subprocess.CompletedProcess(
+            ["tool", "get"], 1, '{"name": "ok"}',
+            "ERROR: 401 Unauthorized — not logged in\n",
+        )
+        rc, out, err = self._run(result)
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out), {"name": "ok"})
+        self.assertEqual(err.count("[actx] hint:"), 1)
+        self.assertIn("hint: auth error", err)
+
+    def test_session_hints_error_fails_open_on_all_paths(self):
+        # G6: a raising _session_hints must not distort output/exit on the
+        # runner paths (run, errors, digest, compacted). The run sample uses
+        # non-JSON stdout so run() reaches its own linear hint point (the
+        # JSON sample would delegate to _run_json_path and skip it).
+        sample = subprocess.CompletedProcess(
+            ["tool", "get"], 1, 'plain output\n',
+            "ERROR: 401 Unauthorized — not logged in\n",
+        )
+
+        def broken(result):
+            raise RuntimeError("boom")
+
+        with mock.patch("actx_lib.runner._session_hints", side_effect=broken):
+            rc, out, err = self._run(sample)
+            self.assertEqual(rc, 1)
+            self.assertEqual(out, "")  # failing exit: stderr-only output
+            self.assertNotIn("[actx] hint:", err)
+            self.assertIn("[exit: 1]", err)
+
+        with mock.patch("actx_lib.runner._session_hints", side_effect=broken):
+            out_e, err_e = io.StringIO(), io.StringIO()
+            with redirect_stdout(out_e), redirect_stderr(err_e):
+                rc_e = runner.run_errors(["tool", "get"])
+            self.assertEqual(rc_e, 1)
+
+        with mock.patch("actx_lib.runner._session_hints", side_effect=broken):
+            out_d, err_d = io.StringIO(), io.StringIO()
+            with redirect_stdout(out_d), redirect_stderr(err_d):
+                rc_d = runner.run_digest(["tool", "get"])
+            self.assertEqual(rc_d, 1)
+
+        with mock.patch("actx_lib.runner.subprocess.run", return_value=sample):
+            with mock.patch("actx_lib.runner._session_hints", side_effect=broken):
+                out_c, err_c = io.StringIO(), io.StringIO()
+                with redirect_stdout(out_c), redirect_stderr(err_c):
+                    rc_c = runner.compacted_result(
+                        ["tool", "get"], sample, CONFIG,
+                        runner.stdout_compactor(lambda text: text),
+                    )
+                self.assertEqual(rc_c, 1)
+                self.assertNotIn("[actx] hint:", err_c.getvalue())
+                self.assertIn("plain output", out_c.getvalue())
+
     def test_compactor_failure_falls_back_to_line_path(self):
         result = subprocess.CompletedProcess(["tool", "get"], 0, MULTILINE_JSON, "")
         rc, out, err = self._run_with_patch(
