@@ -23,6 +23,29 @@ To reduce context noise, prefix read-only commands with `actx`:
 Mutating commands run normally. For full output, run the command without `actx` or use `actx --raw <command>`.
 """
 
+# The v2.8.0 (TK-51) section body: package-manager discipline present,
+# compact-flags table absent - the pre-TK-45 form.
+_PRE_TK45_SECTION = """## Output compression (actx)
+
+To reduce context noise, prefix supported shell commands with `actx`:
+- `git status` → `actx git status`
+- `git diff` → `actx git diff`
+- `git log` → `actx git log`
+- `git show` / `git blame` → `actx git show` / `actx git blame`
+- `ls` / `ls -la` → `actx ls` / `actx ls -la`
+- `grep` / `rg` → `actx grep` / `actx rg`
+- `find` / `cat` / `tree` → `actx find` / `actx cat` / `actx tree`
+- `pytest` / `ruff` / `docker ps` / `gh pr list` → `actx <cmd>`
+- `vercel whoami` / `railway status` / `wrangler deployments list` / `gcloud projects list` → `actx <cmd>`
+
+Hook/plugin agents rewrite automatically when installed. For full output, run without `actx` or use `actx --raw <command>`.
+
+Package manager discipline:
+- Package installations always require human confirmation (ask) — never attempt to bypass it.
+- Prefer lockfile-strict forms (`npm ci` / `pnpm install --frozen-lockfile` / `uv sync --frozen`); avoid `latest`.
+- Do not switch the project's package manager on your own initiative.
+"""
+
 
 class InitTests(unittest.TestCase):
     def run_actx(self, args, home):
@@ -223,7 +246,49 @@ class InitTests(unittest.TestCase):
             self.assertEqual(content.count("## Output compression (actx)"), 1)
             self.assertIn("Package manager discipline:", content)
 
-    def test_aider_scalar_other_becomes_list(self):
+    def test_tier2_compact_flags_present_and_deduped(self):
+        # TK-45: the Tier-2 section carries the compact-flags conventions;
+        # double init keeps exactly one block (replace-in-place, TK-30 parity).
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, ".grok", "rules", "actx.md")
+            for _ in range(2):
+                p = self.run_actx(["init", "--agent", "grok"], home)
+                self.assertEqual(p.returncode, 0, p.stderr)
+            with open(path, encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertEqual(content.count("## Output compression (actx)"), 1)
+            self.assertEqual(content.count("Prefer compact flags"), 1)
+            self.assertIn("git log -n 50", content)
+            self.assertIn("kubectl get -o json", content)
+            self.assertIn("LIMIT n", content)
+
+            # A pre-TK-45 body (discipline, no compact-flags table) is
+            # replaced in place (TK-51 precedent, test above).
+            os.remove(path)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(_PRE_TK45_SECTION + "\n")
+            p = self.run_actx(["init", "--agent", "grok"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(path, encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertEqual(content.count("## Output compression (actx)"), 1)
+            self.assertIn("Prefer compact flags", content)
+            self.assertIn("Package manager discipline:", content)
+
+    def test_tier2_section_matches_conventions_render(self):
+        # REQ-01: the section renders from the single conventions source.
+        from actx_lib import conventions
+
+        self.assertIn(conventions.render_tier2(), INSTRUCTION_SECTION)
+
+    def test_tier2_section_nonempty_with_header(self):
+        # G2b: INSTRUCTION_SECTION is a non-empty string carrying the
+        # section header (a broken render degrades, never empties it).
+        self.assertTrue(INSTRUCTION_SECTION.strip())
+        self.assertIn("## Output compression (actx)", INSTRUCTION_SECTION)
+
+
         with tempfile.TemporaryDirectory() as home:
             conf = os.path.join(home, ".aider.conf.yml")
             os.makedirs(os.path.dirname(conf), exist_ok=True)

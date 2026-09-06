@@ -24,6 +24,17 @@ AGENTS = (
     "copilot",
 )
 
+def _tier2_flags_block():
+    """Render the compact-flags conventions block; fail-open (INV-05):
+    a broken render degrades to no block, never a broken init."""
+    try:
+        from actx_lib import conventions
+
+        return conventions.render_tier2()
+    except Exception:
+        return ""
+
+
 INSTRUCTION_SECTION = """## Output compression (actx)
 
 To reduce context noise, prefix supported shell commands with `actx`:
@@ -43,7 +54,9 @@ Package manager discipline:
 - Package installations always require human confirmation (ask) — never attempt to bypass it.
 - Prefer lockfile-strict forms (`npm ci` / `pnpm install --frozen-lockfile` / `uv sync --frozen`); avoid `latest`.
 - Do not switch the project's package manager on your own initiative.
-"""
+
+{TIER2_FLAGS_BLOCK}
+""".format(TIER2_FLAGS_BLOCK=_tier2_flags_block())
 
 _SECTION_HEADER = "## Output compression (actx)"
 
