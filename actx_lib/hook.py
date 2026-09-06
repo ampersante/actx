@@ -1,6 +1,7 @@
 import json
 import sys
 
+import actx_lib.conventions as conventions
 import actx_lib.rewriter as rewriter
 import actx_lib.security_gate as security_gate
 
@@ -134,12 +135,22 @@ def process(text):
     updated_input = dict(tool_input)
     updated_input["command"] = rewritten
 
+    # TK-45: compact-flag hint (REQ-03) - allow+rewrite verdict ONLY, in
+    # its own try/except: any conventions failure degrades to the plain
+    # additionalContext (fail-open, INV-05). Not on deny/ask, not on the
+    # Antigravity schema (no additionalContext field in that contract).
+    hint = None
+    try:
+        hint = conventions.hint_for(command)
+    except Exception:
+        hint = None
+
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
             "updatedInput": updated_input,
-            "additionalContext": ADDITIONAL_CONTEXT,
+            "additionalContext": ADDITIONAL_CONTEXT + ("\n" + hint if hint else ""),
         }
     }
 

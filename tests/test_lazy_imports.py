@@ -102,12 +102,15 @@ class LazyImportTests(unittest.TestCase):
         )
 
     def test_hook_path_imports_only_allowed(self):
+        # TK-45: the hook path also pulls actx_lib.conventions (pure data,
+        # single lazy shlex import inside hint_for - no actx_lib deps).
         self.assertEqual(
             self.run_path(["hook"], stdin_text=HOOK_JSON),
             {
                 "actx_lib",
                 "actx_lib.cli",
                 "actx_lib.cli_families",
+                "actx_lib.conventions",
                 "actx_lib.rewriter",
                 "actx_lib.sql_verbs",
                 "actx_lib.hook",

@@ -277,6 +277,69 @@ class HookCliTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0)
         self.assertEqual(p.stdout, "")
 
+    def test_git_log_hint_appended_to_additional_context(self):
+        # TK-45 (REQ-03): allow+rewrite verdict on a verbose-form command
+        # appends the conventions hint; the full text is asserted exactly.
+        p = self.run_hook(hook_input("Bash", {"command": "git log"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "allow")
+        self.assertEqual(
+            output["updatedInput"]["command"],
+            "actx git log",
+        )
+        self.assertEqual(
+            output["additionalContext"],
+            "Command rewritten by actx for output compression."
+            "\nadd -n N (e.g. git log -n 50 --oneline)",
+        )
+
+    def test_compact_flag_present_no_hint(self):
+        # `git log -n 50` already follows the convention - no hint suffix.
+        p = self.run_hook(hook_input("Bash", {"command": "git log -n 50 --oneline"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(
+            data["hookSpecificOutput"]["additionalContext"],
+            "Command rewritten by actx for output compression.",
+        )
+
+    def test_hint_only_on_allow_rewrite_verdict(self):
+        # deny: no hint suffix in the decision reason; ask: same. The
+        # hint lives ONLY in the additionalContext of the rewrite path.
+        p = self.run_hook(hook_input("Bash", {"command": "cat .env"}))
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertNotIn("additionalContext", output)
+        self.assertNotIn("hint", json.dumps(data))
+
+        p = self.run_hook(hook_input("Bash", {"command": "git push --force origin main"}))
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "ask")
+        self.assertNotIn("additionalContext", output)
+
+    def test_gemini_schema_never_gets_hint(self):
+        # Antigravity contract has no additionalContext field at all - the
+        # rewritten overwrite stays byte-identical for hint-eligible heads.
+        payload = gemini_input("run_command", {"CommandLine": "git log"})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data, {
+            "decision": "allow",
+            "overwrite": {"CommandLine": "actx git log"},
+        })
+
+    def test_clean_command_without_rewrite_strict_none(self):
+        # INV-03: a safe uncompressed command still defers strictly (empty
+        # stdout) - `dart compile` is no rewriter verb and no gate target.
+        p = self.run_hook(hook_input("Bash", {"command": "dart compile js"}))
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, "")
+
     def test_stdout_is_exact_object_no_extra_keys(self):
         p = self.run_hook(hook_input("Bash", {"command": "git status"}))
         data = json.loads(p.stdout)
