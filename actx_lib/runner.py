@@ -49,7 +49,13 @@ def _refused(cmd, code, passthrough=False):
 
 
 def _synthetic_result(cmd, code, message):
-    return subprocess.CompletedProcess(args=cmd, returncode=code, stdout="", stderr=message)
+    # actx_synthetic marks refusal/timeout results (TK-47): their stderr is
+    # actx's own text, not command output, so it never feeds hint matching.
+    result = subprocess.CompletedProcess(
+        args=cmd, returncode=code, stdout="", stderr=message
+    )
+    result.actx_synthetic = True
+    return result
 
 
 def _timed_out(cmd, seconds, passthrough=False):
@@ -279,6 +285,55 @@ def _retain(tee_dir):
             pass
 
 
+_HINT_AUTH = "[actx] hint: auth error — запустите login вручную (интерактивно; actx не исполняет его)"
+_HINT_RATE = "[actx] hint: rate limit — повторите с паузой"
+
+# TK-47 long-session heuristics: case-insensitive stderr substrings, only
+# contextual forms — bare "401"/"429" stay out (false positives on failing
+# test output; PRD.md plan 2026-09-07 A2).
+_HINT_PATTERNS = (
+    (
+        (
+            "not logged in", "login required", "authentication required",
+            "re-authenticate", "unauthorized", "HTTP 401", "401 Unauthorized",
+            "status 401",
+        ),
+        _HINT_AUTH,
+    ),
+    (
+        (
+            "rate limit", "rate_limit", "too many requests", "quota exceeded",
+            "HTTP 429", "429 Too Many",
+        ),
+        _HINT_RATE,
+    ),
+)
+
+
+def _session_hints(result):
+    """Advisory hints for auth/rate-limit stderr on a failing exit code.
+
+    Pure function: [] on exit 0, one hint per class at most; bytes stderr
+    (run_passthrough path) decodes lossily.
+    """
+    if result.returncode == 0:
+        return []
+    if getattr(result, "actx_synthetic", False):
+        return []
+    try:
+        stderr = result.stderr
+        if isinstance(stderr, (bytes, bytearray)):
+            stderr = bytes(stderr).decode("utf-8", "replace")
+        stderr = (stderr or "").lower()
+        return [
+            hint
+            for patterns, hint in _HINT_PATTERNS
+            if any(p in stderr for p in patterns)
+        ]
+    except Exception:
+        return []
+
+
 def run_passthrough(cmd):
     """Execute without filtering; bytes mode preserves non-UTF-8 output."""
     try:
@@ -308,6 +363,11 @@ def run_passthrough(cmd):
         passthrough=1, strategy="passthrough",
         store_text=not _secret_bearing_result(result),
     )
+    try:
+        for hint in _session_hints(result):
+            print(hint, file=sys.stderr)
+    except Exception:
+        pass
     return result.returncode
 
 
@@ -336,6 +396,11 @@ def run_lossless(cmd, config, strategy="lossless"):
         )
         if tee_decision(config, "auto", result.returncode):
             write_tee(cmd, result, config)
+        try:
+            for hint in _session_hints(result):
+                print(hint, file=sys.stderr)
+        except Exception:
+            pass
         return result.returncode
     except Exception:
         return raw_fallback(result)
@@ -482,6 +547,13 @@ def run(cmd, config):
         if path:
             print("[full output: %s]" % path, file=sys.stderr)
 
+    # TK-47 single-emission rule: linear tail only — the json_path branch
+    # above prints its own hint inside _run_json_path.
+    try:
+        for hint in _session_hints(result):
+            print(hint, file=sys.stderr)
+    except Exception:
+        pass
     return result.returncode
 
 
@@ -541,6 +613,11 @@ def _run_json_path(cmd, result, config, json_out):
         )
         if path:
             print("[full output: %s]" % path, file=sys.stderr)
+    try:
+        for hint in _session_hints(result):
+            print(hint, file=sys.stderr)
+    except Exception:
+        pass
     return result.returncode
 
 
@@ -639,6 +716,11 @@ def compacted_result(cmd, result, config, compact_fn, tee_policy="auto", strateg
         )
         if tee_decision(config, tee_policy, result.returncode):
             write_tee(cmd, result, config)
+        try:
+            for hint in _session_hints(result):
+                print(hint, file=sys.stderr)
+        except Exception:
+            pass
         return result.returncode
     except Exception:
         return raw_fallback(result)
@@ -670,6 +752,11 @@ def run_errors(cmd):
         cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="errors",
         store_text=not _secret_bearing_result(result),
     )
+    try:
+        for hint in _session_hints(result):
+            print(hint, file=sys.stderr)
+    except Exception:
+        pass
     return result.returncode
 
 
@@ -712,4 +799,9 @@ def run_digest(cmd, n=10):
         cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="digest",
         store_text=not _secret_bearing_result(result),
     )
+    try:
+        for hint in _session_hints(result):
+            print(hint, file=sys.stderr)
+    except Exception:
+        pass
     return result.returncode
