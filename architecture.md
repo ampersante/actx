@@ -1,6 +1,6 @@
 # Architecture — actx
 
-Living snapshot (post-wave-3 master, pre-release v2.9.0). Product source of truth: `PRD.md`.
+Living snapshot (v2.9.0). Product source of truth: `PRD.md`.
 
 ## System Overview
 
