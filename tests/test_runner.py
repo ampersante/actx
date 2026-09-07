@@ -237,6 +237,27 @@ class SessionHintShimTests(unittest.TestCase):
         self.assertIn(RATE_HINT, p.stderr)
         self.assertNotIn(AUTH_HINT, p.stderr)
 
+    # Case regression (caught live at wave-3 acceptance): the matcher
+    # lowercases stderr, so patterns must be lowercase-stored — an
+    # all-caps stderr form must still match.
+    def test_hint_matches_uppercase_stderr_forms(self):
+        self.install_shim(
+            "toolx", stdout="",
+            stderr="ERROR: (HTTP 401) NOT AUTHORIZED\n",
+        )
+        p = self.run_actx(["run", "toolx"])
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.stderr.count("[actx] hint:"), 1)
+        self.assertIn(AUTH_HINT, p.stderr)
+        self.install_shim(
+            "toolx", stdout="",
+            stderr="API ERROR: 429 TOO MANY REQUESTS\n",
+        )
+        p = self.run_actx(["run", "toolx"])
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.stderr.count("[actx] hint:"), 1)
+        self.assertIn(RATE_HINT, p.stderr)
+
     def test_both_hint_classes_at_most_two(self):
         self.install_shim(
             "toolx", stdout="",

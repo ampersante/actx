@@ -290,23 +290,28 @@ _HINT_RATE = "[actx] hint: rate limit — повторите с паузой"
 
 # TK-47 long-session heuristics: case-insensitive stderr substrings, only
 # contextual forms — bare "401"/"429" stay out (false positives on failing
-# test output; PRD.md plan 2026-09-07 A2).
-_HINT_PATTERNS = (
-    (
+# test output; PRD.md plan 2026-09-07 A2). Patterns are lowered once here
+# because the matcher lowercases stderr first: an all-caps stderr form
+# ("HTTP 401 UNAUTHORIZED") must match too.
+_HINT_PATTERNS = tuple(
+    (tuple(pattern.lower() for pattern in patterns), hint)
+    for patterns, hint in (
         (
-            "not logged in", "login required", "authentication required",
-            "re-authenticate", "unauthorized", "HTTP 401", "401 Unauthorized",
-            "status 401",
+            (
+                "not logged in", "login required", "authentication required",
+                "re-authenticate", "unauthorized", "HTTP 401",
+                "401 Unauthorized", "status 401",
+            ),
+            _HINT_AUTH,
         ),
-        _HINT_AUTH,
-    ),
-    (
         (
-            "rate limit", "rate_limit", "too many requests", "quota exceeded",
-            "HTTP 429", "429 Too Many",
+            (
+                "rate limit", "rate_limit", "too many requests",
+                "quota exceeded", "HTTP 429", "429 Too Many",
+            ),
+            _HINT_RATE,
         ),
-        _HINT_RATE,
-    ),
+    )
 )
 
 
