@@ -1,6 +1,6 @@
 # Architecture — actx
 
-Living snapshot (v2.8.0). Product source of truth: `PRD.md`.
+Living snapshot (post-wave-3 master, pre-release v2.9.0). Product source of truth: `PRD.md`.
 
 ## System Overview
 
@@ -38,10 +38,11 @@ Rewriter (post-wave-2): observational CLI + narrow mutator allow-list (`PRD.md` 
 | `actx` | Python 3.14.2, stdlib | entrypoint; dispatch by `argv[1]` |
 | `actx_lib/security_gate.py` | stdlib (json/shlex/re) | L7 Security Gatekeeper: deterministic prompt-injection / secret access / exfiltration defense (<1ms) |
 | `actx_lib/cli_families.py` | stdlib (pure data) | declarative CLI family table (13 heads: 7 cloud + docker/kubectl/helm/bq/terraform/redis-cli; ro_verbs/ask_specs/stream_specs + global_flags/value_flags + `effective_verbs` skip-logic); single data source for rewriter `_DISPATCH`, `T6_ASK_TABLE` and hang-policy stream specs |
+| `actx_lib/conventions.py` | stdlib (shlex in hint_for) | compact-flag conventions table (TK-45): single data source for the Tier-2 instruction block, hook `additionalContext` hints (allow+rewrite verdicts only) and insights suggestions; `WAVE_HEADS` frozenset feeds the TK-46 adoption metric |
 | `actx_lib/sql_verbs.py` | stdlib (re) | SQL payload classification data (TK-43): RO-verb class, worst-verb regex, psql/dot meta blacklist, default-deny; shared by rewriter predicates and the security gate |
 | `actx_lib/rewriter.py` | stdlib (json/sys/shlex) | single source of truth: command → rewritten; quote-aware guard for SQL heads (psql/sqlite3/duckdb — §7.4 exception) |
 | `actx_lib/cli.py` | argparse | CLI dispatch; lazy filter imports |
-| `actx_lib/runner.py` | stdlib | execute, exit-code, tee |
+| `actx_lib/runner.py` | stdlib | execute, exit-code, tee; TK-47 advisory stderr hints (auth/rate-limit, single emission per terminal path, synthetic 124/125 results excluded) |
 | `actx_lib/hook.py` | stdlib | JSON PreToolUse hook (Claude/Codex/Gemini/Copilot): security evaluation + rewrite |
 | `actx_lib/rewrite_cmd.py` | stdlib | `actx rewrite "<cmd>"` |
 | `actx_lib/installer.py` | stdlib | `actx init/--show/--uninstall` |
@@ -57,6 +58,7 @@ Rewriter (post-wave-2): observational CLI + narrow mutator allow-list (`PRD.md` 
    - On clean command $\to$ `rewriter.rewrite()`:
      - if eligible $\to$ `allow` with compressed `updatedInput`.
      - if not eligible $\to$ `None` (defer to native agent harness permissions).
+     - on allow+rewrite, `additionalContext` carries the compact-flag hint for known verbose forms (`conventions.hint_for`, fail-open; deny/ask and the Antigravity schema stay hint-free).
 2. **Tier 1 rewrite (OpenCode)**: TS plugin `tool.execute.before` mutates `output.args.command` via `execFileSync(ACTX, ["rewrite", cmd])`.
 3. **Tier 2 (Grok/Cursor/Cline/Windsurf/Aider)**: instruction section in agent rules (`PRD.md` §6.3; replace-in-place on reinit when body differs); agent prefixes supported commands manually; adoption ~70–85% (estimate).
 4. **CLI**: `actx <cmd>` executes, filters, prints compact output, tee on failure/always (git diff), preserves exit code.

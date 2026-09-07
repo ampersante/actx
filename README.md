@@ -180,7 +180,7 @@ actx --help
 | `actx gain --breakdown` | Savings composition by compression strategy |
 | `actx discover` | Candidates for new filters (frequent passthrough commands) |
 | `actx session` | Adoption across sessions |
-| `actx insights [--days N] [--top N] [--json]` | Orchestration analytics: repeats, failures, passthrough, suggestions |
+| `actx insights [--days N] [--top N] [--verbose-commands] [--json]` | Orchestration analytics: repeats, failures, passthrough, suggestions, verbose-command advisor, wave-head adoption |
 | `actx tracking on\|off\|status\|clear` | Enable/disable/inspect/clear local analytics |
 | `actx git add/commit/push/pull/fetch` | Narrow mutators (auto-rewritable); success prints a tiny confirmation |
 | `actx git branch [RO flags]` | Branch list / show-current (RO flags only) |
@@ -201,6 +201,7 @@ actx read main.py --level minimal
 actx run pytest tests/
 actx run --digest python3 parse_data.py   # large parsing output: head+tail
 actx insights --json        # orchestration analytics as JSON
+actx insights --verbose-commands   # top verbose passthrough heads + suggested compact flags
 actx --raw git status      # full original output
 ```
 
@@ -227,6 +228,15 @@ compact output + original exit code
 One rewriter is the single source of truth for every adapter. It rewrites simple allow-listed commands (no compounds/lexer) and returns the original command string verbatim with an `actx ` prefix — never rebuilt from tokens.
 
 ## Agent integration
+
+Tier-1 hooks (Claude/Codex) append a compact-flag hint to `additionalContext` on
+allow+rewrite verdicts for known verbose forms (e.g. a bare `git log` gets the
+`-n` advice); deny/ask verdicts and the Antigravity schema carry no hints, and a
+clean command without a rewrite still returns strict no-op. Tier-2 instruction
+files get the same conventions as a "Prefer compact flags" block (`actx init`
+regenerates it; a broken render degrades to the section without the block).
+Known limitation: the Antigravity (gemini) hook schema has no
+`additionalContext` field, so those agents rely on the Tier-2 block only.
 
 | Agent | Mechanism | Install | Auto-rewrite |
 |---|---|---|---|
@@ -290,6 +300,8 @@ Views:
 - `actx gain --graph|--history|--daily` and `--format json`.
 - `actx discover` / `actx session`.
 - `actx insights [--days N] [--top N] [--json]` — orchestration analytics: repeated calls, failures, passthrough candidates, and conservative suggestions.
+- `actx insights --verbose-commands` — top passthrough heads by raw output volume with a suggested compact-flag convention (from the shared conventions table; heads without a convention show no advice). Reports are head-level: `command_text` never appears in the advisor.
+- `actx insights` adoption report — for the wave-1/2 heads (cloud CLIs, docker/kubectl/helm, mobile toolchains, data stack): share of compressed calls among actx-mediated calls (calls bypassing actx are not observed; internal refusals/timeouts, exit 124/125, are excluded from both terms).
 
 The history database stores the local command text (`command_text`, capped at 4096 chars) while the tool is personal; it is planned to shrink back to `sha1` only after learning from the data. See `journal.md`.
 
@@ -302,6 +314,8 @@ Control:
 - Rows older than `tracking.history_days` (default 90) are pruned on write; set `0` to keep forever.
 
 Error/exception paths are not recorded (they produce no savings); `tree` is not recorded (no subprocess); passthrough calls are recorded under `passthrough`.
+
+Failed cloud-CLI calls print an advisory stderr hint (auth: run login manually; rate limit: retry with a pause) — advisory only: exit codes are never altered, the hint never enters tee files, and contextual forms only (`HTTP 401`, `rate limit`) are matched, so a failing test line like `assert response.status_code == 429` never triggers one.
 
 ## Safety
 
