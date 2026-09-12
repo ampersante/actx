@@ -267,6 +267,20 @@ class RewriteUnitTests(unittest.TestCase):
             "tsc --outfile /tmp/x a.ts",          # tsc is case-insensitive
             "tsc --OUTDIR /tmp/x a.ts",
             "tsc --declarationdir=/tmp/x a.ts",
+            # Re-acceptance F-A/F-B: dash-count and case equivalences.
+            "go test --coverprofile=/tmp/x ./...",   # go flag pkg: -- ≡ -
+            "go test --o=/tmp/x ./...",
+            "go test --c ./...",
+            "go test --trace=/tmp/x ./...",
+            "go test --outputdir /tmp/x ./...",
+            "tsc -outdir /tmp/x a.ts",               # tsc: 1-2 dashes, CI
+            "tsc -outFile /tmp/x a.ts",
+            "tsc -generateTrace /tmp/x a.ts",
+            "tsc -tsbuildinfofile /tmp/x a.ts",
+            "eslint --outp /tmp/x .",                # optionator abbrev
+            "pytest --junitx=/tmp/x",                # argparse abbrev
+            "pytest --junit-x=/tmp/x",
+            "pytest --baset /tmp/x",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(rewrite(command))
@@ -308,9 +322,13 @@ class RewriteUnitTests(unittest.TestCase):
             "ruff check .",
             "go test ./...",
             "go test -count=1 ./...",
+            "go test --count=1 ./...",
             "go test -run X ./...",
+            "go test -args -o x",      # -o after -args belongs to the binary
             "tsc --noEmit",
+            "tsc --project .",
             "pytest -q",
+            "pytest --junit-prefix x", # RO string flag, not a write path
             "uv run pytest",
             "uv run --with requests pytest",
         ):

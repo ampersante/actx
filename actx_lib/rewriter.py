@@ -42,11 +42,15 @@ _WRITE_TOKENS = frozenset({"--fix", "fix", "format"})
 #   attach  -- one-letter short flag, bare or with a glued value
 #              (`-o out`, `-oout`); only for non-"--" tokens
 #   prefix  -- plain startswith (`git --out*` catches --output too)
+#   name    -- dash-insensitive name match: go's flag package accepts
+#              `--flag` == `-flag` verbatim, so the stored name (no dashes)
+#              is compared to `tok.lstrip("-").split("=",1)[0]`
+#   nameci  -- same as `name` but case-insensitive (tsc strips 1-2 leading
+#              dashes and matches option names case-insensitively)
 # The scan runs on the EFFECTIVE head: inside `uv run <argv>` /
 # `xcrun simctl <argv>` the inner head is matched (cli_families
 # run_prefix_split, shared with the security gate). This table folds in
 # the former per-predicate `sort -o`/`--output` and `git --out*` rejects.
-#   ci      -- case-insensitive `eq` (tsc option names are case-insensitive)
 _DENIED_WRITE_FLAGS = {
     "git": {"prefix": ("--out",)},
     "sort": {"eq": ("--output",), "attach": ("-o",)},
@@ -55,14 +59,20 @@ _DENIED_WRITE_FLAGS = {
     "jest": {"eq": ("--outputFile", "--output-file",
                     "--coverageDirectory", "--coverage-directory")},
     "vitest": {"eq": ("--outputFile",), "prefix": ("--outputFile.",)},
-    "eslint": {"eq": ("--output-file",), "attach": ("-o",)},
+    # optionator accepts unambiguous long-option abbreviations; "--outp"
+    # uniquely prefixes --output-file inside eslint's option space.
+    "eslint": {"eq": ("--output-file",), "attach": ("-o",),
+               "prefix": ("--outp",)},
     "ruff": {"eq": ("--output-file", "--cache-dir"), "attach": ("-o",)},
-    "go": {"eq": ("-o", "-c", "-coverprofile", "-cpuprofile",
-                  "-memprofile", "-blockprofile", "-mutexprofile",
-                  "-trace", "-outputdir")},
-    "tsc": {"ci": ("--out", "--outfile", "--outdir", "--declarationdir",
-                   "--tsbuildinfofile", "--generatetrace")},
-    "pytest": {"eq": ("--basetemp", "--junitxml", "--junit-xml")},
+    "go": {"name": ("o", "c", "coverprofile", "cpuprofile", "memprofile",
+                    "blockprofile", "mutexprofile", "trace", "outputdir")},
+    "tsc": {"nameci": ("out", "outfile", "outdir", "declarationdir",
+                       "tsbuildinfofile", "generatetrace")},
+    # pytest's parser allows unambiguous abbreviations; "--junitx"/
+    # "--junit-x" cover every prefix of both --junitxml and --junit-xml
+    # without catching the RO --junit-prefix flag.
+    "pytest": {"eq": ("--basetemp", "--junitxml", "--junit-xml"),
+               "prefix": ("--junitx", "--junit-x", "--baset")},
 }
 
 
@@ -75,7 +85,9 @@ def _has_denied_write_flag(head, argv):
     if spec is None:
         return False
     for tok in argv:
-        if head == "go" and tok == "-args":
+        # go: `-args`/`--args` ends the go flag space; what follows belongs
+        # to the test binary, not to the go tool.
+        if head == "go" and tok.lstrip("-") == "args":
             break
         for flag in spec.get("eq", ()):
             if tok == flag or tok.startswith(flag + "="):
@@ -87,10 +99,15 @@ def _has_denied_write_flag(head, argv):
         for flag in spec.get("prefix", ()):
             if tok.startswith(flag):
                 return True
-        lowered = tok.lower()
-        for flag in spec.get("ci", ()):
-            if lowered == flag or lowered.startswith(flag + "="):
-                return True
+        if tok.startswith("-"):
+            name = tok.lstrip("-").split("=", 1)[0]
+            for flag in spec.get("name", ()):
+                if name == flag:
+                    return True
+            lname = name.lower()
+            for flag in spec.get("nameci", ()):
+                if lname == flag:
+                    return True
     return False
 
 
