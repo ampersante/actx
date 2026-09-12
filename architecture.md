@@ -1,6 +1,6 @@
 # Architecture — actx
 
-Living snapshot (v2.9.0). Product source of truth: `PRD.md`.
+Living snapshot (v2.10.0). Product source of truth: `PRD.md`.
 
 ## System Overview
 
