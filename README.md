@@ -235,8 +235,12 @@ allow+rewrite verdicts for known verbose forms (e.g. a bare `git log` gets the
 clean command without a rewrite still returns strict no-op. Tier-2 instruction
 files get the same conventions as a "Prefer compact flags" block (`actx init`
 regenerates it; a broken render degrades to the section without the block).
-Known limitation: the Antigravity (gemini) hook schema has no
-`additionalContext` field, so those agents rely on the Tier-2 block only.
+Known limitations on the Antigravity (gemini) schema: no `additionalContext`
+field (agents rely on the Tier-2 block only), and no true "defer" verdict —
+`decision` is required, so commands with no actx verdict and no rewrite return
+`ask` (the documented defer primitive; it prompts but honors the "Always Allow"
+cache). Note that `--dangerously-skip-permissions` bypasses the hook layer
+entirely — actx cannot protect an agent run under that flag.
 
 | Agent | Mechanism | Install | Auto-rewrite |
 |---|---|---|---|
