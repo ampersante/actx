@@ -212,6 +212,31 @@ class WranglerAndRedisTests(unittest.TestCase):
         )
 
 
+class GhTests(unittest.TestCase):
+    """TK-55 (F2): gh stream_specs route through _is_cloud_stream."""
+
+    def test_run_watch_is_never_wrap(self):
+        # `gh run watch` waits on remote state -> never-wrap (exit 125).
+        self.assertEqual(
+            hang_policy.classify(["gh", "run", "watch"]), NEVER_WRAP
+        )
+
+    def test_pr_checks_watch_is_never_wrap(self):
+        self.assertEqual(
+            hang_policy.classify(["gh", "pr", "checks", "--watch"]),
+            NEVER_WRAP,
+        )
+
+    def test_non_streaming_verbs_are_default(self):
+        for argv in (
+            ["gh", "pr", "checks"],
+            ["gh", "pr", "list"],
+            ["gh", "run", "view"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), DEFAULT)
+
+
 class FlutterTests(unittest.TestCase):
     def test_run_is_never_wrap(self):
         self.assertEqual(hang_policy.classify(["flutter", "run"]), NEVER_WRAP)

@@ -282,25 +282,44 @@ def _unwrap_tokens(tokens: list[str]) -> list[str]:
     stripped = _strip_actx_prefix(tokens)
     if stripped is not None:
         tokens = stripped
+    # TK-55 (F4): run-prefixes (`uv run <argv>`, `xcrun [flags] simctl
+    # <argv>`) hide the effective head from every consumer of this helper,
+    # so they are unwrapped inside the same loop - wrapper chains then
+    # work in any order (`nice uv run rm`, `uv run env rm`). Unlike
+    # _WRAPPER_COMMANDS tokens (dropped), consumed run-prefix tokens are
+    # kept and appended at the end: file-valued flags (`uv run --env-file
+    # .env`) must stay visible to the token-level scans (T1).
+    # cli_families.run_prefix_split fails open (None) on unknown flags or
+    # a missing inner command, and each split strictly shortens the
+    # scanned list, so the loop terminates.
+    consumed_prefix: list[str] = []
     idx = 0
-    while idx < len(tokens):
-        tok = tokens[idx]
-        base = os.path.basename(tok)
-        if base in _WRAPPER_COMMANDS:
-            idx += 1
-            while idx < len(tokens) and (
-                tokens[idx].startswith("-")
-                or "=" in tokens[idx]
-                or tokens[idx].isdigit()
-                or bool(re.match(r"^\d+[smhd]?$", tokens[idx]))
-            ):
+    while True:
+        while idx < len(tokens):
+            tok = tokens[idx]
+            base = os.path.basename(tok)
+            if base in _WRAPPER_COMMANDS:
                 idx += 1
-            continue
-        if "=" in tok and not tok.startswith("-"):
-            idx += 1
-            continue
-        break
-    return tokens[idx:] if idx < len(tokens) else []
+                while idx < len(tokens) and (
+                    tokens[idx].startswith("-")
+                    or "=" in tokens[idx]
+                    or tokens[idx].isdigit()
+                    or bool(re.match(r"^\d+[smhd]?$", tokens[idx]))
+                ):
+                    idx += 1
+                continue
+            if "=" in tok and not tok.startswith("-"):
+                idx += 1
+                continue
+            break
+        rest = tokens[idx:] if idx < len(tokens) else []
+        split = cli_families.run_prefix_split(rest)
+        if split is None:
+            return rest + consumed_prefix
+        inner_argv, consumed = split
+        consumed_prefix += consumed
+        tokens = inner_argv
+        idx = 0
 
 
 def _matches_protected_paths(candidate: str) -> bool:
@@ -1736,6 +1755,45 @@ def _check_high_risk_tools(command: str, raw_tokens: list[str]) -> SecurityDecis
     return None
 
 
+def _check_gradlew(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
+    """T6 ask for gradlew publish-class tasks (TK-55 F5), precedent
+    ``_check_high_risk_cargo``.
+
+    The exact-token T6 verb table cannot express ``:module:publish`` task
+    addressing, so positional task tokens are classified by
+    cli_families.gradle_task_class (last ``:``-segment): a
+    publish/clean-class marker asks. RO bases and unknown tasks stay
+    allow - the rewriter only rewrites an all-RO argv and unknown verbs
+    defer to the native permission layer (the gate is fail-open).
+    Flag handling follows the shared gradle tables: value flags skip
+    their value token, ``-P*``/``-D*`` attached forms and boolean flags
+    skip whole, and an unrecognized ``-`` token is skipped too - an
+    unknown flag is a reason for neither an ask nor a scan stop."""
+    tokens = _unwrap_tokens(raw_tokens)
+    if not tokens or os.path.basename(tokens[0]) != "gradlew":
+        return None
+    idx = 1
+    while idx < len(tokens):
+        tok = tokens[idx]
+        if tok in cli_families.GRADLE_VALUE_FLAGS:
+            idx += 2  # the flag and its separate value token
+            continue
+        if tok.startswith(cli_families.GRADLE_ATTACHED_VALUE_PREFIXES):
+            idx += 1  # -Pprop=v / -Dprop=v: the value stays inside the token
+            continue
+        if tok.startswith("-"):
+            idx += 1  # bool or unknown flag: skip, keep scanning
+            continue
+        if cli_families.gradle_task_class(tok) == "ask":
+            return SecurityDecision(
+                decision="ask",
+                reason=f"Executing gradlew {tok} mutates remote artifacts or deletes build outputs, requiring human confirmation",
+                category="T6_HIGH_RISK_GRADLEW",
+            )
+        idx += 1
+    return None
+
+
 # ----------------------------------------------------------------------
 # T6: High-Risk SQL Operations (Ask Confirmation) - TK-43
 # ----------------------------------------------------------------------
@@ -2233,6 +2291,12 @@ def _evaluate_chunk(chunk: str) -> SecurityDecision:
     t6_tools = _check_high_risk_tools(chunk, tokens)
     if t6_tools:
         return t6_tools
+
+    # 10b. T6: gradlew publish-class tasks (TK-55 F5) - positional task
+    # tokens need the last-":"-segment class, not the exact-token table
+    t6_gradlew = _check_gradlew(chunk, tokens)
+    if t6_gradlew:
+        return t6_gradlew
 
     # 11. T6: High-Risk SQL payloads (TK-43) - head-specific, runs after the
     # generic verb table (SQL payloads need the classifier, not token specs)

