@@ -37,12 +37,27 @@ class HookCliTests(unittest.TestCase):
             "overwrite": {"CommandLine": "actx git status"},
         })
 
-    def test_gemini_run_command_safe_uncompressed_allowed(self):
+    def test_gemini_run_command_safe_uncompressed_ask(self):
+        # TK-55 F1: a safe uncompressed command no longer gets an explicit
+        # "allow" - the Antigravity fallthrough defers via "ask".
         payload = gemini_input("run_command", {"CommandLine": "python3 -c \"import sys; print(sys.version)\""})
         p = self.run_hook(payload)
         self.assertEqual(p.returncode, 0, p.stderr)
         data = json.loads(p.stdout)
-        self.assertEqual(data, {"decision": "allow"})
+        self.assertEqual(data["decision"], "ask")
+        self.assertIsInstance(data["reason"], str)
+        self.assertTrue(data["reason"])
+
+    def test_gemini_run_command_unknown_command_asks(self):
+        # TK-55 F1 regression pin ("the touch hole"): a command outside
+        # the gate lists and the rewriter allow-list must not be
+        # auto-approved on the Antigravity schema.
+        payload = gemini_input("run_command", {"CommandLine": "touch /tmp/x"})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["decision"], "ask")
+        self.assertIsInstance(data["reason"], str)
 
     def test_gemini_run_command_denied(self):
         payload = gemini_input("run_command", {"CommandLine": "cat .env"})
@@ -269,6 +284,14 @@ class HookCliTests(unittest.TestCase):
 
     def test_unknown_safe_command_empty(self):
         p = self.run_hook(hook_input("Bash", {"command": "custom_script_safe.sh --foo"}))
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, "")
+
+    def test_unknown_command_touch_defers_empty(self):
+        # TK-55 F1 asymmetry pin: the same `touch` vector that yields
+        # "ask" on the Antigravity schema stays a native defer (empty
+        # stdout) on the claude schema.
+        p = self.run_hook(hook_input("Bash", {"command": "touch /tmp/x"}))
         self.assertEqual(p.returncode, 0)
         self.assertEqual(p.stdout, "")
 

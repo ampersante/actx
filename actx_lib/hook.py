@@ -9,6 +9,8 @@ ALLOWED_TOOLS = {"Bash", "bash", "Shell", "shell", "exec"}
 
 ADDITIONAL_CONTEXT = "Command rewritten by actx for output compression."
 
+_AGY_DEFER_REASON = "actx: command outside actx policy — deferred to user confirmation"
+
 
 def process(text):
     try:
@@ -63,7 +65,13 @@ def process(text):
                 "decision": "allow",
                 "overwrite": {"CommandLine": rewritten},
             }
-        return {"decision": "allow"}
+        # Fallthrough: no gate verdict, no rewrite. Empty hook output is
+        # undocumented in the Antigravity contract and third-party sources
+        # report it as fail-closed, while "deny" would break every
+        # unrewritten command - so "ask" is used as the defer primitive:
+        # it prompts the user but honors the "Always Allow" cache, unlike
+        # "force_ask" which would bypass it.
+        return {"decision": "ask", "reason": _AGY_DEFER_REASON}
 
     # Claude Code / Codex CLI schema
     tool_name = data.get("tool_name") or (
