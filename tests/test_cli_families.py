@@ -54,9 +54,9 @@ CLOUD_HEADS = (
 # kubectl and helm followed in TK-40, migrating from hand-written rewriter
 # predicates and the non-cloud T6 table into FAMILIES. bq/terraform/
 # redis-cli joined in TK-43 (terraform migrated out of the non-cloud T6
-# table the same N-F1 way).
+# table the same N-F1 way). gh joined in TK-55 (F2).
 FAMILY_HEADS = CLOUD_HEADS + (
-    "docker", "helm", "kubectl", "bq", "terraform", "redis-cli",
+    "docker", "helm", "kubectl", "bq", "terraform", "redis-cli", "gh",
 )
 
 # Secret-bearing connection string whose key AND value contain none of the
@@ -72,7 +72,9 @@ JSON_ARRAY_SHIM = (
 
 
 class FamilyDataTests(unittest.TestCase):
-    def test_seven_families_declared(self):
+    def test_families_match_family_heads(self):
+        # The name pin died with the eighth family (gh, TK-55): the
+        # invariant that matters is FAMILIES == FAMILY_HEADS.
         self.assertEqual(
             tuple(sorted(cli_families.FAMILIES)), tuple(sorted(FAMILY_HEADS))
         )
@@ -264,9 +266,10 @@ class T6ConsolidationTests(unittest.TestCase):
                 self.assertIn(spec, final, (head, spec))
             if head not in ("docker", "kubectl", "terraform"):
                 self.assertEqual(final, specs, head)
-        # 4 non-cloud heads + 13 family heads (bq/terraform/redis-cli
-        # joined via FAMILIES in TK-43).
-        self.assertEqual(len(security_gate.T6_ASK_TABLE), 17)
+        # 4 non-cloud heads + 14 family heads (bq/terraform/redis-cli
+        # joined via FAMILIES in TK-43, gh in TK-55; gradlew's ask is a
+        # custom gate check, not a table entry).
+        self.assertEqual(len(security_gate.T6_ASK_TABLE), 18)
 
     def test_migrated_heads_left_the_non_cloud_table(self):
         # N-F1 red-gate: a docker/kubectl/helm/terraform record left in
@@ -450,6 +453,274 @@ class DataFamiliesTests(unittest.TestCase):
         # and can never impersonate a verb - GET alone is the effective verb.
         verbs = cli_families.effective_verbs(["redis-cli", "-h", "EXISTS", "GET"])
         self.assertEqual(verbs, ["GET"])
+
+
+class GhFamilyTests(unittest.TestCase):
+    """TK-55 F2: gh family record — ro verbs rewrite, mutations ask via
+    T6, and the file-writing/secret-bearing namespaces defer (they live
+    in no list at all)."""
+
+    def assert_rewrite(self, command):
+        self.assertEqual(rewriter.rewrite(command), "actx " + command, command)
+
+    def assert_none(self, command):
+        self.assertIsNone(rewriter.rewrite(command), command)
+
+    def test_gh_ro_verbs_rewrite(self):
+        for command in (
+            "gh pr list",
+            "gh pr view 12",
+            "gh pr status",
+            "gh pr diff 12",
+            "gh pr checks",
+            "gh issue list",
+            "gh issue view 3",
+            "gh issue status",
+            "gh run list",
+            "gh run view 55",
+            "gh repo list",
+            "gh repo view",
+            "gh release list",
+            "gh release view v1.0",
+            "gh workflow list",
+            "gh workflow view",
+            "gh search issues actx",
+            "gh gist list",
+        ):
+            with self.subTest(command=command):
+                self.assert_rewrite(command)
+
+    def test_gh_repo_value_flag_skipped(self):
+        # -R/--repo consume a value token; the effective verb still
+        # resolves behind them.
+        self.assert_rewrite("gh pr -R o/r list")
+        self.assert_rewrite("gh issue --repo o/r list")
+        self.assert_rewrite("gh --repo=o/r pr list")
+
+    def test_gh_mutating_verbs_never_rewrite(self):
+        for command in (
+            "gh pr merge",
+            "gh pr create --fill",
+            "gh pr close 12",
+            "gh pr reopen 12",
+            "gh pr comment 12",
+            "gh pr edit 12",
+            "gh pr review --approve",
+            "gh pr checkout 12",
+            "gh pr ready 12",
+            "gh pr revert 12",
+            "gh pr update-branch 12",
+            "gh issue create",
+            "gh issue comment 3",
+            "gh issue delete 3",
+            "gh issue develop 3",
+            "gh run delete 55",
+            "gh run cancel 55",
+            "gh run rerun 55",
+            "gh repo create x",
+            "gh repo clone o/r",
+            "gh repo delete x",
+            "gh repo sync x",
+            "gh release create v1",
+            "gh release upload v1 f.zip",
+            "gh release delete-asset v1 a.zip",
+            "gh workflow run ci.yml",
+            "gh workflow disable ci.yml",
+            "gh gist create f.py",
+            "gh gist delete 5b0e",
+            "gh gist clone 5b0e",
+        ):
+            with self.subTest(command=command):
+                self.assert_none(command)
+
+    def test_gh_no_list_namespaces_defer(self):
+        # In NO FAMILIES list — plain defer: downloads write files into
+        # cwd (N-F4 sibling rule), auth/secret/variable handle credential
+        # material, api is an arbitrary HTTP verb surface, `repo
+        # autolink`/`repo deploy-key` are mixed read/write sub-namespaces
+        # and a bare namespace or unknown verb has no class at all.
+        for command in (
+            "gh run download 55",
+            "gh release download v1",
+            "gh auth token",
+            "gh auth login",
+            "gh api repos",
+            "gh api -X DELETE repos/o/r",
+            "gh secret list",
+            "gh secret set KEY",
+            "gh variable get X",
+            "gh repo autolink list",
+            "gh pr frobnicate",
+            "gh workflow",
+        ):
+            with self.subTest(command=command):
+                self.assert_none(command)
+
+    def test_gh_ask_specs_reach_t6(self):
+        # The family ask_specs merge into T6_ASK_TABLE verbatim.
+        self.assertEqual(
+            security_gate.T6_ASK_TABLE["gh"],
+            cli_families.FAMILIES["gh"]["ask_specs"],
+        )
+        for command in (
+            "gh pr merge",
+            "gh pr checkout 12",
+            "gh issue create",
+            "gh run delete 55",
+            "gh repo clone o/r",
+        ):
+            with self.subTest(command=command):
+                decision = security_gate.evaluate_security(command)
+                self.assertEqual(decision.decision, "ask", command)
+                self.assertEqual(decision.category, "T6_HIGH_RISK_GH", command)
+
+    def test_gh_ro_verbs_stay_allow(self):
+        for command in (
+            "gh pr list",
+            "gh pr checks",
+            "gh issue status",
+            "gh run view 55",
+            "gh repo view",
+            "gh release list",
+            "gh search issues actx",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    security_gate.evaluate_security(command).decision, "allow"
+                )
+
+    def test_gh_stream_specs_never_wrap(self):
+        # `run watch` and `pr checks --watch` wait on remote state.
+        for argv in (
+            ["gh", "run", "watch"],
+            ["gh", "pr", "checks", "--watch"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), "never_wrap")
+        # The non-watch forms stay on the default class.
+        self.assertEqual(
+            hang_policy.classify(["gh", "pr", "checks"]), "default"
+        )
+        self.assertEqual(
+            hang_policy.classify(["gh", "run", "view", "55"]), "default"
+        )
+
+
+class RunPrefixSplitTests(unittest.TestCase):
+    """TK-55 F3/F4: shared exec-prefix scanner — pure and fail-safe (any
+    anomaly returns None; callers keep the original tokens)."""
+
+    def test_uv_run_split_matrix(self):
+        cases = (
+            (["uv", "run", "pytest", "-q"],
+             (["pytest", "-q"], ["uv", "run"])),
+            (["uv", "run", "--with", "requests", "python", "x.py"],
+             (["python", "x.py"], ["uv", "run", "--with", "requests"])),
+            (["uv", "run", "--env-file", ".env", "pytest"],
+             (["pytest"], ["uv", "run", "--env-file", ".env"])),
+            # `--flag=value` form of a value flag.
+            (["uv", "run", "--with=requests", "pytest"],
+             (["pytest"], ["uv", "run", "--with=requests"])),
+            # Boolean prefix flags are skipped singly.
+            (["uv", "run", "--no-sync", "--isolated", "pytest"],
+             (["pytest"], ["uv", "run", "--no-sync", "--isolated"])),
+        )
+        for tokens, expected in cases:
+            with self.subTest(tokens=tokens):
+                self.assertEqual(
+                    cli_families.run_prefix_split(tokens), expected
+                )
+
+    def test_uv_run_env_file_value_stays_in_consumed(self):
+        # REQ-04: the skipped prefix tokens (file-valued flags included)
+        # stay visible to token-level scans via `consumed`.
+        inner, consumed = cli_families.run_prefix_split(
+            ["uv", "run", "--env-file", ".env", "pytest"]
+        )
+        self.assertEqual(inner, ["pytest"])
+        self.assertIn(".env", consumed)
+        self.assertIn("--env-file", consumed)
+
+    def test_uv_run_anomalies_return_none(self):
+        for tokens in (
+            ["uv", "run", "--unknownflag", "pytest"],  # unknown flag: bail
+            ["uv", "run"],                             # no inner command
+            ["uv", "run", "--with"],                   # dangling value flag
+            ["uv", "sync"],                            # verb is not `run`
+            ["uv"],                                    # bare head
+        ):
+            with self.subTest(tokens=tokens):
+                self.assertIsNone(cli_families.run_prefix_split(tokens))
+
+    def test_xcrun_split_matrix(self):
+        cases = (
+            (["xcrun", "simctl", "erase", "all"],
+             (["simctl", "erase", "all"], ["xcrun"])),
+            (["xcrun", "--sdk", "macosx", "simctl", "list"],
+             (["simctl", "list"], ["xcrun", "--sdk", "macosx"])),
+            (["xcrun", "--toolchain", "tc", "--log", "simctl", "list"],
+             (["simctl", "list"], ["xcrun", "--toolchain", "tc", "--log"])),
+        )
+        for tokens, expected in cases:
+            with self.subTest(tokens=tokens):
+                self.assertEqual(
+                    cli_families.run_prefix_split(tokens), expected
+                )
+
+    def test_xcrun_anomalies_return_none(self):
+        for tokens in (
+            ["xcrun", "otool", "x"],          # tool is not simctl
+            ["xcrun"],                        # no tool at all
+            ["xcrun", "--sdk"],               # dangling value flag
+            ["xcrun", "--bogus", "simctl"],   # unknown flag: bail
+        ):
+            with self.subTest(tokens=tokens):
+                self.assertIsNone(cli_families.run_prefix_split(tokens))
+
+    def test_absolute_path_head_unwraps(self):
+        # Absolute-path invocation matches by basename — zero-import
+        # constraint keeps this inside run_prefix_split.
+        inner, consumed = cli_families.run_prefix_split(
+            ["/usr/bin/uv", "run", "rm", "-rf", "~"]
+        )
+        self.assertEqual(inner, ["rm", "-rf", "~"])
+        inner, _ = cli_families.run_prefix_split(
+            ["/usr/bin/xcrun", "simctl", "erase", "all"]
+        )
+        self.assertEqual(inner, ["simctl", "erase", "all"])
+
+    def test_non_prefix_heads_return_none(self):
+        for tokens in (
+            ["pytest", "-q"],
+            ["env", "uv", "run", "pytest"],  # head is env, not uv
+            [],
+        ):
+            with self.subTest(tokens=tokens):
+                self.assertIsNone(cli_families.run_prefix_split(tokens))
+
+
+class GradleTaskClassTests(unittest.TestCase):
+    """TK-55 F5: positional task classification on the last `:`-segment —
+    ask markers beat ro bases, everything else is unknown."""
+
+    def test_class_matrix(self):
+        cases = (
+            (":app:assembleDebug", "ro"),
+            ("test", "ro"),
+            ("testDebugUnitTest", "ro"),
+            ("buildNeeded", "ro"),
+            ("publish", "ask"),
+            (":app:publish", "ask"),
+            (":app:clean", "ask"),
+            # ASK wins over the ro-base prefix.
+            ("assembleAndPublish", "ask"),
+            ("publishToMavenLocal", "ask"),
+            ("clean", "ask"),
+            ("weirdTask", "unknown"),
+        )
+        for token, expected in cases:
+            with self.subTest(token=token):
+                self.assertEqual(cli_families.gradle_task_class(token), expected)
 
 
 class ActxUnwrapTests(unittest.TestCase):

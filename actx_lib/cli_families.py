@@ -1,11 +1,13 @@
 """Declarative table of CLI families (TK-39; docker TK-41, kubectl/helm TK-40).
 
-Pure data + one pure function (effective_verbs), zero imports: rewriter,
-security_gate and hang_policy all read it directly, so the cheap hook/rewrite
+Pure data + pure functions (effective_verbs, run_prefix_split,
+gradle_task_class), zero imports: rewriter, security_gate and hang_policy
+all read it directly, so the cheap hook/rewrite
 import boundary must not gain transitive modules. Connecting a new CLI family
 is a data edit here, not a new predicate. Not only cloud CLIs live here:
 docker joined in TK-41, kubectl/helm in TK-40 and bq/terraform/redis-cli in
-TK-43 (wave-2 plan); flag-sensitive streaming forms stay in dedicated
+TK-43 (wave-2 plan); gh, RUN_PREFIXES and the gradle task tables joined in
+TK-55; flag-sensitive streaming forms stay in dedicated
 hang_policy predicates (`_is_docker`, `_is_kubectl`, `_is_redis_monitor`)
 because a plain prefix table cannot express them.
 
@@ -240,6 +242,56 @@ FAMILIES = {
                       ("Config", "Set")),
         "stream_specs": (("GET",), ("get",)),
     },
+    # gh (TK-55 F2): every verb below verified against `gh <ns> --help`
+    # (gh 2.100.0). ro_verbs are the observational sequences; ask_specs
+    # carry every mutating subcommand of the covered namespaces. In NO
+    # list (-> defer, never rewrite): `run download`/`release download`
+    # write artifact files into cwd (N-F4 sibling rule), the `auth`/
+    # `secret`/`variable` namespaces print or set credential material and
+    # `api` is an arbitrary HTTP verb surface; the mixed read/write
+    # sub-namespaces `repo autolink`/`repo deploy-key` stay out too.
+    # `run watch` and `pr checks --watch` wait on remote state ->
+    # stream_specs (never-wrap).
+    "gh": {
+        "global_flags": (),
+        "value_flags": ("-R", "--repo"),
+        "ro_verbs": (
+            ("pr", "list"), ("pr", "view"), ("pr", "status"),
+            ("pr", "diff"), ("pr", "checks"),
+            ("issue", "list"), ("issue", "view"), ("issue", "status"),
+            ("run", "list"), ("run", "view"),
+            ("repo", "list"), ("repo", "view"),
+            ("release", "list"), ("release", "view"),
+            ("workflow", "list"), ("workflow", "view"),
+            ("search",), ("gist", "list"),
+        ),
+        "ask_specs": (
+            ("pr", "merge"), ("pr", "create"), ("pr", "close"),
+            ("pr", "reopen"), ("pr", "comment"), ("pr", "edit"),
+            ("pr", "review"), ("pr", "checkout"), ("pr", "ready"),
+            ("pr", "lock"), ("pr", "unlock"),
+            ("pr", "revert"), ("pr", "update-branch"),
+            ("issue", "create"), ("issue", "comment"), ("issue", "close"),
+            ("issue", "reopen"), ("issue", "delete"), ("issue", "edit"),
+            ("issue", "transfer"), ("issue", "pin"), ("issue", "unpin"),
+            ("issue", "lock"), ("issue", "unlock"), ("issue", "develop"),
+            ("run", "delete"), ("run", "cancel"), ("run", "rerun"),
+            ("repo", "create"), ("repo", "fork"), ("repo", "delete"),
+            ("repo", "archive"), ("repo", "unarchive"), ("repo", "rename"),
+            ("repo", "edit"), ("repo", "sync"), ("repo", "set-default"),
+            ("repo", "clone"),
+            ("release", "create"), ("release", "delete"),
+            ("release", "edit"), ("release", "upload"),
+            ("release", "delete-asset"),
+            ("workflow", "run"), ("workflow", "enable"),
+            ("workflow", "disable"),
+            ("gist", "create"), ("gist", "edit"), ("gist", "delete"),
+            ("gist", "rename"), ("gist", "clone"),
+        ),
+        "stream_specs": (
+            ("run", "watch"), ("pr", "checks", "--watch"),
+        ),
+    },
 }
 
 
@@ -284,3 +336,179 @@ ACTX_GLOBAL_FLAGS = (
 )
 ACTX_RUN_LITERAL = "run"
 ACTX_RUN_FLAGS = ("--errors", "--failures", "--digest")
+
+
+# Exec-prefixes whose argv continues with an inner command ("uv run tsc",
+# "xcrun simctl erase"). Security gate unwraps these to the effective head;
+# the rewriter uses the inner head for write-flag checks. Data only —
+# both consumers share this table (single source, TK-55 F3/F4).
+#
+#   verb        -- required literal second token ("uv run ..."); None means
+#                  the head invokes a tool directly (xcrun).
+#   only_tool   -- when present, the inner head must equal it (xcrun is
+#                  unwrapped only in front of simctl — conservative, the
+#                  generic `xcrun <tool>` form stays opaque).
+#   value_flags -- flags consuming the next token as their value.
+#   bool_flags  -- single-token boolean flags.
+# `--flag=value` forms of both are handled by the scanner itself.
+RUN_PREFIXES = {
+    # `uv run --help` (uv 0.9.x): every flag below verified as a real
+    # value-taking or boolean flag of the run subcommand.
+    "uv": {
+        "verb": "run",
+        "value_flags": (
+            "--extra", "--no-extra", "--group", "--no-group",
+            "--only-group", "--env-file",
+            "--with", "--with-editable", "--with-requirements",
+            "--package",
+            "--index", "--default-index", "-i", "--index-url",
+            "--extra-index-url", "-f", "--find-links",
+            "--index-strategy", "--keyring-provider",
+            "-P", "--upgrade-package", "--resolution", "--prerelease",
+            "--fork-strategy", "--exclude-newer",
+            "--reinstall-package", "--link-mode",
+            "-C", "--config-setting",
+            "--no-build-isolation-package", "--no-build-package",
+            "--no-binary-package",
+            "--cache-dir", "--refresh-package",
+            "-p", "--python",
+            "--color", "--allow-insecure-host",
+            "--directory", "--project", "--config-file",
+        ),
+        "bool_flags": (
+            "--all-extras", "--no-dev", "--no-default-groups",
+            "--all-groups", "-m", "--module", "--only-dev",
+            "--no-editable", "--exact", "--no-env-file",
+            "--isolated", "--active", "--no-sync", "--locked",
+            "--frozen", "-s", "--script", "--gui-script",
+            "--all-packages", "--no-project",
+            "--no-index",
+            "-U", "--upgrade", "--no-sources",
+            "--reinstall", "--compile-bytecode",
+            "--no-build-isolation", "--no-build", "--no-binary",
+            "-n", "--no-cache", "--refresh",
+            "--managed-python", "--no-managed-python",
+            "--no-python-downloads",
+            "-q", "--quiet", "-v", "--verbose", "--native-tls",
+            "--offline", "--no-progress", "--no-config",
+            "-h", "--help",
+        ),
+    },
+    # `xcrun --help` (Xcode CLT): --sdk/--toolchain take a value; the rest
+    # are boolean lookup/log selectors.
+    "xcrun": {
+        "verb": None,
+        "only_tool": "simctl",
+        "value_flags": ("--sdk", "--toolchain"),
+        "bool_flags": (
+            "-l", "--log", "-f", "--find", "-r", "--run",
+            "-n", "--no-cache", "-k", "--kill-cache",
+            "--show-sdk-path", "--show-sdk-version",
+            "--show-sdk-build-version", "--show-sdk-platform-path",
+            "--show-sdk-platform-version", "--show-toolchain-path",
+            "-v", "--verbose", "--version", "-h", "--help",
+        ),
+    },
+}
+
+
+def run_prefix_split(tokens: list[str]) -> tuple[list[str], list[str]] | None:
+    """If tokens match a RUN_PREFIXES pattern, return (inner_argv, consumed).
+
+    inner_argv starts at the inner command's head; consumed holds the
+    skipped wrapper tokens (prefix flags and their values) so callers can
+    keep them visible to token-level scans. Returns None when tokens do not
+    match a run-prefix or the inner head cannot be located (unknown flag,
+    missing inner command) — callers then keep the original tokens
+    (fail-open).
+    """
+    if not tokens:
+        return None
+    # basename without os.path — cli_families keeps zero imports (hook/rewrite
+    # import boundary); covers `/usr/bin/uv run ...` alongside bare `uv`.
+    spec = RUN_PREFIXES.get(tokens[0].rsplit("/", 1)[-1])
+    if spec is None:
+        return None
+    idx = 1
+    if spec["verb"] is not None:
+        if len(tokens) < 2 or tokens[1] != spec["verb"]:
+            return None
+        idx = 2
+    only_tool = spec.get("only_tool")
+    value_flags = spec.get("value_flags", ())
+    bool_flags = spec.get("bool_flags", ())
+    n = len(tokens)
+    while idx < n:
+        tok = tokens[idx]
+        if tok in value_flags:
+            idx += 2  # the flag and its separate value token
+            continue
+        if tok.startswith("-"):
+            name = tok.split("=", 1)[0]
+            if name in value_flags or name in bool_flags:
+                idx += 1  # --flag=value / boolean flag: single token
+                continue
+            return None  # unknown flag: bail, keep the original tokens
+        # First positional token is the inner command's head.
+        if only_tool is not None and tok != only_tool:
+            return None
+        return tokens[idx:], tokens[:idx]
+    return None
+
+
+# Gradle task grammar (TK-55 F5): tasks are positional tokens, addressable
+# as `name` or `:module:taskVariant`; flags are consumed per these tables.
+GRADLE_VALUE_FLAGS = (
+    "--tests", "-p", "--project-dir", "-b", "--build-file",
+    "-c", "--settings-file", "-I", "--init-script",
+    "-g", "--gradle-user-home", "--project-cache-dir",
+    "--console", "--warning-mode", "--max-workers", "--priority",
+    "--exclude-task", "-x", "--include-build",
+    "--dependency-verification", "--configuration-cache-problems",
+    "-P", "--project-prop", "-D", "--system-prop",
+)
+# `-P`/`-D` are also used attached (`-Pprop=v`, `-Dprop=v`): a token merely
+# STARTING with one of these prefixes is skipped whole.
+GRADLE_ATTACHED_VALUE_PREFIXES = ("-P", "-D")
+GRADLE_BOOL_FLAGS = (
+    "--offline", "--daemon", "--no-daemon", "--parallel", "--no-parallel",
+    "-q", "--quiet", "-w", "--warn", "-i", "--info", "-d", "--debug",
+    "-s", "--stacktrace", "-S", "--full-stacktrace",
+    "--scan", "--no-scan", "--watch-fs", "--no-watch-fs",
+    "-t", "--continuous", "--build-cache", "--no-build-cache",
+    "--configure-on-demand", "--no-configure-on-demand",
+    "--configuration-cache", "--no-configuration-cache",
+    "--profile", "-m", "--dry-run", "--rerun-tasks",
+    "--continue", "--no-continue", "--fail-fast",
+    "-a", "--no-rebuild", "-u", "--no-search-upward",
+    "--refresh-dependencies", "-v", "--version", "-h", "--help",
+)
+# Deliberately NOT declared — they fail closed as unknown flags:
+# daemon-action flags (`--stop`, `--status`, `--foreground`) and the
+# mutating `--write-locks`, `--update-locks`, `--write-verification-metadata`
+# (they rewrite lockfiles/verification metadata, so they must never
+# decorate an RO task scan).
+GRADLE_RO_BASES = (
+    "assemble", "build", "test", "check", "lint", "tasks",
+    "dependencies", "dependencyinsight", "help", "properties",
+    "projects", "components", "model",
+)
+GRADLE_ASK_MARKERS = (
+    "publish", "upload", "clean", "sign", "deploy", "release", "push",
+)
+
+
+def gradle_task_class(token: str) -> str:
+    """Classify a positional gradle task token -> "ask" | "ro" | "unknown".
+
+    Uses the last `:`-segment (":app:assembleDebug" -> "assembleDebug").
+    ASK wins over RO: a segment containing a publish/clean-class marker
+    (substring, case-insensitive) is ask even when it starts with an RO
+    base ("assembleAndPublish"). RO = segment starts with an RO base.
+    Anything else is "unknown"."""
+    segment = token.rsplit(":", 1)[-1].lower()
+    if any(marker in segment for marker in GRADLE_ASK_MARKERS):
+        return "ask"
+    if any(segment.startswith(base) for base in GRADLE_RO_BASES):
+        return "ro"
+    return "unknown"
