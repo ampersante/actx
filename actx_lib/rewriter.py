@@ -56,12 +56,14 @@ _DENIED_WRITE_FLAGS = {
     # getopt_long resolves unambiguous abbreviations (verified on Apple
     # sort: `sort --o file` writes); --output is the only --o* long option.
     "sort": {"prefix": ("--o",), "attach": ("-o",)},
-    "tree": {"eq": ("--output",), "attach": ("-o",)},
+    # GNU tree resolves long-option abbreviations (`--out` -> --output);
+    # on BSD tree long options don't exist and the flag simply errors.
+    "tree": {"prefix": ("--o",), "attach": ("-o",)},
     # jest uses yargs: dashed spellings map onto the camelCase options.
     "jest": {"eq": ("--outputFile", "--output-file",
                     "--coverageDirectory", "--coverage-directory")},
     "vitest": {"eq": ("--outputFile", "--output-file"),
-               "prefix": ("--outputFile.",)},
+               "prefix": ("--outputFile.", "--output-file.")},
     # optionator accepts unambiguous long-option abbreviations (any
     # non-empty prefix of --output-file: --o, --ou, --out, ...); it is the
     # only --o* long option in eslint's space.
@@ -77,6 +79,17 @@ _DENIED_WRITE_FLAGS = {
     # without catching the RO --junit-prefix flag.
     "pytest": {"eq": ("--basetemp", "--junitxml", "--junit-xml"),
                "prefix": ("--junitx", "--junit-x", "--baset")},
+    # Acceptance residuals (pre-existing holes, same defer outcome):
+    # rg --pre/--pre-glob execute an arbitrary command per file —
+    # exec-capable, not a write flag, but refused here by the same
+    # mechanism ("--pretty" pins the eq form: a "--pre" prefix would FP).
+    "rg": {"eq": ("--pre", "--pre-glob")},
+    # psql -o/--output writes query output to a file; psql uses
+    # getopt_long, so abbreviations resolve too (--o is unique).
+    "psql": {"prefix": ("--o",), "attach": ("-o",)},
+    # getopt_long abbreviations of --follow (--f/--fo/...) defeat the
+    # never-wrap check and would hang the wrapper — defer instead.
+    "tail": {"prefix": ("--f",), "attach": ("-f", "-F")},
 }
 
 
@@ -105,6 +118,10 @@ def _has_denied_write_flag(head, argv):
                 return True
         if tok.startswith("-"):
             name = tok.lstrip("-").split("=", 1)[0]
+            # go test accepts test-binary flags under the `-test.` prefix
+            # verbatim (`go test -test.coverprofile=x` writes the file).
+            if head == "go" and name.startswith("test."):
+                name = name[5:]
             for flag in spec.get("name", ()):
                 if name == flag:
                     return True

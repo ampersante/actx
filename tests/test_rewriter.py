@@ -286,6 +286,17 @@ class RewriteUnitTests(unittest.TestCase):
             "pytest --junitx=/tmp/x",                # argparse abbrev
             "pytest --junit-x=/tmp/x",
             "pytest --baset /tmp/x",
+            # Re-acceptance round 4: test.-prefix + residual exec/write flags.
+            "go test -test.coverprofile=/tmp/x ./...",  # test-binary prefix
+            "go test --test.outputdir /tmp/x ./...",
+            "vitest --output-file.json=/tmp/x",
+            "tree --out /tmp/x",                        # GNU abbrev
+            "rg --pre rm pattern",                      # exec per file
+            "rg --pre-glob='*.sh' rm pattern",
+            "psql -o /tmp/x -c 'select 1'",             # writes query output
+            "psql --o=/tmp/x -c 'select 1'",
+            "tail --f /var/log/syslog",                 # abbrev of --follow
+            "tail --fol=name /var/log/syslog",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(rewrite(command))
