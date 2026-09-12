@@ -183,6 +183,37 @@ def _is_jest_vitest_watch(argv):
     return False
 
 
+def _is_watch_fuzz_debug(argv):
+    """TK-55: watch/fuzz/debugger-attach flags on rewritten heads stream
+    forever or wait for a debugger — never_wrap (jest/vitest watch live in
+    their own predicate above)."""
+    head = argv[0]
+    rest = argv[1:]
+    if head == "tsc":
+        # tsc strips 1-2 dashes, case-insensitive; -w is the short form.
+        return any(t.lower().lstrip("-") in ("watch", "w") for t in rest)
+    if head == "ruff":
+        return "--watch" in rest
+    if head == "go":
+        for tok in rest:
+            name = tok.lstrip("-").split("=", 1)[0]
+            if name.startswith("test."):
+                name = name[5:]
+            if name == "fuzz":
+                return True
+        return False
+    if head == "vitest":
+        for tok in rest:
+            name = tok.split("=", 1)[0]
+            if name in ("--inspect", "--inspect-brk", "--api",
+                        "--browser") or name.startswith("--browser."):
+                return True
+        return False
+    if head == "pytest":
+        return "--pdb" in rest
+    return False
+
+
 def _is_gh(argv):
     """TK-55: `gh pr checks <N> --watch` streams until checks finish, but the
     positional PR number sits between the verb and the flag, which the
@@ -279,6 +310,7 @@ _NEVER_WRAP_PREDICATES = (
     _is_cloud_stream,
     _is_gh,
     _is_jest_vitest_watch,
+    _is_watch_fuzz_debug,
 )
 
 

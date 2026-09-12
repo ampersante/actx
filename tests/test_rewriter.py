@@ -326,6 +326,12 @@ class RewriteUnitTests(unittest.TestCase):
             "ruff check --add-noqa .",              # rewrites sources
             "tsc --init",                           # writes tsconfig.json
             "tsc -init",
+            # Round 8: swiftlint/swiftformat write flags (doc-cited).
+            "swiftlint lint --autocorrect",         # alias of --fix
+            "swiftlint lint --output /tmp/x",
+            "swiftlint lint --write-baseline /tmp/x",
+            "swiftlint lint --benchmark",
+            "swiftformat --lint --report /tmp/x .",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(rewrite(command))
@@ -379,6 +385,8 @@ class RewriteUnitTests(unittest.TestCase):
             "uniq --skip-fields=2 /tmp/in",
             "helm list --output json",       # RO format flag
             "sqlite3 :memory: -cmd 'select 1'",  # RO -cmd payload
+            "swiftlint lint .",                  # plain RO lint
+            "swiftformat --lint .",              # --output inert in lint
             "uv run pytest",
             "uv run --with requests pytest",
         ):

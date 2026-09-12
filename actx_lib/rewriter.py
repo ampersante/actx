@@ -110,6 +110,14 @@ _DENIED_WRITE_FLAGS = {
     # `terraform plan -out[=]<file>` writes a plan file (canonical
     # single-dash form of the documented =-form gap).
     "terraform": {"eq": ("-out",)},
+    # swiftlint lint: --autocorrect is an exact alias of the denied --fix
+    # (@Flag on the same `fix` var); --output/--write-baseline/--benchmark
+    # write files (SAP has no abbreviations).
+    "swiftlint": {"eq": ("--autocorrect", "--output", "--write-baseline",
+                         "--benchmark")},
+    # swiftformat --lint --report <file> writes the report (--output is
+    # inert in --lint mode — deliberately not listed).
+    "swiftformat": {"eq": ("--report",)},
 }
 
 

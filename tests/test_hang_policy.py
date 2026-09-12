@@ -273,6 +273,43 @@ class JestVitestWatchTests(unittest.TestCase):
                 self.assertEqual(hang_policy.classify(argv), DEFAULT)
 
 
+class WatchFuzzDebugTests(unittest.TestCase):
+    """TK-55: watch/fuzz/debugger-attach flags on rewritten heads."""
+
+    def test_never_wrap(self):
+        for argv in (
+            ["tsc", "--watch"],
+            ["tsc", "-w"],
+            ["tsc", "--build", "--watch"],
+            ["ruff", "check", "--watch", "."],
+            ["go", "test", "-fuzz=FuzzX", "."],
+            ["go", "test", "-test.fuzz=FuzzX", "."],
+            ["vitest", "run", "--inspect-brk"],
+            ["vitest", "run", "--api"],
+            ["vitest", "run", "--browser.name=chrome"],
+            ["pytest", "--pdb"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), NEVER_WRAP)
+
+    def test_default(self):
+        for argv in (
+            ["tsc", "--noEmit"],
+            ["ruff", "check", "."],
+            ["vitest", "run"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), DEFAULT)
+        # `go test`/`pytest` are _LONG_OPS heads -> generous; an inert
+        # -fuzztime alone is not never_wrap.
+        for argv in (
+            ["go", "test", "-fuzztime=10s", "."],
+            ["pytest", "-q"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), "generous")
+
+
 class FlutterTests(unittest.TestCase):
     def test_run_is_never_wrap(self):
         self.assertEqual(hang_policy.classify(["flutter", "run"]), NEVER_WRAP)
