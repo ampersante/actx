@@ -127,20 +127,29 @@ def sql_payloads(head, rest):
     deliberately not classified: they are not SQL. They are still covered
     by the whole-chunk danger scan on the gate side."""
     payloads = []
+    positional_idx = []
     i = 0
     n = len(rest)
     while i < n:
         tok = rest[i]
-        if tok in ("-c", "--command"):
+        # `-cmd` (sqlite3; duckdb mirrors) takes a COMMAND payload run
+        # before stdin — meta-commands (.shell/.output/.read) inside it
+        # must reach the classifier like any -c payload.
+        if tok in ("-c", "--command", "-cmd"):
             if i + 1 < n:
                 payloads.append(rest[i + 1])
             i += 2
             continue
         if tok.startswith("--command="):
             payloads.append(tok.split("=", 1)[1])
+        elif not tok.startswith("-"):
+            positional_idx.append(i)
         i += 1
-    if not payloads and head == "sqlite3":
-        positionals = [tok for tok in rest if not tok.startswith("-")]
-        if len(positionals) >= 2:
-            payloads.append(positionals[-1])
+    if head == "sqlite3" and len(positional_idx) >= 2:
+        # The last positional is the SQL argument (first is the db file).
+        # Classified alongside -c/-cmd payloads, not only in their
+        # absence: `sqlite3 db -cmd 'select 1' 'drop table x'` would
+        # otherwise smuggle an unclassified statement. Flag values are
+        # excluded above, so `-cmd 'select 1' db` counts just `db`.
+        payloads.append(rest[positional_idx[-1]])
     return payloads

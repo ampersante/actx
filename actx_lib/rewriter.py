@@ -91,6 +91,13 @@ _DENIED_WRITE_FLAGS = {
     # getopt_long abbreviations of --follow (--f/--fo/...) defeat the
     # never-wrap check and would hang the wrapper — defer instead.
     "tail": {"prefix": ("--f",), "attach": ("-f", "-F")},
+    # `helm template --output-dir <dir>` writes every rendered manifest;
+    # helm (pflag) has no abbreviations. Eq only: `helm list --output`
+    # is a legit RO format flag.
+    "helm": {"eq": ("--output-dir",)},
+    # `terraform plan -out[=]<file>` writes a plan file (canonical
+    # single-dash form of the documented =-form gap).
+    "terraform": {"eq": ("-out",)},
 }
 
 
@@ -260,6 +267,24 @@ def _wc_family_ok(tokens):
         for tok in tokens
     ):
         return False
+    if head == "uniq":
+        # POSIX `uniq [input [output]]`: a second positional is a write
+        # path — skip uniq's value-flags (-f/-s/-w and long forms) first.
+        positionals = 0
+        idx = 1
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if tok in ("-f", "-s", "-w", "--skip-fields",
+                       "--skip-chars", "--check-chars"):
+                idx += 2
+                continue
+            if tok.startswith("-"):
+                idx += 1
+                continue
+            positionals += 1
+            idx += 1
+        if positionals >= 2:
+            return False
     return True
 
 

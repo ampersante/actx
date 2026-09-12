@@ -302,6 +302,17 @@ class RewriteUnitTests(unittest.TestCase):
             "tail --f /var/log/syslog",                 # abbrev of --follow
             "tail --fol=name /var/log/syslog",
             "tail -F /var/log/syslog",
+            # Round 5: smuggled payloads, positional writes, flag writes.
+            "sqlite3 :memory: -cmd '.shell id' 'select 1'",  # meta exec
+            "sqlite3 :memory: -cmd '.output /tmp/x' 'select 1'",
+            "sqlite3 :memory: -cmd '.read /tmp/x' 'select 1'",
+            "duckdb -cmd '.shell id' -c 'select 1'",
+            "uniq /tmp/in /tmp/out",                      # positional output
+            "uniq -c /tmp/in /tmp/out",
+            "helm template --output-dir /tmp/x mychart",
+            "helm template --output-dir=/tmp/x mychart",
+            "terraform plan -out /tmp/x",
+            "terraform plan -out=/tmp/x",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(rewrite(command))
@@ -350,6 +361,11 @@ class RewriteUnitTests(unittest.TestCase):
             "tsc --project .",
             "pytest -q",
             "pytest --junit-prefix x", # RO string flag, not a write path
+            "uniq -c /tmp/in",               # single positional
+            "uniq -f 2 /tmp/in",             # value-flag not a positional
+            "uniq --skip-fields=2 /tmp/in",
+            "helm list --output json",       # RO format flag
+            "sqlite3 :memory: -cmd 'select 1'",  # RO -cmd payload
             "uv run pytest",
             "uv run --with requests pytest",
         ):
