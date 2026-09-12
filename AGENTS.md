@@ -60,6 +60,15 @@ One language per file; technical terms stay English.
 - Run `python3 -m unittest discover tests` before declaring a task done.
 - Verify claims with tool output; do not record an agent/memory claim as fact unverified.
 
+### Security-surface tasks (deny/flag/classifier changes)
+Lessons from the TK-55 acceptance loop (8 rounds for what one enumeration pass covers):
+
+- **Specify denied flags by semantic class, never by literal spelling** — "writes output to a user-named path", "executes a named program", "streams forever", "mutates source files". A literal list (`tree -o`, `tsc --outFile`) invites spelling-equivalence bypasses.
+- **Per denied flag, enumerate the parser's equivalence classes** in the same step: dash-count (`-flag` ≡ `--flag` for go/tsc), case, unambiguous abbreviations (getopt_long, optionator, argparse), kebab↔camel aliases (yargs/cac), tool-specific prefixes (`go test -test.`), dotted sub-options (vitest `--outputFile.<r>`), attached values (`-ofile`), the POSIX `--` separator, and positional write forms (`uniq in out`).
+- **When adding one denied flag, enumerate its siblings** from that tool's `--help`/docs in the same step (`rg --pre` → `--pre-glob`/`--hostname-bin`; `psql -o` → `-L`; `helm --output-dir` → `--post-renderer`).
+- **First acceptance pass = breadth-first surface enumeration** over every rewritten head (each member doc-cited or live-proven), then depth verification. Never prompt acceptance as "verify these fixes" — that anchors the tester into one-finding-per-round.
+- **Parallel verifiers partition by head/tool** after the enumeration spec exists; parallelism fixes throughput, not a wrong audit frame.
+
 ### Journal rules
 - Append-only, causal entries; the record format is shown in `journal.md`.
 
