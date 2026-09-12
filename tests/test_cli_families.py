@@ -393,10 +393,10 @@ class DataFamiliesTests(unittest.TestCase):
         )
         self.assert_rewrite("terraform plan -input=false")
         self.assert_none("terraform plan -out tfplan")
-        # Documented limitation: `-out=file` is a single token both the
-        # rewriter predicate and the T6 matcher cannot see (wave-2 plan
-        # E5.6) - conservative gap, human-approved.
-        self.assert_rewrite("terraform plan -out=tfplan")
+        # TK-55 round 5b: the =-form gap is closed — `-out=file` is denied
+        # by the _DENIED_WRITE_FLAGS eq match (was a documented wave-2
+        # limitation, E5.6).
+        self.assert_none("terraform plan -out=tfplan")
         self.assertEqual(
             security_gate.evaluate_security("terraform plan -out=tfplan").decision,
             "allow",

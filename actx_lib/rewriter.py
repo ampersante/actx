@@ -55,7 +55,10 @@ _DENIED_WRITE_FLAGS = {
     "git": {"prefix": ("--out",)},
     # getopt_long resolves unambiguous abbreviations (verified on Apple
     # sort: `sort --o file` writes); --output is the only --o* long option.
-    "sort": {"prefix": ("--o",), "attach": ("-o",)},
+    # --compress-program=<prog> execs the program on temp-file spills
+    # (GNU; accepted-but-inert on BSD sort).
+    "sort": {"eq": ("--compress-program",), "prefix": ("--o",),
+             "attach": ("-o",)},
     # GNU tree resolves long-option abbreviations (`--out` -> --output);
     # on BSD tree long options don't exist and the flag simply errors.
     "tree": {"prefix": ("--o",), "attach": ("-o",)},
@@ -93,8 +96,9 @@ _DENIED_WRITE_FLAGS = {
     "tail": {"prefix": ("--f",), "attach": ("-f", "-F")},
     # `helm template --output-dir <dir>` writes every rendered manifest;
     # helm (pflag) has no abbreviations. Eq only: `helm list --output`
-    # is a legit RO format flag.
-    "helm": {"eq": ("--output-dir",)},
+    # is a legit RO format flag. --post-renderer execs the named program;
+    # the prefix also covers --post-renderer-args.
+    "helm": {"eq": ("--output-dir",), "prefix": ("--post-renderer",)},
     # `terraform plan -out[=]<file>` writes a plan file (canonical
     # single-dash form of the documented =-form gap).
     "terraform": {"eq": ("-out",)},

@@ -311,6 +311,10 @@ class RewriteUnitTests(unittest.TestCase):
             "uniq -c /tmp/in /tmp/out",
             "helm template --output-dir /tmp/x mychart",
             "helm template --output-dir=/tmp/x mychart",
+            "helm template --post-renderer=/tmp/x.sh mychart",
+            "helm template --post-renderer /tmp/x.sh mychart",
+            "sort --compress-program=/tmp/x in",        # GNU exec on spill
+            "sort --compress-program /tmp/x in",
             "terraform plan -out /tmp/x",
             "terraform plan -out=/tmp/x",
         ):
