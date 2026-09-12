@@ -278,6 +278,11 @@ class RewriteUnitTests(unittest.TestCase):
             "tsc -generateTrace /tmp/x a.ts",
             "tsc -tsbuildinfofile /tmp/x a.ts",
             "eslint --outp /tmp/x .",                # optionator abbrev
+            "eslint --o /tmp/x .",                   # optionator: any prefix
+            "eslint --out /tmp/x .",
+            "sort --o /tmp/x in",                    # getopt_long abbrev
+            "sort --out=/tmp/x in",
+            "vitest --output-file=/tmp/x",
             "pytest --junitx=/tmp/x",                # argparse abbrev
             "pytest --junit-x=/tmp/x",
             "pytest --baset /tmp/x",

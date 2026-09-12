@@ -53,16 +53,20 @@ _WRITE_TOKENS = frozenset({"--fix", "fix", "format"})
 # the former per-predicate `sort -o`/`--output` and `git --out*` rejects.
 _DENIED_WRITE_FLAGS = {
     "git": {"prefix": ("--out",)},
-    "sort": {"eq": ("--output",), "attach": ("-o",)},
+    # getopt_long resolves unambiguous abbreviations (verified on Apple
+    # sort: `sort --o file` writes); --output is the only --o* long option.
+    "sort": {"prefix": ("--o",), "attach": ("-o",)},
     "tree": {"eq": ("--output",), "attach": ("-o",)},
     # jest uses yargs: dashed spellings map onto the camelCase options.
     "jest": {"eq": ("--outputFile", "--output-file",
                     "--coverageDirectory", "--coverage-directory")},
-    "vitest": {"eq": ("--outputFile",), "prefix": ("--outputFile.",)},
-    # optionator accepts unambiguous long-option abbreviations; "--outp"
-    # uniquely prefixes --output-file inside eslint's option space.
+    "vitest": {"eq": ("--outputFile", "--output-file"),
+               "prefix": ("--outputFile.",)},
+    # optionator accepts unambiguous long-option abbreviations (any
+    # non-empty prefix of --output-file: --o, --ou, --out, ...); it is the
+    # only --o* long option in eslint's space.
     "eslint": {"eq": ("--output-file",), "attach": ("-o",),
-               "prefix": ("--outp",)},
+               "prefix": ("--o",)},
     "ruff": {"eq": ("--output-file", "--cache-dir"), "attach": ("-o",)},
     "go": {"name": ("o", "c", "coverprofile", "cpuprofile", "memprofile",
                     "blockprofile", "mutexprofile", "trace", "outputdir")},
