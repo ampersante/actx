@@ -443,6 +443,16 @@ def run_prefix_split(tokens: list[str]) -> tuple[list[str], list[str]] | None:
         if tok in value_flags:
             idx += 2  # the flag and its separate value token
             continue
+        if tok == "--":
+            # POSIX end-of-options (honored by uv and xcrun): the inner
+            # command follows it verbatim. Without this, `uv run -- rm -rf ~`
+            # bails as an "unknown flag" and the inner head stays hidden.
+            idx += 1
+            if idx >= n:
+                return None
+            if only_tool is not None and tokens[idx] != only_tool:
+                return None
+            return tokens[idx:], tokens[:idx]
         if tok.startswith("-"):
             name = tok.split("=", 1)[0]
             if name in value_flags or name in bool_flags:

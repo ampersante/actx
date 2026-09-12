@@ -717,6 +717,21 @@ class SecurityGateTests(unittest.TestCase):
             "xcrun --sdk macosx simctl erase all", "T6_HIGH_RISK_SIMCTL"
         )
 
+    def test_exec_prefix_double_dash_separator(self):
+        # Acceptance finding F-1: `uv run -- <cmd>` is a working POSIX
+        # separator on real uv — the inner head must still be unwrapped.
+        self.assert_deny("uv run -- rm -rf ~", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_deny("uv run -q -- rm -rf ~", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_deny(
+            "uv run -p 3.12 -- rm -rf ~", "T4_DESTRUCTIVE_MUTATION"
+        )
+        self.assert_deny("uv run -- bash -c 'rm -rf ~'", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_ask("uv run -- pip install x", "T5_SUPPLY_CHAIN")
+        self.assert_ask("xcrun -- simctl erase all", "T6_HIGH_RISK_SIMCTL")
+        self.assert_allow("uv run -- pytest")
+        # `xcrun -- otool` stays opaque: only_tool is enforced past `--`.
+        self.assert_allow("xcrun -- otool x")
+
     def test_exec_prefix_fail_open_and_allowed(self):
         self.assert_allow("uv run pytest")
         self.assert_allow("uv run")  # no inner command: tokens unchanged

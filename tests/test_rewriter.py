@@ -254,9 +254,19 @@ class RewriteUnitTests(unittest.TestCase):
             "tsc --out /tmp/x.js a.ts",
             "tsc --tsBuildInfoFile /tmp/x a.ts",
             "pytest --junitxml=/tmp/x",
+            "pytest --junit-xml=/tmp/x",
             "pytest --basetemp /tmp/x",
             "git diff --output=x",
             "git diff --output /tmp/x",
+            # Acceptance findings: alternate spellings that still write.
+            "tree --output /tmp/x",
+            "tree --output=/tmp/x",
+            "jest --output-file /tmp/x",          # yargs dashed→camel map
+            "jest --coverage-directory /tmp/x",
+            "vitest --outputFile.json=/tmp/x",    # dotted reporter form
+            "tsc --outfile /tmp/x a.ts",          # tsc is case-insensitive
+            "tsc --OUTDIR /tmp/x a.ts",
+            "tsc --declarationdir=/tmp/x a.ts",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(rewrite(command))
@@ -267,6 +277,18 @@ class RewriteUnitTests(unittest.TestCase):
             "uv run tsc --outFile ~/.zshrc",
             "uv run tree -o x",
             "uv run ruff --output-file=x .",
+            "uv run -- tsc --outFile /tmp/x",     # behind `--` separator
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_uv_run_unparseable_inner_defers(self):
+        # TK-55 acceptance: rewriter must not auto-approve a `uv run`
+        # whose inner command cannot be located (unknown flag, bare run).
+        for command in (
+            "uv run --unknown-flag rm -rf ~",
+            "uv run --unknown-flag pytest",
+            "uv run",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(rewrite(command))

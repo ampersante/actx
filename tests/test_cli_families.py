@@ -677,6 +677,31 @@ class RunPrefixSplitTests(unittest.TestCase):
             with self.subTest(tokens=tokens):
                 self.assertIsNone(cli_families.run_prefix_split(tokens))
 
+    def test_double_dash_end_of_options(self):
+        # Acceptance finding: `uv run -- <cmd>` is a live bypass — uv honors
+        # the POSIX separator and executes the inner command verbatim.
+        inner, consumed = cli_families.run_prefix_split(
+            ["uv", "run", "--", "rm", "-rf", "~"]
+        )
+        self.assertEqual(inner, ["rm", "-rf", "~"])
+        self.assertEqual(consumed, ["uv", "run", "--"])
+        inner, consumed = cli_families.run_prefix_split(
+            ["uv", "run", "-p", "3.12", "--", "python", "x.py"]
+        )
+        self.assertEqual(inner, ["python", "x.py"])
+        inner, _ = cli_families.run_prefix_split(
+            ["xcrun", "--", "simctl", "erase", "all"]
+        )
+        self.assertEqual(inner, ["simctl", "erase", "all"])
+
+    def test_double_dash_anomalies(self):
+        for tokens in (
+            ["uv", "run", "--"],                    # nothing after --
+            ["xcrun", "--", "otool", "x"],          # -- does not bypass only_tool
+        ):
+            with self.subTest(tokens=tokens):
+                self.assertIsNone(cli_families.run_prefix_split(tokens))
+
     def test_absolute_path_head_unwraps(self):
         # Absolute-path invocation matches by basename — zero-import
         # constraint keeps this inside run_prefix_split.

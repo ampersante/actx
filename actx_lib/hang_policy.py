@@ -168,6 +168,17 @@ def _is_cloud_stream(argv):
     )
 
 
+def _is_gh(argv):
+    """TK-55: `gh pr checks <N> --watch` streams until checks finish, but the
+    positional PR number sits between the verb and the flag, which the
+    prefix-based FAMILIES stream_specs cannot express — the flag is matched
+    anywhere after the ("pr", "checks") prefix instead."""
+    verbs = cli_families.effective_verbs(argv)
+    if not verbs or list(verbs[:2]) != ["pr", "checks"]:
+        return False
+    return "--watch" in verbs[2:]
+
+
 def _is_redis_monitor(argv):
     return argv[0] == "redis-cli" and any(
         tok.upper() == "MONITOR" for tok in argv[1:]
@@ -251,6 +262,7 @@ _NEVER_WRAP_PREDICATES = (
     _is_swift,
     _is_xcodebuild_interactive,
     _is_cloud_stream,
+    _is_gh,
 )
 
 

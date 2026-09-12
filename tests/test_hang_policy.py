@@ -226,6 +226,17 @@ class GhTests(unittest.TestCase):
             hang_policy.classify(["gh", "pr", "checks", "--watch"]),
             NEVER_WRAP,
         )
+        # Acceptance finding: the positional PR number sits between the
+        # verb and --watch — the dedicated _is_gh predicate covers it
+        # (prefix stream_specs cannot).
+        self.assertEqual(
+            hang_policy.classify(["gh", "pr", "checks", "123", "--watch"]),
+            NEVER_WRAP,
+        )
+        self.assertEqual(
+            hang_policy.classify(["gh", "pr", "checks", "123", "-w"]),
+            DEFAULT,
+        )
 
     def test_non_streaming_verbs_are_default(self):
         for argv in (

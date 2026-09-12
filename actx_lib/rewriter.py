@@ -46,20 +46,23 @@ _WRITE_TOKENS = frozenset({"--fix", "fix", "format"})
 # `xcrun simctl <argv>` the inner head is matched (cli_families
 # run_prefix_split, shared with the security gate). This table folds in
 # the former per-predicate `sort -o`/`--output` and `git --out*` rejects.
+#   ci      -- case-insensitive `eq` (tsc option names are case-insensitive)
 _DENIED_WRITE_FLAGS = {
     "git": {"prefix": ("--out",)},
     "sort": {"eq": ("--output",), "attach": ("-o",)},
-    "tree": {"attach": ("-o",)},
-    "jest": {"eq": ("--outputFile", "--coverageDirectory")},
-    "vitest": {"eq": ("--outputFile",)},
+    "tree": {"eq": ("--output",), "attach": ("-o",)},
+    # jest uses yargs: dashed spellings map onto the camelCase options.
+    "jest": {"eq": ("--outputFile", "--output-file",
+                    "--coverageDirectory", "--coverage-directory")},
+    "vitest": {"eq": ("--outputFile",), "prefix": ("--outputFile.",)},
     "eslint": {"eq": ("--output-file",), "attach": ("-o",)},
     "ruff": {"eq": ("--output-file", "--cache-dir"), "attach": ("-o",)},
     "go": {"eq": ("-o", "-c", "-coverprofile", "-cpuprofile",
                   "-memprofile", "-blockprofile", "-mutexprofile",
                   "-trace", "-outputdir")},
-    "tsc": {"eq": ("--out", "--outFile", "--outDir", "--declarationDir",
-                   "--tsBuildInfoFile", "--generateTrace")},
-    "pytest": {"eq": ("--basetemp", "--junitxml")},
+    "tsc": {"ci": ("--out", "--outfile", "--outdir", "--declarationdir",
+                   "--tsbuildinfofile", "--generatetrace")},
+    "pytest": {"eq": ("--basetemp", "--junitxml", "--junit-xml")},
 }
 
 
@@ -83,6 +86,10 @@ def _has_denied_write_flag(head, argv):
                     return True
         for flag in spec.get("prefix", ()):
             if tok.startswith(flag):
+                return True
+        lowered = tok.lower()
+        for flag in spec.get("ci", ()):
+            if lowered == flag or lowered.startswith(flag + "="):
                 return True
     return False
 
@@ -226,9 +233,11 @@ def _pip_ok(tokens):
 def _uv_ok(tokens):
     # TK-51: `uv pip install` left the allow-list; `uv run` stays (primary
     # semantics: run — the install matrix lives in the T5 gate).
-    if len(tokens) < 2:
+    # TK-55: the inner head must be locatable — an unparseable `uv run`
+    # (unknown flag, bare `run`) defers instead of being auto-approved.
+    if len(tokens) < 2 or tokens[1] != "run":
         return False
-    return tokens[1] == "run"
+    return cli_families.run_prefix_split(tokens) is not None
 
 
 def _npm_ok(tokens):
