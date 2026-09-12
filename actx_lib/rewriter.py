@@ -83,10 +83,11 @@ _DENIED_WRITE_FLAGS = {
     # rg --pre/--pre-glob execute an arbitrary command per file —
     # exec-capable, not a write flag, but refused here by the same
     # mechanism ("--pretty" pins the eq form: a "--pre" prefix would FP).
-    "rg": {"eq": ("--pre", "--pre-glob")},
-    # psql -o/--output writes query output to a file; psql uses
-    # getopt_long, so abbreviations resolve too (--o is unique).
-    "psql": {"prefix": ("--o",), "attach": ("-o",)},
+    "rg": {"eq": ("--pre", "--pre-glob", "--hostname-bin")},
+    # psql -o/--output and -L/--log-file write query output to files; psql
+    # uses getopt_long, so abbreviations resolve too (--o and --lo are
+    # unique; --l would collide with --list).
+    "psql": {"prefix": ("--o", "--lo"), "attach": ("-o", "-L")},
     # getopt_long abbreviations of --follow (--f/--fo/...) defeat the
     # never-wrap check and would hang the wrapper — defer instead.
     "tail": {"prefix": ("--f",), "attach": ("-f", "-F")},

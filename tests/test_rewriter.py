@@ -293,10 +293,15 @@ class RewriteUnitTests(unittest.TestCase):
             "tree --out /tmp/x",                        # GNU abbrev
             "rg --pre rm pattern",                      # exec per file
             "rg --pre-glob='*.sh' rm pattern",
+            "rg --hostname-bin=/tmp/x pattern",         # exec for hostname
             "psql -o /tmp/x -c 'select 1'",             # writes query output
             "psql --o=/tmp/x -c 'select 1'",
+            "psql -L /tmp/x -c 'select 1'",             # --log-file
+            "psql --log-file=/tmp/x -c 'select 1'",
+            "psql --lo /tmp/x -c 'select 1'",
             "tail --f /var/log/syslog",                 # abbrev of --follow
             "tail --fol=name /var/log/syslog",
+            "tail -F /var/log/syslog",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(rewrite(command))
