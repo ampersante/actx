@@ -1,3 +1,4 @@
+import os
 import shlex
 
 from actx_lib import cli_families, sql_verbs
@@ -23,7 +24,6 @@ _PIP_RO = frozenset({"list", "show", "freeze", "outdated"})
 # allow-list (roll-back of v2.3.0) — package installs are never rewritten;
 # the T5 security gate escalates them to "ask" on the hook path instead.
 _NPM_RO = frozenset({"list"})
-_GH_RO = frozenset({"pr", "issue", "run"})
 _CARGO_PURE_RO = frozenset({"check", "test", "build", "tree"})
 _CARGO_1ARG_FLAGS = frozenset({
     "-q", "--quiet", "-v", "-vv", "-vvv", "--verbose",
@@ -34,6 +34,57 @@ _CARGO_2ARG_FLAGS = frozenset({
 })
 
 _WRITE_TOKENS = frozenset({"--fix", "fix", "format"})
+
+# TK-55 F3: flags whose value is a write path / output redirect on
+# otherwise-RO heads (rule: "the flag's value is a file the command
+# writes"). Per-head match kinds:
+#   eq      -- `tok == flag` or the `flag=value` single-token form
+#   attach  -- one-letter short flag, bare or with a glued value
+#              (`-o out`, `-oout`); only for non-"--" tokens
+#   prefix  -- plain startswith (`git --out*` catches --output too)
+# The scan runs on the EFFECTIVE head: inside `uv run <argv>` /
+# `xcrun simctl <argv>` the inner head is matched (cli_families
+# run_prefix_split, shared with the security gate). This table folds in
+# the former per-predicate `sort -o`/`--output` and `git --out*` rejects.
+_DENIED_WRITE_FLAGS = {
+    "git": {"prefix": ("--out",)},
+    "sort": {"eq": ("--output",), "attach": ("-o",)},
+    "tree": {"attach": ("-o",)},
+    "jest": {"eq": ("--outputFile", "--coverageDirectory")},
+    "vitest": {"eq": ("--outputFile",)},
+    "eslint": {"eq": ("--output-file",), "attach": ("-o",)},
+    "ruff": {"eq": ("--output-file", "--cache-dir"), "attach": ("-o",)},
+    "go": {"eq": ("-o", "-c", "-coverprofile", "-cpuprofile",
+                  "-memprofile", "-blockprofile", "-mutexprofile",
+                  "-trace", "-outputdir")},
+    "tsc": {"eq": ("--out", "--outFile", "--outDir", "--declarationDir",
+                   "--tsBuildInfoFile", "--generateTrace")},
+    "pytest": {"eq": ("--basetemp", "--junitxml")},
+}
+
+
+def _has_denied_write_flag(head, argv):
+    """True when a token of argv (the tokens after the effective head)
+    carries a denied write-path flag of `head` (TK-55 F3). For `go` the
+    scan stops at `-args`: flags behind it belong to the test binary, not
+    to the go tool."""
+    spec = _DENIED_WRITE_FLAGS.get(head)
+    if spec is None:
+        return False
+    for tok in argv:
+        if head == "go" and tok == "-args":
+            break
+        for flag in spec.get("eq", ()):
+            if tok == flag or tok.startswith(flag + "="):
+                return True
+        if not tok.startswith("--"):
+            for flag in spec.get("attach", ()):
+                if tok.startswith(flag):
+                    return True
+        for flag in spec.get("prefix", ()):
+            if tok.startswith(flag):
+                return True
+    return False
 
 
 def _parse_cargo(tokens):
@@ -115,8 +166,6 @@ def _has_write_token(tokens):
 def _git_ok(tokens):
     if len(tokens) < 2:
         return False
-    if any(tok.startswith("--out") for tok in tokens):
-        return False
     sub = tokens[1]
     if sub in _GIT_RO:
         return True
@@ -162,11 +211,6 @@ def _wc_family_ok(tokens):
     head = tokens[0]
     if head == "tail" and any(
         tok == "-f" or tok == "--follow" or tok.startswith("--follow=")
-        for tok in tokens
-    ):
-        return False
-    if head == "sort" and any(
-        tok.startswith("-o") or tok == "--output" or tok.startswith("--output=")
         for tok in tokens
     ):
         return False
@@ -249,6 +293,44 @@ def _xcodebuild_ok(tokens):
     # A build pinned to a scheme/destination compacts to diagnostics only;
     # the bare invocation stays unwrapped (interactive signing prompts).
     return "-scheme" in rest or "-destination" in rest
+
+
+def _gradlew_ok(tokens):
+    """./gradlew dispatch (TK-55 F5): every positional token is a gradle
+    task and must classify "ro" via cli_families.gradle_task_class —
+    multi-task invocations rewrite only when ALL tasks are RO
+    (`publish`/`clean`-class and unknown verbs defer). Declared gradle
+    value flags are skipped with their value (separate or `=`-form),
+    `-P...`/`-D...` glued properties and declared boolean flags are
+    skipped whole; an undeclared `-`-token fails closed. Bare `./gradlew`
+    keeps rewriting (parity with the former always-true predicate —
+    default tasks)."""
+    args = tokens[1:]
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if tok in cli_families.GRADLE_VALUE_FLAGS:
+            i += 2  # flag + separate value token
+            continue
+        if any(
+            tok.startswith(vf + "=")
+            for vf in cli_families.GRADLE_VALUE_FLAGS
+        ):
+            i += 1  # --flag=value: value stays inside the token
+            continue
+        if tok.startswith(cli_families.GRADLE_ATTACHED_VALUE_PREFIXES):
+            i += 1  # glued -Pprop=v / -Dprop=v
+            continue
+        if tok in cli_families.GRADLE_BOOL_FLAGS:
+            i += 1
+            continue
+        if tok.startswith("-"):
+            return False  # undeclared flag: fail closed
+        if cli_families.gradle_task_class(tok) != "ro":
+            return False
+        i += 1
+    return True
 
 
 def _quoted_token(tok):
@@ -357,7 +439,6 @@ _DISPATCH = {
     "rg": lambda _t: True,
     "cat": lambda _t: True,
     "tree": lambda _t: True,
-    "gh": lambda t: len(t) >= 2 and t[1] in _GH_RO,
     "pytest": lambda _t: True,
     "jest": lambda _t: True,
     "vitest": lambda _t: True,
@@ -381,7 +462,7 @@ _DISPATCH = {
     "xcodebuild": _xcodebuild_ok,
     "xcrun": lambda t: len(t) >= 3 and t[1] == "simctl" and t[2] == "list",
     "pod": lambda t: len(t) >= 2 and t[1] in ("outdated", "list"),
-    "./gradlew": lambda _t: True,
+    "./gradlew": _gradlew_ok,
     # --- data stack (TK-43); bq/redis-cli join via FAMILIES generation ---
     "psql": _sql_cli_ok,
     "sqlite3": _sql_cli_ok,
@@ -444,6 +525,20 @@ def rewrite(command):
     except ValueError:
         return None
     if not tokens:
+        return None
+
+    # TK-55 F3: denied write-path flags are checked on the EFFECTIVE
+    # head — inside a run-prefix (`uv run <argv>`, `xcrun simctl <argv>`)
+    # the inner argv is scanned, otherwise the command's own tail.
+    inner = cli_families.run_prefix_split(tokens)
+    if inner is not None:
+        inner_argv, _consumed = inner
+        w_head = os.path.basename(inner_argv[0])
+        w_argv = inner_argv[1:]
+    else:
+        w_head = os.path.basename(tokens[0])
+        w_argv = tokens[1:]
+    if _has_denied_write_flag(w_head, w_argv):
         return None
 
     pred = _DISPATCH.get(tokens[0])

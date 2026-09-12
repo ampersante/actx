@@ -97,7 +97,37 @@ class RewriteUnitTests(unittest.TestCase):
         self.assertEqual(rewrite("tree"), "actx tree")
 
     def test_gh_pr_rewritten(self):
+        # TK-55 F2: gh dispatch is generated from cli_families ro_verbs.
         self.assertEqual(rewrite("gh pr list"), "actx gh pr list")
+
+    def test_gh_ro_verbs_rewritten(self):
+        for command in (
+            "gh pr list",
+            "gh pr view 3",
+            "gh pr diff 3",
+            "gh issue list",
+            "gh run list",
+            "gh run view 1",
+            "gh repo list",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(rewrite(command), "actx " + command)
+
+    def test_gh_mutating_streaming_and_secret_not_rewritten(self):
+        # TK-55 F2: ask-class mutations, streaming verbs, file-download
+        # and credential surfaces all stay unrewritten (defer/never-wrap
+        # is decided by gate/hang-policy layers, not the rewriter).
+        for command in (
+            "gh pr merge 1",
+            "gh issue create",
+            "gh run delete 1",
+            "gh run download 1",
+            "gh run watch",
+            "gh auth token",
+            "gh api repos",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
 
     def test_pytest_rewritten(self):
         self.assertEqual(rewrite("pytest -q"), "actx pytest -q")
@@ -195,6 +225,75 @@ class RewriteUnitTests(unittest.TestCase):
 
     def test_sort_output_rejected(self):
         self.assertIsNone(rewrite("sort -o out in"))
+
+    def test_denied_write_flags_rejected(self):
+        # TK-55 F3: a flag whose value is a write path / output redirect
+        # defeats rewriting on every listed RO head (eq / attached /
+        # prefix match kinds, separate-value and `=`-forms).
+        for command in (
+            "tree -o /tmp/x",
+            "tree -o/tmp/x",
+            "sort -o out in",
+            "sort --output=out in",
+            "jest --outputFile=/tmp/x",
+            "jest --outputFile /tmp/x",
+            "jest --coverageDirectory /tmp/x",
+            "vitest --outputFile=x",
+            "eslint -o /tmp/x .",
+            "eslint -o/tmp/x .",
+            "eslint --output-file /tmp/x .",
+            "ruff check --output-file /tmp/x .",
+            "ruff check -o /tmp/x .",
+            "ruff check --cache-dir /tmp/x .",
+            "go test -coverprofile=/tmp/x ./...",
+            "go test -o /tmp/x ./...",
+            "go test -c -o /tmp/x ./...",
+            "go test -trace /tmp/x ./...",
+            "tsc --outFile /tmp/x a.ts",
+            "tsc --outDir /tmp/x a.ts",
+            "tsc --out /tmp/x.js a.ts",
+            "tsc --tsBuildInfoFile /tmp/x a.ts",
+            "pytest --junitxml=/tmp/x",
+            "pytest --basetemp /tmp/x",
+            "git diff --output=x",
+            "git diff --output /tmp/x",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_denied_write_flags_inside_run_prefix(self):
+        # TK-55 F3: the inner head of `uv run <argv>` is the one matched.
+        for command in (
+            "uv run tsc --outFile ~/.zshrc",
+            "uv run tree -o x",
+            "uv run ruff --output-file=x .",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_denied_write_flags_false_positive_pins(self):
+        # TK-55 F3: look-alike but RO forms must keep rewriting —
+        # `go test -count=1` (no attached short forms in go's flag pkg),
+        # `jest -o` = --onlyChanged, and plain RO invocations.
+        for command in (
+            "tree",
+            "sort -u",
+            "git diff",
+            "jest",
+            "jest -o",
+            "vitest run",
+            "eslint .",
+            "ruff check .",
+            "go test ./...",
+            "go test -count=1 ./...",
+            "go test -run X ./...",
+            "tsc --noEmit",
+            "pytest -q",
+            "uv run pytest",
+            "uv run --with requests pytest",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(rewrite(command), "actx " + command)
 
     def test_uniq_rewritten(self):
         self.assertEqual(rewrite("uniq -c tasks.md"), "actx uniq -c tasks.md")
@@ -517,6 +616,36 @@ class MobileRewriteTests(unittest.TestCase):
             rewrite("./gradlew :app:assembleDebug --console=plain"),
             "actx ./gradlew :app:assembleDebug --console=plain",
         )
+
+    def test_gradlew_ro_forms_rewritten(self):
+        # TK-55 F5: bare invocation (default tasks), value flags with
+        # separate/`=`/glued forms and boolean flags keep rewriting.
+        for command in (
+            "./gradlew",
+            "./gradlew test --tests com.Foo",
+            "./gradlew test --tests=com.Foo",
+            "./gradlew check --parallel -q",
+            "./gradlew -Dorg.gradle.jvmargs=-Xmx2g test",
+            "./gradlew -Pkotlin.incremental=true build",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(rewrite(command), "actx " + command)
+
+    def test_gradlew_ask_and_unknown_rejected(self):
+        # TK-55 F5: publish/clean-class and unknown task verbs defer;
+        # multi-task requires ALL positionals RO; undeclared flags fail
+        # closed.
+        for command in (
+            "./gradlew publish",
+            "./gradlew :app:publish",
+            "./gradlew test publish",
+            "./gradlew clean",
+            "./gradlew unknownVerb",
+            "./gradlew --write-locks dependencies",
+            "./gradlew --stop",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
 
     def test_other_gradle_invocations_not_affected(self):
         # Absolute/`gradle` paths are different argv heads - untouched.
