@@ -63,20 +63,28 @@ _DENIED_WRITE_FLAGS = {
     # on BSD tree long options don't exist and the flag simply errors.
     "tree": {"prefix": ("--o",), "attach": ("-o",)},
     # jest uses yargs: dashed spellings map onto the camelCase options.
+    # -u/--updateSnapshot rewrites inline snapshots in source files —
+    # the --fix sibling (source-mutation flag).
     "jest": {"eq": ("--outputFile", "--output-file",
-                    "--coverageDirectory", "--coverage-directory")},
-    "vitest": {"eq": ("--outputFile", "--output-file"),
+                    "--coverageDirectory", "--coverage-directory",
+                    "--updateSnapshot", "--update-snapshot", "--update"),
+             "attach": ("-u",)},
+    "vitest": {"eq": ("--outputFile", "--output-file", "--update"),
+               "attach": ("-u",),
                "prefix": ("--outputFile.", "--output-file.")},
     # optionator accepts unambiguous long-option abbreviations (any
     # non-empty prefix of --output-file: --o, --ou, --out, ...); it is the
     # only --o* long option in eslint's space.
     "eslint": {"eq": ("--output-file",), "attach": ("-o",),
                "prefix": ("--o",)},
-    "ruff": {"eq": ("--output-file", "--cache-dir"), "attach": ("-o",)},
+    # --add-noqa rewrites source files in place (sibling of --fix).
+    "ruff": {"eq": ("--output-file", "--cache-dir", "--add-noqa"),
+             "attach": ("-o",)},
     "go": {"name": ("o", "c", "coverprofile", "cpuprofile", "memprofile",
                     "blockprofile", "mutexprofile", "trace", "outputdir")},
+    # --init writes tsconfig.json (file-creation flag).
     "tsc": {"nameci": ("out", "outfile", "outdir", "declarationdir",
-                       "tsbuildinfofile", "generatetrace")},
+                       "tsbuildinfofile", "generatetrace", "init")},
     # pytest's parser allows unambiguous abbreviations; "--junitx"/
     # "--junit-x" cover every prefix of both --junitxml and --junit-xml
     # without catching the RO --junit-prefix flag.

@@ -248,6 +248,31 @@ class GhTests(unittest.TestCase):
                 self.assertEqual(hang_policy.classify(argv), DEFAULT)
 
 
+class JestVitestWatchTests(unittest.TestCase):
+    """TK-55: watch modes on rewritten test runners -> never_wrap."""
+
+    def test_watch_forms_are_never_wrap(self):
+        for argv in (
+            ["jest", "--watch"],
+            ["jest", "--watchAll"],
+            ["vitest"],                    # bare vitest is watch mode
+            ["vitest", "watch"],
+            ["vitest", "--watch"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), NEVER_WRAP)
+
+    def test_run_forms_are_default(self):
+        for argv in (
+            ["jest"],
+            ["jest", "--ci"],
+            ["vitest", "run"],
+            ["vitest", "run", "--reporter=dot"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(hang_policy.classify(argv), DEFAULT)
+
+
 class FlutterTests(unittest.TestCase):
     def test_run_is_never_wrap(self):
         self.assertEqual(hang_policy.classify(["flutter", "run"]), NEVER_WRAP)

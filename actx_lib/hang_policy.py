@@ -168,6 +168,21 @@ def _is_cloud_stream(argv):
     )
 
 
+def _is_jest_vitest_watch(argv):
+    """TK-55: jest/vitest watch modes stream forever — never_wrap.
+    jest watches only under --watch/--watchAll; vitest watches on bare
+    invocation and the `watch` subcommand (`vitest run` is the CI form)."""
+    head = argv[0]
+    if head == "jest":
+        return any(t in ("--watch", "--watchAll", "--watch-all")
+                   for t in argv[1:])
+    if head == "vitest":
+        if len(argv) == 1 or argv[1] == "watch":
+            return True
+        return "--watch" in argv[1:]
+    return False
+
+
 def _is_gh(argv):
     """TK-55: `gh pr checks <N> --watch` streams until checks finish, but the
     positional PR number sits between the verb and the flag, which the
@@ -263,6 +278,7 @@ _NEVER_WRAP_PREDICATES = (
     _is_xcodebuild_interactive,
     _is_cloud_stream,
     _is_gh,
+    _is_jest_vitest_watch,
 )
 
 

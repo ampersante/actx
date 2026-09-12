@@ -317,6 +317,15 @@ class RewriteUnitTests(unittest.TestCase):
             "sort --compress-program /tmp/x in",
             "terraform plan -out /tmp/x",
             "terraform plan -out=/tmp/x",
+            # Round 7: source-mutation flags (the --fix sibling class).
+            "jest -u",                              # inline snapshot rewrite
+            "jest --updateSnapshot",
+            "jest --update-snapshot",
+            "vitest -u",
+            "vitest --update",
+            "ruff check --add-noqa .",              # rewrites sources
+            "tsc --init",                           # writes tsconfig.json
+            "tsc -init",
         ):
             with self.subTest(command=command):
                 self.assertIsNone(rewrite(command))
