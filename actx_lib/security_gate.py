@@ -1887,6 +1887,7 @@ _SOURCE_EXTENSIONS = {
     ".js",
     ".jsx",
     ".json",
+    ".jsonc",
     ".md",
     ".toml",
     ".yaml",
