@@ -547,6 +547,24 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_ask("git fetch --upload-pack='touch x' .", "T6_HIGH_RISK_GIT")
         self.assert_ask("git push --receive-pack=x origin", "T6_HIGH_RISK_GIT")
 
+    def test_g4_git_exec_flags_minimal_unambiguous_prefixes(self):
+        # TK-60 STEP-G4 (REQ-09): cli_families.GIT_EXEC_FLAGS - the gate
+        # asks on any argv spelling git itself would resolve to
+        # --upload-pack/--receive-pack/--exec, not just the full spelling.
+        # Plan pins, verbatim.
+        self.assert_ask("git fetch --upl=x .", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git pull --upl=x", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git push --rece=x origin", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git push --ex=x origin", "T6_HIGH_RISK_GIT")
+        self.assert_allow("git push --recurse-submodules=check")
+        # clone/ls-remote/archive share the same canonical table.
+        self.assert_ask("git clone --up=x src dst", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git ls-remote --up=x .", "T6_HIGH_RISK_GIT")
+        self.assert_ask("git archive --e=x --remote r HEAD", "T6_HIGH_RISK_GIT")
+        # Below the true floor, git itself rejects it as ambiguous - the
+        # gate correctly does not ask on a spelling git would never accept.
+        self.assert_allow("git fetch --up=x .")
+
     def test_t6_git_config_negative_neighbors_allowed(self):
         self.assert_allow("git -c color.ui=always log")
         self.assert_allow("git config user.name x")

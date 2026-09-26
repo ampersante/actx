@@ -522,3 +522,51 @@ def gradle_task_class(token: str) -> str:
     if any(segment.startswith(base) for base in GRADLE_RO_BASES):
         return "ro"
     return "unknown"
+
+
+# TK-60 STEP-G4 (REQ-09): canonical table of git's exec-argv flags per verb
+# - --upload-pack/--receive-pack/--exec each run an arbitrary LOCAL program
+# as the "git" side of a smart-HTTP/SSH transport (git-fetch(1)/git-push(1)/
+# git-archive(1)). Value: the MINIMAL unambiguous long-option prefix for
+# THAT VERB - git's own parse-options.c resolves any unambiguous prefix of
+# a long option, and errors "ambiguous option" below the floor; a floor
+# shorter than this would silently miss abbreviation bypasses, a floor
+# looser than necessary would silently keep allowing them. Both the
+# security gate (ask) and the rewriter (deny) read this one table.
+# Live-verified against git 2.50.1, `/usr/bin/git <verb> -h`, 2026-09-27:
+#   fetch/pull: only --upload-pack starts with "up" - but --update-head-ok
+#     (fetch) / --update-shallow (fetch, pull) also start with "upd", so
+#     "--up"/"--upd" are ambiguous; "--upl" is the shortest unique prefix.
+#   clone/ls-remote: --upload-pack is the ONLY "up*" long option (neither
+#     exposes --update-head-ok/--update-shallow) - "--up" alone resolves.
+#   push: "--rec" is ambiguous (--recurse-submodules / --receive-pack);
+#     "--rece" is the shortest unique prefix (they diverge at the 4th
+#     letter, rec-E vs rec-U). --exec has no other "e*" long option on
+#     push - "--e" alone resolves.
+#   archive: --exec has no other "e*" long option - "--e" alone resolves.
+GIT_EXEC_FLAGS = {
+    "fetch": {"upload-pack": "upl"},
+    "pull": {"upload-pack": "upl"},
+    "clone": {"upload-pack": "up"},
+    "ls-remote": {"upload-pack": "up"},
+    "push": {"receive-pack": "rece", "exec": "e"},
+    "archive": {"exec": "e"},
+}
+
+
+def git_exec_flag_match(verb: str, tok: str) -> bool:
+    """True when `tok` (a `--...` or `--...=value` argv token) is one of
+    `verb`'s GIT_EXEC_FLAGS entries spelled at or above its minimal
+    unambiguous prefix (the full spelling always matches too - it is its
+    own prefix). `--no-<flag>` (git's own negation form) never matches:
+    its name is not itself a prefix of the bare flag."""
+    flags = GIT_EXEC_FLAGS.get(verb)
+    if not flags or not tok.startswith("--"):
+        return False
+    name = tok[2:].split("=", 1)[0]
+    if not name:
+        return False
+    return any(
+        len(name) >= len(floor) and full.startswith(name)
+        for full, floor in flags.items()
+    )

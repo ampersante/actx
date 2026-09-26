@@ -7,6 +7,8 @@ Body unchanged from the pre-split monolith - see tools/ast_identity_check.py.
 import fnmatch
 import os
 
+from actx_lib import cli_families
+
 from .common import SecurityDecision, _strip_redirection, _unwrap_tokens
 
 
@@ -130,22 +132,17 @@ def _git_config_is_write(sub_args: list[str]):
     return False, key
 
 
-# TK-57 S7 (STEP-06, REQ-08): git argv flags that make fetch/pull/push/
-# clone/ls-remote/archive execute an arbitrary program on the remote side
-# of the connection (git-fetch(1)/git-push(1) "--upload-pack"/
-# "--receive-pack"/"--exec"). Gate side only (eq/attach forms) - the
-# rewriter's deny table (a separate file/stream) additionally enumerates
-# unambiguous long-option abbreviations per git <verb> -h.
-_GIT_EXEC_ARGV_FLAGS = ("--upload-pack", "--receive-pack", "--exec")
-_GIT_EXEC_FLAG_VERBS = frozenset({"fetch", "pull", "push", "clone", "ls-remote", "archive"})
+# TK-57 S7 (STEP-06, REQ-08) / TK-60 STEP-G4 (REQ-09): git argv flags that
+# make fetch/pull/push/clone/ls-remote/archive execute an arbitrary program
+# on the remote side of the connection (git-fetch(1)/git-push(1)
+# "--upload-pack"/"--receive-pack"/"--exec"), including minimal unambiguous
+# long-option abbreviations per verb (cli_families.GIT_EXEC_FLAGS - the one
+# canonical table the rewriter's own deny table also reads).
+_GIT_EXEC_FLAG_VERBS = frozenset(cli_families.GIT_EXEC_FLAGS)
 
 
-def _has_git_exec_argv_flag(sub_args: list[str]) -> bool:
-    for tok in sub_args:
-        for flag in _GIT_EXEC_ARGV_FLAGS:
-            if tok == flag or tok.startswith(flag + "="):
-                return True
-    return False
+def _has_git_exec_argv_flag(verb: str, sub_args: list[str]) -> bool:
+    return any(cli_families.git_exec_flag_match(verb, tok) for tok in sub_args)
 
 
 def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
@@ -229,7 +226,7 @@ def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecisio
     # TK-57 S7 (STEP-06, REQ-08): git exec-class argv flags on a rewritten
     # mutator (fetch/pull/push/clone/ls-remote/archive) - the gate side of
     # the fix; the rewriter's deny table lives in a separate file/stream.
-    if subcmd in _GIT_EXEC_FLAG_VERBS and _has_git_exec_argv_flag(sub_args):
+    if subcmd in _GIT_EXEC_FLAG_VERBS and _has_git_exec_argv_flag(subcmd, sub_args):
         return SecurityDecision(
             decision="ask",
             reason=f"git {subcmd} with an executable-program argv flag (--upload-pack/--receive-pack/--exec) requires human confirmation",
