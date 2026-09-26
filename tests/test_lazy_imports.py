@@ -104,6 +104,9 @@ class LazyImportTests(unittest.TestCase):
     def test_hook_path_imports_only_allowed(self):
         # TK-45: the hook path also pulls actx_lib.conventions (pure data,
         # single lazy shlex import inside hint_for - no actx_lib deps).
+        # TK-59: security_gate is now a package - __init__ eagerly imports
+        # every submodule (common, the seven T-level modules, engine), so
+        # all of them land in sys.modules alongside the package itself.
         self.assertEqual(
             self.run_path(["hook"], stdin_text=HOOK_JSON),
             {
@@ -115,6 +118,16 @@ class LazyImportTests(unittest.TestCase):
                 "actx_lib.sql_verbs",
                 "actx_lib.hook",
                 "actx_lib.security_gate",
+                "actx_lib.security_gate.common",
+                "actx_lib.security_gate.t1_paths",
+                "actx_lib.security_gate.t2_t3",
+                "actx_lib.security_gate.t4_destructive",
+                "actx_lib.security_gate.t5_supply",
+                "actx_lib.security_gate.t6_git",
+                "actx_lib.security_gate.t6_tools",
+                "actx_lib.security_gate.t6_sql",
+                "actx_lib.security_gate.t7_action",
+                "actx_lib.security_gate.engine",
             },
         )
 
