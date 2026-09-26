@@ -186,6 +186,40 @@ class RewriteSpecPlanPinTests(unittest.TestCase):
         ):
             self.assert_not_rewritten(command)
 
+    def test_wave_20260927_finding_a_value_names_a_program_or_module(self):
+        # Finding A (Critical, acceptance REJECT): a value flag's VALUE can
+        # inline-specify a program/init-script/module to execute or load -
+        # each of these was confirmed live to rewrite before the fix.
+        for command in (
+            "cargo test --config build.rustc-wrapper=/usr/bin/false --no-run",
+            "cargo build -Z unstable-options",
+            "./gradlew --init-script evil.gradle build",
+            "./gradlew -I evil.gradle build",
+            "ruff check --config fix=true .",
+            "vitest run --environment ./evil-env.js",
+            "tsc --plugins ./evil-plugin.js",
+        ):
+            self.assert_not_rewritten(command)
+
+    def test_wave_20260927_finding_b_cargo_fmt_emit_files_rejected(self):
+        # Finding B (Critical): rustfmt `--emit files`/`--emit=files`
+        # WRITES formatted output back to the source files - only
+        # `--emit stdout` is read-only. The old (pre-TK-60) rewriter
+        # rejected both write spellings by name; the closed forward-spec
+        # domain must reject them too, not just admit the safe value.
+        for command in (
+            "cargo fmt --check -- --emit files",
+            "cargo fmt --check -- --emit=files",
+            "cargo fmt --check -- --emit file",
+        ):
+            self.assert_not_rewritten(command)
+
+    def test_wave_20260927_finding_b_cargo_fmt_emit_stdout_still_rewrites(self):
+        self.assertEqual(
+            rewrite("cargo fmt --check -- --emit stdout"),
+            "actx cargo fmt --check -- --emit stdout",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

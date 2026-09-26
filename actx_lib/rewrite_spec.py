@@ -115,9 +115,21 @@ def spec(verbs=None, bool=(), value=None, optional=None, numeric=False,
 # exactly like a head grammar would be.
 # ---------------------------------------------------------------------
 FORWARD_SPECS = {
+    # rustfmt --help (LIVE, 2026-09-27, rustfmt installed): `--emit
+    # [files|stdout]` - "files" (the default) WRITES formatted output back
+    # to the source files (rustfmt's own docs: "What data to emit and
+    # how"); only "stdout" is read-only. Finding B (wave 2026-09-27,
+    # confirmed live): the previous domain wrongly admitted "files"/"file",
+    # so `cargo fmt --check -- --emit files` was rewritten despite
+    # mutating source - the OLD (pre-TK-60) rewriter correctly rejected
+    # both spellings by name; this restores that behaviour via the closed
+    # domain instead of a literal-spelling denylist. `--edition
+    # [2015|2018|2021|2024]` is a genuine read-only rustfmt flag (which
+    # edition's syntax to parse), added per the same `--help` output.
     "cargo_fmt_forward": spec(
         bool=("--check",),
-        value={"--emit": frozenset({"files", "file"})},
+        value={"--emit": frozenset({"stdout"}),
+               "--edition": frozenset({"2015", "2018", "2021", "2024"})},
         positional="none",
     ),
     # `cargo clippy -- <rustc lint flags>` (corpus positive: `cargo clippy
@@ -1148,7 +1160,7 @@ HEAD_SPECS["vitest"] = spec(
         "--coverage.thresholds.branches": "int", "--coverage.thresholds.statements": "int",
         "--coverage.ignoreClassMethods": "any", "--coverage.processingConcurrency": "int",
         "--mode": "any", "--pool": frozenset({"forks", "threads", "vmThreads", "vmForks"}),
-        "--environment": "any", "--changed": "any",
+        "--changed": "any",
         "--sequence.seed": "any", "--sequence.hooks": frozenset({"stack", "list", "parallel"}),
         "--sequence.setupFiles": frozenset({"list", "parallel"}),
         "--testTimeout": "int", "--hookTimeout": "int", "--teardownTimeout": "int",
@@ -1178,7 +1190,12 @@ HEAD_SPECS["vitest"] = spec(
 # --ui, --open, --browser.ui (interactive/streams forever);
 # --api.allowExec/--api.allowWrite (docs: permit API code execution/file
 # editing); --clearCache (deletes cached state); bare/`watch`/`dev`/`init`
-# verbs (default streams forever / writes config files - not admitted).
+# verbs (default streams forever / writes config files - not admitted);
+# --environment (finding A, wave 2026-09-27: vitest resolves a non-builtin
+# value as a `vitest-environment-<name>` package to load and run - the
+# same "value names a module to load" class as --typecheck.checker/
+# --coverage.customProviderModule above, doubt -> not included; unlike
+# jest's --env this is not restricted to a closed built-in enum here).
 
 # tsc: DOC typescriptlang.org/docs/handbook/compiler-options (no local
 # install). NAMED OWNER-DECISION (behaviour-parity, left AS TODAY):
@@ -1227,7 +1244,7 @@ HEAD_SPECS["tsc"] = spec(
         "--customConditions": "any", "--lib": "any", "--maxNodeModuleJsDepth": "int",
         "--moduleDetection": frozenset({"legacy", "auto", "force"}),
         "--moduleResolution": frozenset({"node", "node10", "node16", "nodenext", "bundler", "classic"}),
-        "--moduleSuffixes": "any", "--paths": "any", "--plugins": "any",
+        "--moduleSuffixes": "any", "--paths": "any",
         "--rootDir": "any", "--rootDirs": "any", "--typeRoots": "any", "--types": "any",
         "--fallbackPolling": "any", "--watchDirectory": "any", "--watchFile": "any",
         "--excludeDirectories": "any", "--excludeFiles": "any",
@@ -1242,7 +1259,11 @@ HEAD_SPECS["tsc"] = spec(
 # --emitDeclarationOnly/--emitBOM/--newLine/--removeComments/
 # --stripInternal/--tsBuildInfoFile/--incremental/--generateCpuProfile/
 # --generateTrace/--noEmitHelpers); emit-only-relevant flags with no
-# legitimate RO use (--target/--module/--jsx*/--esModuleInterop/etc.).
+# legitimate RO use (--target/--module/--jsx*/--esModuleInterop/etc.);
+# --plugins (finding A, wave 2026-09-27: names TypeScript language-service
+# plugin packages - the "value names a module to load" class; doubt ->
+# not included, low confidence this even affects a plain `tsc` compile
+# rather than only editor/IDE tooling, so excluded rather than guessed at).
 
 # ruff: real `ruff check --help` (installed fresh into the same scratch
 # venv as pytest, this session).
@@ -1265,7 +1286,7 @@ HEAD_SPECS["ruff"] = spec(
         "--extend-select": "any", "--per-file-ignores": "any",
         "--extend-per-file-ignores": "any", "--fixable": "any", "--unfixable": "any",
         "--extend-fixable": "any", "--exclude": "any", "--extend-exclude": "any",
-        "--stdin-filename": "any", "--config": "any",
+        "--stdin-filename": "any",
         "--color": frozenset({"auto", "always", "never"}),
     },
     # NOTE: "--cache-dir" is deliberately NOT declared - it was already a
@@ -1276,7 +1297,13 @@ HEAD_SPECS["ruff"] = spec(
     forbid_write_token=True,
     positional="any",
 )
-# EXCLUDED (ruff): --fix/--fix-only (write source files), --unsafe-fixes
+# EXCLUDED (ruff): --config (finding A, wave 2026-09-27, confirmed live
+# via `ruff check --help`: "Either a path to a TOML configuration file...
+# or a TOML <KEY> = <VALUE> pair... overriding a specific configuration
+# option" - dual-mode, and the inline-override mode can set `fix = true`
+# directly, e.g. `ruff check --config 'fix = true' .`, which mutates
+# source files while bypassing the `forbid_write_token` hook's literal
+# "--fix" token check entirely - demonstrated this session); --fix/--fix-only (write source files), --unsafe-fixes
 # (only matters combined with one of them); -w/--watch (streams forever);
 # -o/--output-file (named file); --add-noqa/--add-ignore (both insert
 # suppression comments into source files despite the innocuous names).
@@ -1415,9 +1442,19 @@ _CARGO_ROOT_BOOL = ("-q", "--quiet", "-v", "-vv", "--verbose",
                     "--offline", "--locked", "--frozen",
                     "-V", "--version", "--list")
 _CARGO_ROOT_VALUE = {"--color": frozenset({"auto", "always", "never"}),
-                     "--config": "any", "-C": "any", "-Z": "any",
+                     "-C": "any",
                      "--manifest-path": "any", "--target-dir": "any",
                      "--explain": "any"}
+# EXCLUDED (wave 2026-09-27, finding A - confirmed live: `cargo test
+# --config 'build.rustc-wrapper="/usr/bin/false"' --no-run` was admitted):
+# --config (`--config <KEY>=<VALUE>` sets an arbitrary Cargo config key
+# INLINE on the command line - not a file path - and keys like
+# `build.rustc-wrapper`/`target.*.runner` name a PROGRAM Cargo then execs
+# on every build/run/test); -Z (unstable nightly flags - open namespace,
+# several of which are themselves further escape hatches; doubt -> not
+# included). `-C <DIR>` stays admitted - it only changes the working
+# directory before running (same class as `git -C`, already accepted
+# elsewhere), it does not name a program.
 
 _CARGO_PKG_SELECT_BOOL = ("--workspace", "--all")
 _CARGO_PKG_SELECT_VALUE = {"-p": "any", "--package": "any", "--exclude": "any"}
@@ -1894,9 +1931,21 @@ _GRADLEW_EXTRA_BOOL = (
 #   --refresh-keys, --export-keys (write/refresh the local verification
 #   keyring); --stop, --foreground, --write-locks, --update-locks,
 #   --write-verification-metadata (already excluded - endorsed, unchanged).
+# EXCLUDED from cli_families.GRADLE_VALUE_FLAGS (finding A, wave
+# 2026-09-27, confirmed live: `./gradlew --init-script evil.gradle build`
+# was admitted): `-I`/`--init-script <FILE>` makes Gradle EXECUTE the named
+# file as a Groovy/Kotlin init script before the build starts - unlike a
+# declarative config-file-path flag, the file's entire content runs as
+# code (can itself `exec` arbitrary commands). GRADLE_VALUE_FLAGS is
+# shared with the security gate's task scanner (t6_tools.py, needs the
+# full table to correctly skip flag VALUES while looking for task
+# tokens) so it is not edited there; only the rewriter's own admission
+# excludes these two spellings.
+_GRADLEW_VALUE_EXCLUDED = frozenset({"-I", "--init-script"})
 HEAD_SPECS["./gradlew"] = spec(
     bool=cli_families.GRADLE_BOOL_FLAGS + _GRADLEW_EXTRA_BOOL,
-    value=dict({f: "any" for f in cli_families.GRADLE_VALUE_FLAGS},
+    value=dict({f: "any" for f in cli_families.GRADLE_VALUE_FLAGS
+                if f not in _GRADLEW_VALUE_EXCLUDED},
                # --configuration <name>: selects which dependency
                # configuration `dependencies`/`dependencyInsight` report
                # on - RO. Not in cli_families.GRADLE_VALUE_FLAGS (that

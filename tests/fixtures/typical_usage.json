@@ -461,7 +461,7 @@
  "ruff check --diff .": "actx ruff check --diff .",
  "ruff check --watch .": null,
  "ruff check . --add-noqa": null,
- "ruff check . --config \"line-length = 100\"": "actx ruff check . --config \"line-length = 100\"",
+ "ruff check . --config \"line-length = 100\"": null,
  "ruff check . --exit-zero": "actx ruff check . --exit-zero",
  "ruff check . --extend-select B --extend-exclude \"*.pyi\"": "actx ruff check . --extend-select B --extend-exclude \"*.pyi\"",
  "ruff check . --fix": null,
