@@ -13,12 +13,34 @@ Structure:
     flag followed by a token starting with "-".
   - RewriteSpecPlanPinTests: the plan's own explicit STEP-W5 negative pins
     (cargo test --/go test -args forwarding) plus the TK-57 finding pins
-    (E-001) that must stay fixed under the new engine.
+    (E-001) that must stay fixed under the new engine, plus the wave
+    2026-09-27 A/B finding pins.
+  - RewriteSpecDataDrivenTests (finding D, wave 2026-09-27): generic over
+    EVERY level of EVERY HEAD_SPECS entry (a mechanical walk of
+    `rewrite_spec.HEAD_SPECS`, module `_rewrite_spec_data_driven` below) -
+    each admitted bool/value/optional/numeric/cluster spelling rewrites in
+    a minimal command reaching that level; an unknown flag and an
+    abbreviation of each admitted long flag do not; a required-value flag
+    followed by a "-x" token does not. SQL heads (psql/sqlite3/duckdb) are
+    excluded from this walk - their admission also depends on the
+    `sql_payload` hook (RO/write classification of the SQL text itself),
+    a second axis this purely-flag-level walk cannot exercise; they keep
+    their own dedicated coverage (`test_sql_heads`,
+    `test_sql_dangerous_payload_rejected`). Flags reached only through an
+    `after_dashdash=("forward", ...)` boundary (FORWARD_SPECS) are also
+    out of this walk's scope (a different matching entry point,
+    `_match_after_dashdash`, not the per-head grammar) - those keep their
+    existing named pins (cargo_fmt_forward, cargo_test_libtest_forward,
+    cargo_clippy_forward, go_test_binary_forward).
 
-Not exhaustive over all 53 heads (the corpus/replay tooling is the
-completeness mechanism, per STEP-W1/W4) - this file pins the GRAMMAR
-primitives and the specific commands the plan names by exact text."""
+The corpus/replay tooling (STEP-W1/W4) remains the completeness mechanism
+against REAL traffic; this file pins the GRAMMAR primitives themselves,
+now exhaustively for the closed per-head flag admission (RewriteSpecData
+DrivenTests) plus the specific commands the plan/wave name by exact
+text."""
 import unittest
+
+from tests._rewrite_spec_data_driven import iter_flag_cases
 
 from actx_lib.rewriter import rewrite
 
@@ -218,6 +240,34 @@ class RewriteSpecPlanPinTests(unittest.TestCase):
         self.assertEqual(
             rewrite("cargo fmt --check -- --emit stdout"),
             "actx cargo fmt --check -- --emit stdout",
+        )
+
+
+class RewriteSpecDataDrivenTests(unittest.TestCase):
+    """Finding D (wave 2026-09-27): generic over every level of every
+    HEAD_SPECS entry - see `tests/_rewrite_spec_data_driven.py` and this
+    module's docstring for exact scope. Failures are collected (not
+    asserted one at a time) so a single run reports every mismatch, not
+    just the first."""
+
+    def test_every_admitted_and_rejected_spelling_at_every_level(self):
+        failures = []
+        total = 0
+        for desc, command, should_rewrite in iter_flag_cases():
+            total += 1
+            result = rewrite(command)
+            if should_rewrite:
+                ok = result == "actx " + command
+            else:
+                ok = result is None
+            if not ok:
+                failures.append((desc, command, "expected rewrite" if should_rewrite
+                                  else "expected reject", result))
+        self.assertGreater(total, 200, "walker produced suspiciously few cases")
+        self.assertEqual(
+            failures, [],
+            f"{len(failures)}/{total} data-driven case(s) failed "
+            f"(showing up to 25): {failures[:25]}",
         )
 
 

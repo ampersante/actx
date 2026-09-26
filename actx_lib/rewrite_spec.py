@@ -641,15 +641,25 @@ HEAD_SPECS["gh"] = spec(
 # read-only display/sort/format - unioning BSD+GNU under one head token is
 # safe (the worst outcome of a wrong-dialect flag is "invalid option").
 _LS_BOOL = (
-    "-@", "-A", "-B", "-C", "-F", "-G", "-H", "-I", "-L", "-O", "-P", "-R",
-    "-S", "-T", "-U", "-W", "-X", "-a", "-b", "-c", "-d", "-e", "-f", "-g",
+    # Wave 2026-09-27 finding D: "-I"/"-T"/"-w"/"--tabsize" removed from
+    # here - each is a REQUIRED-value flag (see _LS_VALUE below) that was
+    # ALSO listed here; since the engine's flag matcher checks `bool_set`
+    # before `value`, the duplicate silently made bool_set win, so the
+    # value declaration was dead code (`ls -I` alone, missing its
+    # required pattern, was wrongly admitted as if `-I` took no
+    # argument) - caught mechanically by the data-driven walk in
+    # tests/_rewrite_spec_data_driven.py, not a security hole (ls is
+    # read-only either way; both spellings still rewrite the same
+    # verbatim command), a grammar-accuracy fix.
+    "-@", "-A", "-B", "-C", "-F", "-G", "-H", "-L", "-O", "-P", "-R",
+    "-S", "-U", "-W", "-X", "-a", "-b", "-c", "-d", "-e", "-f", "-g",
     "-h", "-i", "-k", "-l", "-m", "-n", "-o", "-p", "-q", "-r", "-s", "-t",
-    "-u", "-v", "-w", "-x", "-y", "-%", "-1", "-,",
+    "-u", "-v", "-x", "-y", "-%", "-1", "-,",
     "--all", "--almost-all", "--escape", "--ignore-backups", "--classify",
     "--full-time", "--group-directories-first", "--dereference-command-line",
     "--inode", "--kibibytes", "--dereference", "--numeric-uid-gid",
     "--literal", "--hide-control-chars", "--quote-name", "--reverse",
-    "--recursive", "--size", "--tabsize", "--directory", "--no-group",
+    "--recursive", "--size", "--directory", "--no-group",
     "--human-readable", "--file-type", "--show-control-chars", "--si",
     "--dereference-command-line-symlink-to-dir", "--zero", "--author",
     "--help", "--version", "--dired",
@@ -708,7 +718,15 @@ HEAD_SPECS["gls"] = HEAD_SPECS["ls"]  # Homebrew coreutils spelling on macOS
 # `optional`. `-P`/`--perl-regexp` and `--exclude-from` are GNU-only,
 # well-established, not re-verified live (no GNU grep on this machine).
 HEAD_SPECS["grep"] = spec(
-    bool=tuple(f"-{c}" for c in "abcEFGHhIiJLlMmnOopqRSsUuVvwXxyZz") + (
+    # "m" removed from this char-class (wave 2026-09-27 finding D): "-m"
+    # is a REQUIRED-value flag (see `value` below, "-m"/"--max-count");
+    # the comment above already documented d/D/m as removed from here,
+    # but "m" was left in by mistake - the bool_set-checked-first order
+    # made the value declaration dead code, mechanically caught by
+    # tests/_rewrite_spec_data_driven.py (not a security hole - grep is
+    # read-only either way, both spellings rewrite the same verbatim
+    # command; a grammar-accuracy fix).
+    bool=tuple(f"-{c}" for c in "abcEFGHhIiJLlMnOopqRSsUuVvwXxyZz") + (
         "--line-buffered", "--null", "-r", "-R", "--recursive", "--mmap",
         "--help", "-P", "--perl-regexp",
     ),

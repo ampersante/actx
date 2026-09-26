@@ -282,9 +282,17 @@ def _match_level(level, tokens, ancestor_eff):
         # same as the direct `cargo fmt --check` form does.
         return False
     if level["forbid_write_token"] and any(
-        tok in ("--fix", "fix", "format") or tok.startswith("--fix")
+        tok in ("--fix", "fix", "format") or tok.startswith("--fix-")
         for tok in tokens
     ):
+        # Finding D (wave 2026-09-27): "--fix-" (with the trailing dash)
+        # still catches every intentional variant this hook exists for
+        # (--fix-only, --fix-dry-run, --fix-type - each individually RO
+        # for ruff/eslint but deliberately still rejected, an accepted
+        # loss per this file's own EXCLUDED comments) without also
+        # rejecting ruff's separately-admitted, non-mutating --fixable
+        # (a bare `tok.startswith("--fix")` swallowed it too - dead
+        # admission, caught by tests/_rewrite_spec_data_driven.py).
         return False
     eff = _scanning_eff(level, ancestor_eff)
     bool_set, value_map, optional_map, cluster, numeric = eff
