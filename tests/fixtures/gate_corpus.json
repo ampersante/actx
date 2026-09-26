@@ -12388,7 +12388,7 @@
   "sqlite3 --cmd '.load ./x' db 'select 1'": [
    "ask",
    "T6_HIGH_RISK_SQL",
-   "SQL payload without an explicit read-only class ('db') requires human confirmation (default-deny)"
+   "SQL payload without an explicit read-only class ('.load ./x') requires human confirmation (default-deny)"
   ],
   "sqlite3 --init boot.sql db 'select 1'": [
    "ask",

@@ -311,6 +311,55 @@ class SqlPayloadsTests(unittest.TestCase):
                     (head, argv, payloads),
                 )
 
+    # -- TK-57 REQ-08 (gate closure): -cmd/--cmd/-cmd=/--cmd= ------------
+
+    def test_cmd_flag_all_four_spellings_are_one_payload_flag(self):
+        # E-001/E-009: `sqlite3 --cmd='PRAGMA user_version=123' 'SELECT 1'
+        # 'SELECT 2'` was previously allowed because only bare single-dash
+        # `-cmd` was recognized; all four spellings must yield the exact
+        # same payload list.
+        for head in ("sqlite3", "duckdb"):
+            for flag in ("-cmd", "--cmd"):
+                with self.subTest(head=head, form="bare", flag=flag):
+                    self.assertEqual(
+                        sql_verbs.sql_payloads(
+                            head,
+                            [flag, "PRAGMA user_version=123",
+                             "SELECT 1", "SELECT 2"],
+                        ),
+                        ["PRAGMA user_version=123", "SELECT 2"],
+                    )
+            for flag_eq in ("-cmd=", "--cmd="):
+                with self.subTest(head=head, form="attached", flag=flag_eq):
+                    self.assertEqual(
+                        sql_verbs.sql_payloads(
+                            head,
+                            [flag_eq + "PRAGMA user_version=123",
+                             "SELECT 1", "SELECT 2"],
+                        ),
+                        ["PRAGMA user_version=123", "SELECT 2"],
+                    )
+
+    def test_cmd_flag_exact_e009_case(self):
+        # Literal pin from the plan (REQ-08).
+        self.assertEqual(
+            sql_verbs.sql_payloads(
+                "sqlite3",
+                ["--cmd=PRAGMA user_version=123", "SELECT 1", "SELECT 2"],
+            ),
+            ["PRAGMA user_version=123", "SELECT 2"],
+        )
+
+    def test_cmd_flag_lookalike_is_not_matched(self):
+        # `-cmdx`/`--cmdfoo` are not the cmd flag: ordinary unknown flag,
+        # value token stays a plain positional.
+        self.assertEqual(
+            sql_verbs.sql_payloads(
+                "sqlite3", ["-cmdx=PRAGMA user_version=123", "db", "select 1"]
+            ),
+            ["select 1"],
+        )
+
     def test_mode_flag_lookalikes_are_not_markers(self):
         # -ascii starts with lowercase "a": not the -A archive family; not
         # in the mode-flag name set either -> ordinary unknown flag.

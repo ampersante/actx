@@ -139,6 +139,23 @@ def _mode_flag_marker(head, tok):
     return None
 
 
+def _cmd_flag_attached_value(tok):
+    """Attached-value payload for a `-cmd=value`/`--cmd=value` spelling
+    (TK-57 REQ-08, E-001/E-009): sqlite3's shell strips 1-2 leading dashes
+    generically before comparing flag names (same convention already
+    documented above for -A/--A), so `-cmd` and `--cmd` are one flag; with
+    the value attached via `=` this returns it as the payload text. None
+    when `tok` is not this form (bare `-cmd`/`--cmd` take the next token
+    instead - handled by the caller alongside `-c`/`--command`)."""
+    if not tok.startswith("-"):
+        return None
+    stripped = tok[2:] if tok.startswith("--") else tok[1:]
+    name, sep, value = stripped.partition("=")
+    if name == "cmd" and sep:
+        return value
+    return None
+
+
 def _value_flag_skip(head, tok):
     """Number of rest[] tokens (this flag token plus any separate value
     token(s)) to skip when `tok` is a non-SQL value-flag of `head` (TK-57
@@ -201,8 +218,13 @@ def sql_payloads(head, rest):
     - psql / duckdb: the token after every ``-c``/``--command`` flag plus
       ``--command=`` forms (psql supports repeated -c; every occurrence is
       a payload - `psql -c "SELECT 1" -c "DROP x"` classifies by both).
-    - sqlite3 / duckdb: the same -c/-cmd forms when present, PLUS every
-      positional token after the first (db file) when there are >= 2
+    - sqlite3 / duckdb: the same -c forms, PLUS ``-cmd``/``--cmd`` (bare,
+      next token) and ``-cmd=``/``--cmd=`` (attached value) - TK-57 REQ-08:
+      all four spellings are one flag under the dash-stripping convention
+      above, so each must reach the classifier as a payload (E-001/E-009:
+      `sqlite3 --cmd='PRAGMA user_version=123' ...` was previously allowed
+      because only the bare single-dash `-cmd` form was recognized) - PLUS
+      every positional token after the first (db file) when there are >= 2
       positionals (TK-57 REQ-02/REQ-03) - not just the last: sqlite3 and
       duckdb both execute EVERY positional after the db file as its own
       SQL statement in order (confirmed for sqlite3 by E-004: `sqlite3
@@ -229,16 +251,22 @@ def sql_payloads(head, rest):
     n = len(rest)
     while i < n:
         tok = rest[i]
-        # `-cmd` (sqlite3; duckdb mirrors) takes a COMMAND payload run
-        # before stdin — meta-commands (.shell/.output/.read) inside it
-        # must reach the classifier like any -c payload.
-        if tok in ("-c", "--command", "-cmd"):
+        # `-cmd`/`--cmd` (sqlite3; duckdb mirrors) takes a COMMAND payload
+        # run before stdin — meta-commands (.shell/.output/.read) inside it
+        # must reach the classifier like any -c payload (REQ-08: both
+        # dash-counts are the same flag).
+        if tok in ("-c", "--command", "-cmd", "--cmd"):
             if i + 1 < n:
                 payloads.append(rest[i + 1])
             i += 2
             continue
         if tok.startswith("--command="):
             payloads.append(tok.split("=", 1)[1])
+            i += 1
+            continue
+        cmd_value = _cmd_flag_attached_value(tok)
+        if cmd_value is not None:
+            payloads.append(cmd_value)
             i += 1
             continue
         marker = _mode_flag_marker(head, tok)
