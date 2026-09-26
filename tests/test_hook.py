@@ -75,6 +75,15 @@ class HookCliTests(unittest.TestCase):
         self.assertEqual(data["decision"], "force_ask")
         self.assertIn("Force-pushing to remote git repository requires human confirmation", data["reason"])
 
+    def test_gemini_secret_class_bare_operand_denied(self):
+        # TK-57 S1 (STEP-01): matches the Claude-schema pin above.
+        payload = gemini_input("run_command", {"CommandLine": "cat client_secret"})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["decision"], "deny")
+        self.assertIn("client_secret", data["reason"])
+
     def test_gemini_find_exec_escaped_semicolon_denied(self):
         # TK-57 S6 (STEP-05): matches the Claude-schema pin above.
         payload = gemini_input("run_command", {"CommandLine": "find . -type f -exec sudo rm -rf {} \\;"})
@@ -190,6 +199,44 @@ class HookCliTests(unittest.TestCase):
         self.assertEqual(output["hookEventName"], "PreToolUse")
         self.assertEqual(output["permissionDecision"], "deny")
         self.assertIn("T1_CREDENTIAL_ACCESS", output["permissionDecisionReason"])
+
+    def test_security_gate_denies_secret_class_basename(self):
+        # TK-57 S1 (STEP-01, REQ-01): new secret-name basename record.
+        p = self.run_hook(hook_input("Bash", {"command": "cat kubeconfig"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("T1_CREDENTIAL_ACCESS", output["permissionDecisionReason"])
+
+    def test_security_gate_denies_secret_keyword_bare_operand(self):
+        # REQ-01 condition (b): bare (no extension/'/') non-flag operand of
+        # a file-read head is in scope for the 'secret' keyword class.
+        p = self.run_hook(hook_input("Bash", {"command": "cat client_secret"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("T1_CREDENTIAL_ACCESS", output["permissionDecisionReason"])
+
+    def test_security_gate_denies_git_show_secret_class(self):
+        # REQ-01 git-read verbs: `git show HEAD:<path>` operand form.
+        p = self.run_hook(hook_input("Bash", {"command": "git show HEAD:client_secret"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("T1_CREDENTIAL_ACCESS", output["permissionDecisionReason"])
+
+    def test_security_gate_secret_class_negative_neighbor_unaffected(self):
+        # A bare subcommand word ('secrets') on a non-file-read head stays
+        # out of scope - kubectl get secrets keeps rewriting as before.
+        p = self.run_hook(hook_input("Bash", {"command": "kubectl get secrets"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "allow")
+        self.assertEqual(output["updatedInput"]["command"], "actx kubectl get secrets")
 
     def test_security_gate_denies_destructive_mutation(self):
         p = self.run_hook(hook_input("Bash", {"command": "rm -rf /"}))

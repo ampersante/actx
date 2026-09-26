@@ -53,6 +53,14 @@ _PROTECTED_BASENAMES = {
     "privkey.pem",
     "server.key",
     "service_account.json",
+    # --- TK-57 S1 (STEP-01, REQ-01): secret-name class additions ---
+    "kubeconfig",
+    ".vault-token",
+    ".boto",
+    ".s3cfg",
+    ".dockercfg",
+    "secring.gpg",
+    "wp-config.php",
 }
 
 _SECRET_EXTENSIONS = (
@@ -64,7 +72,49 @@ _SECRET_EXTENSIONS = (
     ".kdbx",
     ".keystore",
     ".jks",
+    # --- TK-57 S1 (STEP-01, REQ-01) ---
+    ".p8",
+    ".ppk",
+    ".ovpn",
+    ".keychain",
+    ".keychain-db",
 )
+
+# TK-57 S1 (STEP-01, REQ-01): secret-name keyword class. Unlike the
+# unconditional credentials/password/passwd substring check below, these
+# are gated by the caller (_check_sensitive_paths) to only the two cases
+# REQ-01 defines: (a) any path-like token (contains '/' or '.') on any
+# head, or (b) a non-flag operand of a head whose arguments are file paths
+# (_SECRET_KEYWORD_FILE_HEADS, or git's own read verbs) - a bare
+# subcommand word like 'secrets' in `kubectl get secrets` or `gh secret
+# list` is out of scope (that class is a different problem - TK-52).
+_SECRET_KEYWORDS = (
+    "secret",
+    "apikey",
+    "api_key",
+    "api-key",
+    "adminsdk",
+    "service-account",
+    "service_account",
+)
+
+# File-read heads whose non-flag operands are file paths: REQ-01 condition
+# (b). grep/rg/egrep/fgrep already exclude their pattern argument via the
+# existing exclusion logic below (git-grep gets the same treatment).
+_SECRET_KEYWORD_FILE_HEADS = frozenset({
+    "cat", "head", "tail", "less", "more", "wc", "sort", "uniq", "strings",
+    "xxd", "od", "hexdump", "base64", "cp", "mv", "scp", "rsync", "tar",
+    "zip", "diff", "cmp", "nl", "tac", "file", "stat",
+    "grep", "rg", "egrep", "fgrep",
+})
+
+# git subcommands that read file/blob content - REQ-01's "git-чтение"
+# class. `git grep`'s pattern argument is excluded the same way a bare
+# grep's is (see _check_sensitive_paths).
+_GIT_READ_VERBS = frozenset({
+    "show", "diff", "log", "blame", "cat-file", "grep", "archive",
+    "annotate", "difftool",
+})
 
 _ALLOWED_ENV_SUFFIXES = (
     ".example",
@@ -246,6 +296,34 @@ _RE_SENSITIVE_QUICK_CHECK = re.compile(
     re.IGNORECASE,
 )
 
+# TK-57 S1 (STEP-01, REQ-01/A1): quick-check reachability for the new
+# secret-name records ('key' already covers apikey/api_key/.keychain*,
+# 'token' already covers .vault-token - confirmed by pin, not by this
+# comment). A plain substring scan, not folded into the regex above: that
+# regex is the hottest path in the gate (every token of every command),
+# and benchmarking showed adding these ~12-16 alternatives there costs
+# ~20-30% extra time on a wide multi-file command (test_perf.py's 150-file
+# case) vs ~7-8% for a separate short-circuited substring pass (TK-57
+# session evidence). This is a coarse, permissive pre-filter like the
+# regex above - it may over-match; precision is enforced later (the
+# basename/extension tables, and check_secret_keywords gating in
+# _is_sensitive_path for the broad keyword class).
+_NEW_SECRET_QUICK_CHECK_SUBSTRINGS = (
+    ".p8", "ppk", "ovpn", "boto", "s3cfg", "dockercfg", "kubeconfig",
+    "secring", "wp-config",
+    "secret", "apikey", "api_key", "api-key", "adminsdk",
+    "service-account", "service_account",
+)
+
+
+def _matches_new_secret_substrings(text: str) -> bool:
+    low = text.lower()
+    return any(kw in low for kw in _NEW_SECRET_QUICK_CHECK_SUBSTRINGS)
+
+
+def _quick_check_hit(text: str) -> bool:
+    return bool(_RE_SENSITIVE_QUICK_CHECK.search(text)) or _matches_new_secret_substrings(text)
+
 
 def _strip_redirection(token: str) -> str:
     """Strip leading/trailing shell redirection and background symbols."""
@@ -351,13 +429,22 @@ def _matches_protected_paths(candidate: str) -> bool:
     return False
 
 
-def _is_sensitive_path(path: str) -> bool:
-    """Check whether a normalized path points to a protected credential or secret file."""
+def _is_sensitive_path(path: str, check_secret_keywords: bool = False) -> bool:
+    """Check whether a normalized path points to a protected credential or secret file.
+
+    check_secret_keywords (TK-57 S1, REQ-01): the caller has already
+    confirmed this token satisfies condition (a) or (b) - see
+    _SECRET_KEYWORDS above - and asks _is_sensitive_path to also match the
+    'secret'/'apikey'/service-account keyword class. Defaults False so
+    every other call site (network-exfiltration @file checks, recursive
+    subshell checks) keeps its prior behavior unchanged.
+    """
     if not path:
         return False
 
-    # Super fast regex search (<0.0001ms)
-    if not _RE_SENSITIVE_QUICK_CHECK.search(path):
+    # Super fast regex search (<0.0001ms), widened by the cheap substring
+    # pre-filter above for the TK-57 S1 secret-name class records.
+    if not _quick_check_hit(path):
         return False
 
     clean_path = _strip_redirection(path).strip("'\"")
@@ -449,6 +536,13 @@ def _is_sensitive_path(path: str) -> bool:
 
     # Secret keywords in filename: credentials, password, passwd
     if "credentials" in base_lower or "password" in base_lower or "passwd" in base_lower:
+        return True
+
+    # TK-57 S1 (STEP-01, REQ-01): secret/apikey/service-account keyword
+    # class - gated by the caller (see check_secret_keywords docstring
+    # above), so a bare 'secrets' subcommand word (`kubectl get secrets`)
+    # never reaches here unqualified.
+    if check_secret_keywords and any(kw in base_lower for kw in _SECRET_KEYWORDS):
         return True
 
     # Token files (token, token.json, token.txt, auth_token, session_token, access_token, etc.)
@@ -667,6 +761,20 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
             if tokens[1] in ("branch", "tag", "checkout", "switch") and tok not in ("branch", "tag", "checkout", "switch") and not tok.startswith("-"):
                 excluded_tokens.add(tok)
 
+    # TK-57 S1 (REQ-01): `git grep`'s pattern argument is excluded the same
+    # way a bare grep's is (offset by the extra 'git'+'grep' tokens).
+    if head == "git" and len(tokens) >= 3 and tokens[1] == "grep":
+        has_f = any(t in ("-f", "--file") or (t.startswith("-f") and len(t) > 2) or t.startswith("--file=") for t in tokens[2:])
+        for idx, tok in enumerate(tokens[2:], 2):
+            if tok in ("-e", "--regexp") and idx + 1 < len(tokens):
+                excluded_tokens.add(tokens[idx + 1])
+            elif tok.startswith("--regexp=") or (tok.startswith("-e") and len(tok) > 2):
+                excluded_tokens.add(tok)
+        if not excluded_tokens and not has_f:
+            positional = [t for t in tokens[2:] if not t.startswith("-")]
+            if positional:
+                excluded_tokens.add(positional[0])
+
     if head in ("grep", "rg", "ag", "ack") and len(tokens) >= 2:
         has_f = any(t in ("-f", "--file") or (t.startswith("-f") and len(t) > 2) or t.startswith("--file=") for t in tokens[1:])
         # Check if -e or --regexp was used
@@ -686,11 +794,25 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
             if tok in ("-k", "-m") and idx + 1 < len(tokens):
                 excluded_tokens.add(tokens[idx + 1])
 
-    if not _RE_SENSITIVE_QUICK_CHECK.search(command):
+    if not _quick_check_hit(command):
         return None
 
+    # TK-57 S1 (REQ-01) condition (b): non-flag operands of file-read heads
+    # and git's own read verbs are in scope for the secret-keyword class
+    # even when the operand itself isn't path-like (bare `cat api_key`).
+    secret_keyword_head = head in _SECRET_KEYWORD_FILE_HEADS or (
+        head == "git" and len(tokens) >= 2 and tokens[1] in _GIT_READ_VERBS
+    )
+    # Perf: a new-record substring can only appear in a token if it also
+    # appears somewhere in the full command (tokens are substrings of it) -
+    # so the extra per-token substring scan only runs when this one,
+    # command-wide check already found a hit. Keeps the common case (no
+    # secret-name hint anywhere) at the original per-token regex-only cost
+    # (test_perf.py's 150-file wide command).
+    command_has_new_secret_hint = _matches_new_secret_substrings(command)
+
     # Generic file reader / flag / argument / shell redirection inspection
-    for tok in tokens:
+    for idx, tok in enumerate(tokens):
         if tok in excluded_tokens or tok == excluded_src:
             continue
         clean = _strip_redirection(tok).strip("'\"")
@@ -698,9 +820,18 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
             continue
         if tok.startswith("--grep=") or tok.startswith("-G") or tok.startswith("-S"):
             continue
-        if not _RE_SENSITIVE_QUICK_CHECK.search(clean):
+        if not _RE_SENSITIVE_QUICK_CHECK.search(clean) and not (
+            command_has_new_secret_hint and _matches_new_secret_substrings(clean)
+        ):
             continue
-        if _is_sensitive_path(clean):
+        # TK-57 S1 (REQ-01) condition (a): any path-like token (contains
+        # '/' or '.') is in scope for the secret-keyword class regardless
+        # of head; condition (b) additionally covers non-flag, non-head
+        # operands of the file-read heads / git-read verbs above.
+        check_kw = ("/" in clean or "." in clean) or (
+            secret_keyword_head and idx != 0 and not clean.startswith("-")
+        )
+        if _is_sensitive_path(clean, check_secret_keywords=check_kw):
             return SecurityDecision(
                 decision="deny",
                 reason=f"Access to sensitive credential/file '{clean}' is prohibited",
@@ -708,7 +839,8 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
             )
         if "=" in clean and not clean.startswith("--message="):
             val = clean.split("=", 1)[1].strip("'\"")
-            if _is_sensitive_path(val):
+            val_kw = ("/" in val or "." in val) or secret_keyword_head
+            if _is_sensitive_path(val, check_secret_keywords=val_kw):
                 return SecurityDecision(
                     decision="deny",
                     reason=f"Access to sensitive credential/file '{val}' is prohibited",
@@ -716,7 +848,8 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
                 )
         if clean.startswith("-f") and len(clean) > 2 and not clean.startswith("--"):
             val = clean[2:].strip("'\"")
-            if _is_sensitive_path(val):
+            val_kw = ("/" in val or "." in val) or secret_keyword_head
+            if _is_sensitive_path(val, check_secret_keywords=val_kw):
                 return SecurityDecision(
                     decision="deny",
                     reason=f"Access to sensitive credential/file '{val}' is prohibited",

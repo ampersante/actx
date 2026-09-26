@@ -1197,6 +1197,91 @@ class ProtectedPathsTableTests(unittest.TestCase):
                     f"Prefilter token '{token}' does not match path '{path}'",
                 )
 
+    # ------------------------------------------------------------------
+    # TK-57 S1 (STEP-01, REQ-01): secret-name class (basenames/extensions/
+    # keywords) incl. git-read operands and quick-check reachability
+    # ------------------------------------------------------------------
+    def test_t1_secret_class_basenames_and_extensions_denied(self):
+        self._assert_deny_all([
+            "cat x.p8", "cat x.ppk", "cat a.ovpn", "cat .boto", "cat .s3cfg",
+            "cat .dockercfg", "cat kubeconfig", "cat secring.gpg",
+            "cat wp-config.php", "cat .vault-token",
+        ])
+
+    def test_t1_secret_class_keywords_denied(self):
+        self._assert_deny_all([
+            "cat client_secret.json", "cat secrets.yaml",
+            "cat my-service-account-abc.json", "cat firebase-adminsdk-x.json",
+            "cat api_key.txt",
+        ])
+        # Bare (no extension, no '/'): reachable only as a non-flag operand
+        # of a file-read head (§7 STEP-01 condition b) - 'kubectl get
+        # secrets' style bare subcommand words stay unaffected (below).
+        self._assert_deny_all(["cat api_key", "cat client_secret", "cat secrets", "cat apikey"])
+        self._assert_deny_all(["head api_key", "head client_secret", "head secrets", "head apikey"])
+        for target in ("api_key", "client_secret", "secrets", "apikey"):
+            self.assert_deny(f"grep x {target}", "T1_CREDENTIAL_ACCESS")
+
+    def test_t1_git_read_secret_class_denied(self):
+        self._assert_deny_all([
+            "git show HEAD:client_secret",
+            "git diff -- client_secret",
+            "git log -p -- api_key",
+            "git blame client_secret",
+        ])
+
+    def test_t1_secret_class_negative_neighbors_allowed(self):
+        self.assert_allow("git log --oneline")
+        self.assert_allow("git show HEAD")
+        self.assert_allow("git diff")
+        self.assert_allow("kubectl get secrets")
+        self.assert_allow("gh secret list")
+        self.assert_allow("gcloud secrets list")
+        self.assert_allow("grep secret src/app.py")
+        self.assert_allow("cat README.md")
+
+    def test_t1_secret_class_false_positive_precedent(self):
+        # E-016 precedent: the existing broad keyword-substring class
+        # (credentials/password/passwd) already denies these on any head -
+        # 'secret' follows the same, already-accepted design.
+        self.assert_deny("pytest tests/test_secrets.py", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("git diff src/secret_store.py", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("cat secrets.py", "T1_CREDENTIAL_ACCESS")
+
+    def test_t1_secret_class_prefilter_reachability(self):
+        # Assumption A1: every new basename/extension/keyword record must
+        # be reachable through the quick-check pre-filter, confirmed by a
+        # pin (not by reasoning) - or _is_sensitive_path early-returns
+        # before ever consulting the new records. Perf (test_perf.py's
+        # wide-command case): the new records are checked via
+        # _quick_check_hit's short-circuited substring scan, not folded
+        # into the hot _RE_SENSITIVE_QUICK_CHECK regex - both are valid
+        # reachability paths, so this asserts the combined gate.
+        tokens_paths = {
+            "\\.p8": "x.p8",
+            "ppk": "x.ppk",
+            "ovpn": "a.ovpn",
+            "boto": ".boto",
+            "s3cfg": ".s3cfg",
+            "dockercfg": ".dockercfg",
+            "kubeconfig": "kubeconfig",
+            "secring": "secring.gpg",
+            "wp-config": "wp-config.php",
+            "secret": "client_secret.json",
+            "adminsdk": "firebase-adminsdk-x.json",
+            "service[-_]account": "my-service-account-abc.json",
+            # Already-existing alternatives that cover new records too -
+            # A1 requires this confirmed by pin, not asserted by comment.
+            "token (existing)": ".vault-token",
+            "key (existing)": "api_key.txt",
+        }
+        for token, path in tokens_paths.items():
+            with self.subTest(token=token):
+                self.assertTrue(
+                    security_gate._quick_check_hit(path),
+                    f"Prefilter token '{token}' does not match path '{path}'",
+                )
+
     def test_gate_protected_path_latency_under_1ms(self):
         # 1000 evaluations hitting the _PROTECTED_PATHS table (home + glob entries)
         n = 1000
