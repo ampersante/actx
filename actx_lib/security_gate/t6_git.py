@@ -57,11 +57,37 @@ _GIT_CONFIG_READ_FLAGS = frozenset({
     "--name-only", "-e", "--edit",
 })
 _GIT_CONFIG_WRITE_FLAGS = frozenset({"--add", "--replace-all"})
-_GIT_CONFIG_FILE_VALUE_FLAGS = frozenset({"--file", "-f", "--blob"})
+# TK-57 S7 / TK-60 STEP-G3 (REQ-09): every VALUE-taking option of `git
+# config` (`/usr/bin/git config --help`, 2026-09-27) that can appear
+# BEFORE the key/verb - each consumes exactly one following token as its
+# value (space form) or the same token's own "=<value>" suffix (attached
+# form). Both forms verified against git 2.50.1: --type/--comment/
+# --default confirmed live (space and "="); --value/--url follow the same
+# "--opt=<value>" synopsis convention parse-options.c honors for every
+# long option (spot-checked live: both accepted the space form without a
+# usage error). A value-flag missing here misaligns the positional scan
+# below - its value token gets mistaken for the key (E-001: `git config
+# --type path core.pager /tmp/x` read "path" as the key, not
+# "core.pager", and never asked).
+_GIT_CONFIG_VALUE_FLAGS = frozenset({
+    "-f", "--file", "--blob", "--type", "--comment", "--value",
+    "--default", "--url",
+})
 _GIT_CONFIG_BOOL_FLAGS = frozenset({
     "--global", "--local", "--system", "--worktree", "--includes",
     "--no-includes", "-z", "--null", "--show-origin", "--show-scope",
+    "--no-value", "--fixed-value", "--all", "--append", "--regexp",
+    "--no-type", "--bool", "--int", "--bool-or-int", "--path",
+    "--expiry-date", "--show-names", "--no-show-names",
 })
+
+
+def _git_config_value_flag_attached(tok: str) -> bool:
+    """True when `tok` is the attached `--flag=value` spelling of a
+    _GIT_CONFIG_VALUE_FLAGS member (its value needs no extra token)."""
+    if not tok.startswith("--") or "=" not in tok:
+        return False
+    return tok.split("=", 1)[0] in _GIT_CONFIG_VALUE_FLAGS
 
 
 def _git_config_is_write(sub_args: list[str]):
@@ -86,9 +112,9 @@ def _git_config_is_write(sub_args: list[str]):
             saw_write_flag = True
         elif tok in _GIT_CONFIG_BOOL_FLAGS:
             pass
-        elif tok in _GIT_CONFIG_FILE_VALUE_FLAGS:
-            i += 1  # also skip its value
-        elif tok.startswith("--file=") or tok.startswith("--type=") or tok.startswith("--blob="):
+        elif tok in _GIT_CONFIG_VALUE_FLAGS:
+            i += 1  # also skip its value - consumed before the key (G3)
+        elif _git_config_value_flag_attached(tok):
             pass
         elif not tok.startswith("-"):
             positionals.append(tok)

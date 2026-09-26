@@ -554,6 +554,45 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_allow("git fetch")
         self.assert_allow("git push origin main")
 
+    def test_g3_git_config_value_flags_consumed_before_key(self):
+        # TK-60 STEP-G3 (REQ-09): every value-taking `git config` option
+        # (--type/--comment/--value/--default/--url/-f/--file/--blob) must
+        # be consumed - space AND attached "=" form - before the key is
+        # read, for both the legacy positional form and the git>=2.46 verb
+        # form (set/get/unset/list); otherwise the option's own value is
+        # mistaken for the key and an exec-class write silently allows
+        # (E-001). Table: (command, expected decision, expected category).
+        table = [
+            # Plan pins, verbatim.
+            ("git config --type path core.pager /tmp/x", "ask", "T6_HIGH_RISK_GIT"),
+            ("git config --type bool alias.p true", "ask", "T6_HIGH_RISK_GIT"),
+            ("git config --type path --get core.pager", "allow", None),
+            # Attached "=" form of the same value flag.
+            ("git config --type=path core.pager /tmp/x", "ask", "T6_HIGH_RISK_GIT"),
+            # git>=2.46 verb form, legacy value-flag placement.
+            ("git config set --type path core.pager /tmp/x", "ask", "T6_HIGH_RISK_GIT"),
+            ("git config unset --type path core.pager", "ask", "T6_HIGH_RISK_GIT"),
+            ("git config get --type path core.pager", "allow", None),
+            ("git config list --type path", "allow", None),
+            # --comment/--default/--value/--url must not misalign the key
+            # either (each takes a value with a space).
+            ("git config --comment 'note' core.pager /tmp/x", "ask", "T6_HIGH_RISK_GIT"),
+            ("git config set --comment 'note' core.pager /tmp/x", "ask", "T6_HIGH_RISK_GIT"),
+            ("git config get --default fallback core.pager", "allow", None),
+            # -f/--file/--blob already worked (regression guard).
+            ("git config -f other.conf core.pager /tmp/x", "ask", "T6_HIGH_RISK_GIT"),
+            ("git config --file=other.conf --get core.pager", "allow", None),
+            # A harmless key stays allowed regardless of the value flag.
+            ("git config --type path user.name x", "allow", None),
+            ("git config set --type int user.age 5", "allow", None),
+        ]
+        for cmd, expected, category in table:
+            with self.subTest(cmd=cmd):
+                if expected == "ask":
+                    self.assert_ask(cmd, category)
+                else:
+                    self.assert_allow(cmd)
+
     def test_t6_high_risk_cargo_ask(self):
         self.assert_ask("cargo clean", "T6_HIGH_RISK_CARGO")
         self.assert_ask("cargo clean --release", "T6_HIGH_RISK_CARGO")
