@@ -252,36 +252,85 @@ def _is_find_exec_interpreter(head: str) -> bool:
 
 
 # TK-60 STEP-G2 (REQ-09): interpreter -> its own VALUE-taking options (the
-# option consumes the NEXT argv token as a value). Any other "-x"-shaped
-# token is assumed boolean and consumes nothing - the class this table
-# exists for is "find substitutes {} into the interpreter's OWN argv",
-# never the specific spelling of a boolean switch, so booleans need no
-# enumeration. Sources (local --help, 2026-09-27, except php - well-known
-# documented CLI flag, php not installed here): sh/bash/zsh/dash/ksh -c
-# (inline script) / -o (named option, e.g. -o pipefail); node -e/--eval
-# (inline script) / -r/--require (preload module); perl/ruby -e (inline
-# script, `perl -h`/`ruby --help`); php -r (inline code, official docs).
+# option consumes the NEXT argv token as a value). Sources (local --help/man,
+# 2026-09-27, except node/php - not installed here, well-known documented
+# CLI flags): sh/bash/zsh/dash/ksh -c (inline script) / -o (named option,
+# e.g. -o pipefail); bash --rcfile/--init-file (man bash OPTIONS: each takes
+# `file` as a SEPARATE following token - finding C, wave 2026-09-27); node
+# -e/--eval (inline script) / -r/--require (preload module); perl -e/-E
+# (inline script, `perl -h`); ruby -e (inline script, `ruby --help`); php -r
+# (inline code, official docs).
 _INTERPRETER_VALUE_FLAGS = {
     "sh": frozenset({"-c", "-o"}),
-    "bash": frozenset({"-c", "-o"}),
+    "bash": frozenset({"-c", "-o", "--rcfile", "--init-file"}),
     "zsh": frozenset({"-c", "-o"}),
     "dash": frozenset({"-c", "-o"}),
     "ksh": frozenset({"-c", "-o"}),
     "node": frozenset({"-e", "--eval", "-r", "--require"}),
     "nodejs": frozenset({"-e", "--eval", "-r", "--require"}),
-    "perl": frozenset({"-e"}),
+    "perl": frozenset({"-e", "-E"}),
     "ruby": frozenset({"-e"}),
     "php": frozenset({"-r"}),
 }
 # python*: -c (inline script), -m (run module), -W (warning filter value),
-# -X (implementation option value) - `python3 -h`.
-_PYTHON_VALUE_FLAGS = frozenset({"-c", "-m", "-W", "-X"})
+# -X (implementation option value), --check-hash-based-pycs (value is the
+# next token: always|default|never - finding C, `python3 --help` 2026-09-27).
+_PYTHON_VALUE_FLAGS = frozenset({"-c", "-m", "-W", "-X", "--check-hash-based-pycs"})
+
+# Finding C (wave 2026-09-27, gate REJECT): interpreter options that are
+# confirmed to take NO value at all (same sources as above, plus the `set`
+# builtin's single-char options - man bash: "set [--abefhkmnptuvxBCHP]" -
+# which bash (and, per POSIX.1 sh, dash/zsh/ksh too) also accepts directly
+# at invocation, e.g. `bash -e -x script.sh`). Any option NOT in this set
+# and NOT in the value-flags table is now UNKNOWN and fails closed to "ask"
+# instead of being assumed boolean - the previous default ("anything
+# starting with '-' that isn't a known value flag is boolean") let an
+# unrecognized VALUE-taking option (bash --rcfile, python3
+# --check-hash-based-pycs) swallow its value into what the scanner then
+# treated as the script position, so the real `{}` later in argv was never
+# inspected and the command was silently allowed. Booleans are enumerated
+# only to avoid unnecessary loss of the known-script idiom's compression
+# (`bash -e -x known.sh {}`); an interpreter/flag pair missing from BOTH
+# tables safely falls through to ask - no security dependency on this list
+# being exhaustive.
+_POSIX_SET_BOOL_FLAGS = frozenset({"-a", "-b", "-C", "-e", "-f", "-h", "-m", "-n", "-u", "-v", "-x"})
+_INTERPRETER_BOOL_FLAGS = {
+    "sh": _POSIX_SET_BOOL_FLAGS | {"-i", "-s"},
+    "bash": _POSIX_SET_BOOL_FLAGS | {
+        "-i", "-l", "-r", "-s", "-t", "-k", "-p", "-B", "-E", "-H", "-P", "-T", "-D", "--",
+        "--debugger", "--dump-po-strings", "--dump-strings", "--help",
+        "--login", "--noediting", "--noprofile", "--norc", "--posix",
+        "--restricted", "--verbose", "--version",
+    },
+    "zsh": _POSIX_SET_BOOL_FLAGS | {"-i", "-s"},
+    "dash": _POSIX_SET_BOOL_FLAGS | {"-i", "-s"},
+    "ksh": _POSIX_SET_BOOL_FLAGS | {"-i", "-s"},
+    "perl": frozenset({
+        "-a", "-c", "-f", "-n", "-p", "-s", "-S", "-t", "-T", "-u", "-U",
+        "-v", "-w", "-W", "-X",
+    }),
+    "ruby": frozenset({
+        "-a", "-c", "-d", "--debug", "-l", "-n", "-p", "-s", "-S", "-v",
+        "-w", "--verbose", "--version", "--help", "--copyright",
+    }),
+}
+_PYTHON_BOOL_FLAGS = frozenset({
+    "-b", "-B", "-d", "-E", "-h", "-i", "-I", "-O", "-OO", "-P", "-q", "-s",
+    "-S", "-t", "-u", "-v", "-V", "-x", "--help", "--help-env",
+    "--help-xoptions", "--help-all",
+})
 
 
 def _interpreter_value_flags(head: str) -> frozenset:
     if head.startswith("python"):
         return _PYTHON_VALUE_FLAGS
     return _INTERPRETER_VALUE_FLAGS.get(head, frozenset())
+
+
+def _interpreter_bool_flags(head: str) -> frozenset:
+    if head.startswith("python"):
+        return _PYTHON_BOOL_FLAGS
+    return _INTERPRETER_BOOL_FLAGS.get(head, frozenset())
 
 
 def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> bool:
@@ -298,6 +347,7 @@ def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> b
     script's own arguments and are deliberately not inspected further.
     """
     value_flags = _interpreter_value_flags(interpreter)
+    bool_flags = _interpreter_bool_flags(interpreter)
     i = 0
     n = len(args)
     while i < n:
@@ -309,9 +359,14 @@ def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> b
                 return True
             i += 2
             continue
-        if tok.startswith("-"):
+        if tok in bool_flags:
             i += 1
             continue
+        if tok.startswith("-"):
+            # Unrecognized option (finding C): fail closed rather than
+            # assume it takes no value - we cannot prove it won't swallow
+            # the next token, so `{}` is treated as reachable here.
+            return True
         return tok == "{}"
     return False
 

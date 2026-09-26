@@ -369,6 +369,27 @@ class SecurityGateTests(unittest.TestCase):
         # code/module reaching the interpreter - also asks.
         self.assert_ask(r"find . -exec node -r {} \;", "T4_DESTRUCTIVE_MUTATION")
 
+    def test_finding_c_unknown_interpreter_option_fails_closed(self):
+        # Wave 2026-09-27 finding C (acceptance REJECT): an interpreter
+        # option that takes a VALUE but was not in the value-flags table
+        # used to be assumed boolean, so its value token was misread as the
+        # script position and the real `{}` further in argv was never
+        # inspected - silently allowed. Now any option unknown to BOTH the
+        # value- and bool-flags tables fails closed to ask.
+        self.assert_ask(r"find . -exec bash --rcfile rc {} \;", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_ask(r"find . -exec bash --init-file rc {} \;", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_ask(
+            r"find . -exec python3 --check-hash-based-pycs always {} \;",
+            "T4_DESTRUCTIVE_MUTATION",
+        )
+        # Any wholly unrecognized option before the first positional also
+        # fails closed, regardless of interpreter.
+        self.assert_ask(r"find . -exec bash --frobnicate {} \;", "T4_DESTRUCTIVE_MUTATION")
+        # The known-script idiom survives a documented boolean flag - not
+        # every option before a real script now regresses to ask.
+        self.assert_allow(r"find . -exec bash -e -x knownscript.sh {} \;")
+        self.assert_allow(r"find . -exec python3 -u lint.py {} \;")
+
     # ------------------------------------------------------------------
     # T5: Supply Chain & Package Lifecycle Security
     # ------------------------------------------------------------------
