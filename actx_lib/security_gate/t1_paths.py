@@ -589,39 +589,52 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
     # file-list operand of -f/--file (a real path, not a text pattern) is
     # never added here - REQ-09 G1: it stays a T1-checked operand.
     if head == "git" and len(tokens) >= 3 and tokens[1] == "grep":
-        has_f = any(t in ("-f", "--file") or (t.startswith("-f") and len(t) > 2) or t.startswith("--file=") for t in tokens[2:])
+        # Perf (TK-60 STEP-W4/F): has_f, the -e/--regexp scan and the
+        # first-positional fallback are independent per-token checks over
+        # the same tokens[2:] range - merged into a single pass instead of
+        # up to two full passes (test_perf.py's 150-file wide command has
+        # no -e/-f, so this is the common case). Every branch's own
+        # per-token condition and the final "not pattern_via_e and not
+        # has_f" gating are unchanged, so excluded_indices/has_f end up
+        # identical to the two-pass form for every input.
+        has_f = False
         pattern_via_e = False
+        first_positional_idx = None
         for idx, tok in enumerate(tokens[2:], 2):
+            if tok in ("-f", "--file") or (tok.startswith("-f") and len(tok) > 2) or tok.startswith("--file="):
+                has_f = True
             if tok in ("-e", "--regexp") and idx + 1 < len(tokens):
                 excluded_indices.add(idx + 1)
                 pattern_via_e = True
             elif tok.startswith("--regexp=") or (tok.startswith("-e") and len(tok) > 2):
                 excluded_indices.add(idx)
                 pattern_via_e = True
-        if not pattern_via_e and not has_f:
-            for idx, tok in enumerate(tokens[2:], 2):
-                if not tok.startswith("-"):
-                    excluded_indices.add(idx)
-                    break
+            elif first_positional_idx is None and not tok.startswith("-"):
+                first_positional_idx = idx
+        if not pattern_via_e and not has_f and first_positional_idx is not None:
+            excluded_indices.add(first_positional_idx)
 
     if head in ("grep", "rg", "ag", "ack") and len(tokens) >= 2:
-        has_f = any(t in ("-f", "--file") or (t.startswith("-f") and len(t) > 2) or t.startswith("--file=") for t in tokens[1:])
-        # Check if -e or --regexp was used
+        # Perf (TK-60 STEP-W4/F): same single-pass merge as the git-grep
+        # case above.
+        has_f = False
         pattern_via_e = False
+        first_positional_idx = None
         for idx, tok in enumerate(tokens[1:], 1):
+            if tok in ("-f", "--file") or (tok.startswith("-f") and len(tok) > 2) or tok.startswith("--file="):
+                has_f = True
             if tok in ("-e", "--regexp") and idx + 1 < len(tokens):
                 excluded_indices.add(idx + 1)
                 pattern_via_e = True
             elif tok.startswith("--regexp=") or (tok.startswith("-e") and len(tok) > 2):
                 excluded_indices.add(idx)
                 pattern_via_e = True
-        if not pattern_via_e and not has_f:
-            # First positional arg is search pattern - by index, so a
-            # same-text file operand later in argv still reaches T1.
-            for idx, tok in enumerate(tokens[1:], 1):
-                if not tok.startswith("-"):
-                    excluded_indices.add(idx)
-                    break
+            elif first_positional_idx is None and not tok.startswith("-"):
+                # First positional arg is search pattern - by index, so a
+                # same-text file operand later in argv still reaches T1.
+                first_positional_idx = idx
+        if not pattern_via_e and not has_f and first_positional_idx is not None:
+            excluded_indices.add(first_positional_idx)
 
     if head == "pytest" and len(tokens) >= 2:
         for idx, tok in enumerate(tokens[1:], 1):
