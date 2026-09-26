@@ -69,8 +69,90 @@ DOT_META_BLACKLIST_RE = re.compile(
 )
 
 # File flags of the SQL CLIs: file-based SQL cannot be scanned (N-F2c);
-# rewriter and gate share the set.
-SQL_FILE_FLAGS = ("-f", "--file", "-init")
+# rewriter and gate share the set. "--init" added (TK-57 REQ-02/REQ-03,
+# dual defense with the mode-flag marker mechanism below - E-010: the
+# double-dash spelling was missing and rewrote/allowed `sqlite3 --init
+# boot.sql db 'SELECT 1'`).
+SQL_FILE_FLAGS = ("-f", "--file", "-init", "--init")
+
+# TK-57 REQ-02: mode-altering flags of sqlite3/duckdb - each flips the CLI
+# into a non-standard, non-RO mode (archives/appends/writes the database,
+# disables safety checks, or runs a startup script) regardless of the
+# -c/positional SQL text. Matched by name after stripping 1-2 leading
+# dashes (sqlite3/duckdb accept either dash-count for every option) and an
+# attached "=value" suffix. sqlite3's -A/--A/-Ax<args> archive-mode family
+# is a case-sensitive PREFIX match (`.archive`; distinct from -ascii/
+# -append, which start lowercase) since sqlite3 glues archive args onto
+# -A (`-Ax a.sar`) - source: sqlite3 3.43.2 --help (local, plan E-003).
+# duckdb: confirmed via the official CLI arguments page
+# https://duckdb.org/docs/current/clients/cli/arguments.html (fetched
+# 2026-09-26) - "-append" ("Append the database to the end of the file")
+# and "-unsigned" ("Allow loading of unsigned extensions") are real,
+# documented duckdb flags; "-zip"/"-unsafe-testing"/"-nonce" are NOT
+# documented for duckdb but are denied defensively too (unconfirmed member
+# -> safe default per plan v4 §5.2: denying a flag the CLI doesn't have
+# costs nothing, since it can never appear in legitimate duckdb usage).
+# "-init" is also covered by SQL_FILE_FLAGS above (dual defense).
+_SQL_MODE_FLAG_NAMES = {
+    "sqlite3": frozenset({"append", "zip", "unsafe-testing", "nonce", "init"}),
+    "duckdb": frozenset({"append", "zip", "unsafe-testing", "nonce", "init",
+                          "unsigned"}),
+}
+
+# TK-57 REQ-03: value-flags of sqlite3/duckdb that carry no SQL semantics -
+# their value is neither a SQL payload nor a positional SQL argument
+# (arity = how many separate tokens the flag consumes as VALUE(S) when the
+# value is not attached via "="). sqlite3 set: sqlite3 3.43.2 --help
+# (local, plan §4). duckdb set: the CLI arguments page above ("-newline
+# SEP", "-nullvalue TEXT", "-separator SEP", "-storage-version VER").
+# Skipping these prevents their value tokens from being mis-counted as SQL
+# positionals (E-004 class: `sqlite3 db 'DROP TABLE t' -separator 'SELECT
+# 1'` must classify "DROP TABLE t" as the only positional, not also treat
+# the -separator value as a second one).
+_SQL_VALUE_FLAG_ARITY = {
+    "sqlite3": {
+        "newline": 1, "separator": 1, "nullvalue": 1, "vfs": 1,
+        "key": 1, "hexkey": 1, "textkey": 1, "maxsize": 1,
+        "lookaside": 2, "pagecache": 2,
+    },
+    "duckdb": {
+        "newline": 1, "separator": 1, "nullvalue": 1, "storage-version": 1,
+    },
+}
+
+
+def _mode_flag_marker(head, tok):
+    """None, or `tok` itself as a non-RO marker payload (classify_payload
+    default-denies any string that isn't an explicit RO statement), when
+    `tok` is a mode-altering flag of `head` (TK-57 REQ-02). The marker
+    forces both the rewriter predicate (all-payloads-RO) and the gate
+    (per-payload classify) to the same "not RO" outcome with no separate
+    gate edit needed - one extraction, two consumers."""
+    if not tok.startswith("-"):
+        return None
+    stripped = tok[2:] if tok.startswith("--") else tok[1:]
+    if head == "sqlite3" and stripped[:1] == "A":
+        return tok
+    name = stripped.split("=", 1)[0]
+    if name in _SQL_MODE_FLAG_NAMES.get(head, ()):
+        return tok
+    return None
+
+
+def _value_flag_skip(head, tok):
+    """Number of rest[] tokens (this flag token plus any separate value
+    token(s)) to skip when `tok` is a non-SQL value-flag of `head` (TK-57
+    REQ-03) - 0 when `tok` is not such a flag. Handles any dash-count and
+    the attached `-x=value`/`--x=value` single-token form (0 extra
+    tokens beyond this one)."""
+    if not tok.startswith("-"):
+        return 0
+    body = tok[2:] if tok.startswith("--") else tok[1:]
+    name, sep, _value = body.partition("=")
+    arity = _SQL_VALUE_FLAG_ARITY.get(head, {}).get(name)
+    if arity is None:
+        return 0
+    return 1 if sep else 1 + arity
 
 
 def danger_reason(text):
@@ -119,13 +201,28 @@ def sql_payloads(head, rest):
     - psql / duckdb: the token after every ``-c``/``--command`` flag plus
       ``--command=`` forms (psql supports repeated -c; every occurrence is
       a payload - `psql -c "SELECT 1" -c "DROP x"` classifies by both).
-    - sqlite3: the same -c forms when present, otherwise the LAST
-      positional token when there are >= 2 positionals (db + SQL; the
-      first positional is the database file, never classified).
+    - sqlite3 / duckdb: the same -c/-cmd forms when present, PLUS every
+      positional token after the first (db file) when there are >= 2
+      positionals (TK-57 REQ-02/REQ-03) - not just the last: sqlite3 and
+      duckdb both execute EVERY positional after the db file as its own
+      SQL statement in order (confirmed for sqlite3 by E-004: `sqlite3
+      t.db 'DROP TABLE t' -separator 'SELECT 1'` executed the DROP even
+      though the prior single-last-positional rule only classified the
+      trailing 'SELECT 1'; confirmed for duckdb by the official CLI docs
+      https://duckdb.org/docs/current/clients/cli/overview.html, whose own
+      non-interactive example `duckdb :memory: "SELECT 42"` runs a second
+      positional as SQL). Value-flag tokens without SQL semantics
+      (_value_flag_skip) are consumed with their value(s) first so they
+      are never miscounted as a positional - REQ-03: "значения прочих
+      value-флагов не считаются ни payload, ни позиционными".
+    - Mode-altering flags (_mode_flag_marker, REQ-02) inject the flag
+      token itself as a non-RO marker payload, forcing both the rewriter
+      (all-RO required) and the gate (default-deny) to refuse regardless
+      of what SQL text follows.
 
-    Connection args (dbname/user for psql, the db file for sqlite3) are
-    deliberately not classified: they are not SQL. They are still covered
-    by the whole-chunk danger scan on the gate side."""
+    Connection args (dbname/user for psql, the db file for sqlite3/
+    duckdb) are deliberately not classified: they are not SQL. They are
+    still covered by the whole-chunk danger scan on the gate side."""
     payloads = []
     positional_idx = []
     i = 0
@@ -142,14 +239,24 @@ def sql_payloads(head, rest):
             continue
         if tok.startswith("--command="):
             payloads.append(tok.split("=", 1)[1])
-        elif not tok.startswith("-"):
+            i += 1
+            continue
+        marker = _mode_flag_marker(head, tok)
+        if marker is not None:
+            payloads.append(marker)
+            i += 1
+            continue
+        skip = _value_flag_skip(head, tok)
+        if skip:
+            i += skip
+            continue
+        if not tok.startswith("-"):
             positional_idx.append(i)
         i += 1
-    if head == "sqlite3" and len(positional_idx) >= 2:
-        # The last positional is the SQL argument (first is the db file).
-        # Classified alongside -c/-cmd payloads, not only in their
-        # absence: `sqlite3 db -cmd 'select 1' 'drop table x'` would
-        # otherwise smuggle an unclassified statement. Flag values are
-        # excluded above, so `-cmd 'select 1' db` counts just `db`.
-        payloads.append(rest[positional_idx[-1]])
+    if head in ("sqlite3", "duckdb") and len(positional_idx) >= 2:
+        # Every positional after the first (the db file) is a SQL
+        # statement, classified alongside -c/-cmd/marker payloads, not
+        # only in their absence.
+        for idx in positional_idx[1:]:
+            payloads.append(rest[idx])
     return payloads

@@ -226,6 +226,106 @@ class SqlPayloadsTests(unittest.TestCase):
             ["SELECT 1"],
         )
 
+    # -- TK-57 REQ-02/REQ-03 -------------------------------------------
+
+    def test_sqlite3_all_positionals_after_db_are_payload(self):
+        # E-004: the prior "last positional only" rule missed an earlier
+        # dangerous statement whose last positional happened to be RO.
+        self.assertEqual(
+            sql_verbs.sql_payloads(
+                "sqlite3", ["db", "DROP TABLE t", "SELECT 1"]
+            ),
+            ["DROP TABLE t", "SELECT 1"],
+        )
+
+    def test_duckdb_all_positionals_after_db_are_payload(self):
+        # duckdb docs confirm positional SQL execution the same as
+        # sqlite3 (source in sql_verbs.sql_payloads docstring).
+        self.assertEqual(
+            sql_verbs.sql_payloads(
+                "duckdb", ["db.duckdb", "DROP TABLE t", "SELECT 1"]
+            ),
+            ["DROP TABLE t", "SELECT 1"],
+        )
+
+    def test_sqlite3_value_flag_value_not_a_positional(self):
+        # REQ-03: a non-SQL value-flag's value is neither payload nor a
+        # SQL positional - the DROP stays the only classified statement
+        # (E-004's exact command).
+        self.assertEqual(
+            sql_verbs.sql_payloads(
+                "sqlite3",
+                ["db", "DROP TABLE t", "-separator", "SELECT 1"],
+            ),
+            ["DROP TABLE t"],
+        )
+        self.assertEqual(
+            sql_verbs.sql_payloads(
+                "sqlite3", ["-separator", ",", "db", "select 1"]
+            ),
+            ["select 1"],
+        )
+
+    def test_sqlite3_two_token_value_flags_skipped(self):
+        # -lookaside/-pagecache consume TWO value tokens.
+        self.assertEqual(
+            sql_verbs.sql_payloads(
+                "sqlite3",
+                ["-lookaside", "100", "10", "db", "select 1"],
+            ),
+            ["select 1"],
+        )
+
+    def test_duckdb_value_flags_skipped(self):
+        self.assertEqual(
+            sql_verbs.sql_payloads(
+                "duckdb", ["-storage-version", "v1.2", "db", "select 1"]
+            ),
+            ["select 1"],
+        )
+
+    def test_mode_flags_yield_non_ro_marker_payload(self):
+        for head, argv in (
+            ("sqlite3", ["-A", "-x", "a.sar", "SELECT"]),
+            ("sqlite3", ["--A", "-x", "a.sar", "SELECT"]),
+            ("sqlite3", ["-Ax", "a.sar", "SELECT"]),
+            ("sqlite3", ["-append", "db", "select 1"]),
+            ("sqlite3", ["--append", "db", "select 1"]),
+            ("sqlite3", ["-zip", "a.zip", "select 1"]),
+            ("sqlite3", ["-unsafe-testing", "db", "select 1"]),
+            ("sqlite3", ["-nonce", "STR", "db", "select 1"]),
+            ("sqlite3", ["-init", "boot.sql", "db", "select 1"]),
+            ("sqlite3", ["--init", "boot.sql", "db", "select 1"]),
+            ("sqlite3", ["--init=boot.sql", "db", "select 1"]),
+            ("duckdb", ["-unsigned", "db", "select 1"]),
+            ("duckdb", ["-append", "db", "select 1"]),
+        ):
+            with self.subTest(head=head, argv=argv):
+                payloads = sql_verbs.sql_payloads(head, argv)
+                self.assertTrue(payloads, (head, argv))
+                self.assertTrue(
+                    any(
+                        sql_verbs.classify_payload(p) != "ro"
+                        for p in payloads
+                    ),
+                    (head, argv, payloads),
+                )
+
+    def test_mode_flag_lookalikes_are_not_markers(self):
+        # -ascii starts with lowercase "a": not the -A archive family; not
+        # in the mode-flag name set either -> ordinary unknown flag.
+        self.assertEqual(
+            sql_verbs.sql_payloads("sqlite3", ["-ascii", "db", "select 1"]),
+            ["select 1"],
+        )
+        # -nullvalue is a plain value-flag, not a mode flag.
+        self.assertEqual(
+            sql_verbs.sql_payloads(
+                "sqlite3", ["-nullvalue", "N/A", "db", "select 1"]
+            ),
+            ["select 1"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
