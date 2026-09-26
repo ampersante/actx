@@ -568,6 +568,13 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
 
     # Exclusions for safe developer tools (git commit messages, branch/tag names, grep regex patterns, pytest filter)
     excluded_tokens = set()
+    # TK-60 STEP-G1 (REQ-09): grep/rg/git-grep pattern exclusion is by
+    # INDEX, not by string value - `grep client_secret client_secret` has
+    # a search-pattern token and a file-operand token that are textually
+    # identical; a value-based exclusion set would exclude both (the
+    # operand escapes T1 entirely), an index-based one excludes only the
+    # pattern's own argument slot.
+    excluded_indices = set()
     if head == "git" and len(tokens) >= 2:
         for idx, tok in enumerate(tokens[1:], 1):
             if tok in ("-m", "--message") and idx + 1 < len(tokens):
@@ -578,32 +585,43 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
                 excluded_tokens.add(tok)
 
     # TK-57 S1 (REQ-01): `git grep`'s pattern argument is excluded the same
-    # way a bare grep's is (offset by the extra 'git'+'grep' tokens).
+    # way a bare grep's is (offset by the extra 'git'+'grep' tokens). The
+    # file-list operand of -f/--file (a real path, not a text pattern) is
+    # never added here - REQ-09 G1: it stays a T1-checked operand.
     if head == "git" and len(tokens) >= 3 and tokens[1] == "grep":
         has_f = any(t in ("-f", "--file") or (t.startswith("-f") and len(t) > 2) or t.startswith("--file=") for t in tokens[2:])
+        pattern_via_e = False
         for idx, tok in enumerate(tokens[2:], 2):
             if tok in ("-e", "--regexp") and idx + 1 < len(tokens):
-                excluded_tokens.add(tokens[idx + 1])
+                excluded_indices.add(idx + 1)
+                pattern_via_e = True
             elif tok.startswith("--regexp=") or (tok.startswith("-e") and len(tok) > 2):
-                excluded_tokens.add(tok)
-        if not excluded_tokens and not has_f:
-            positional = [t for t in tokens[2:] if not t.startswith("-")]
-            if positional:
-                excluded_tokens.add(positional[0])
+                excluded_indices.add(idx)
+                pattern_via_e = True
+        if not pattern_via_e and not has_f:
+            for idx, tok in enumerate(tokens[2:], 2):
+                if not tok.startswith("-"):
+                    excluded_indices.add(idx)
+                    break
 
     if head in ("grep", "rg", "ag", "ack") and len(tokens) >= 2:
         has_f = any(t in ("-f", "--file") or (t.startswith("-f") and len(t) > 2) or t.startswith("--file=") for t in tokens[1:])
         # Check if -e or --regexp was used
+        pattern_via_e = False
         for idx, tok in enumerate(tokens[1:], 1):
             if tok in ("-e", "--regexp") and idx + 1 < len(tokens):
-                excluded_tokens.add(tokens[idx + 1])
+                excluded_indices.add(idx + 1)
+                pattern_via_e = True
             elif tok.startswith("--regexp=") or (tok.startswith("-e") and len(tok) > 2):
-                excluded_tokens.add(tok)
-        if not excluded_tokens and not has_f:
-            # First positional arg is search pattern
-            positional = [t for t in tokens[1:] if not t.startswith("-")]
-            if positional:
-                excluded_tokens.add(positional[0])
+                excluded_indices.add(idx)
+                pattern_via_e = True
+        if not pattern_via_e and not has_f:
+            # First positional arg is search pattern - by index, so a
+            # same-text file operand later in argv still reaches T1.
+            for idx, tok in enumerate(tokens[1:], 1):
+                if not tok.startswith("-"):
+                    excluded_indices.add(idx)
+                    break
 
     if head == "pytest" and len(tokens) >= 2:
         for idx, tok in enumerate(tokens[1:], 1):
@@ -629,7 +647,7 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
 
     # Generic file reader / flag / argument / shell redirection inspection
     for idx, tok in enumerate(tokens):
-        if tok in excluded_tokens or tok == excluded_src:
+        if idx in excluded_indices or tok in excluded_tokens or tok == excluded_src:
             continue
         clean = _strip_redirection(tok).strip("'\"")
         if not clean:

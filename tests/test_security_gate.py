@@ -191,6 +191,23 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_deny("cargo run -- ~/.ssh/id_rsa", "T1_CREDENTIAL_ACCESS")
         self.assert_deny("npm run build --prefix ~/.ssh", "T1_CREDENTIAL_ACCESS")
 
+    def test_g1_grep_pattern_excluded_by_index_not_value(self):
+        # TK-60 STEP-G1 (REQ-09): the search-pattern argument is excluded
+        # from T1 by its ARGV POSITION, never by matching its string value
+        # - a file operand that happens to share the pattern's text must
+        # still reach T1. Plan pins, verbatim.
+        self.assert_deny("grep client_secret client_secret", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("grep -f client_secret src/app.py", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("grep -e secret client_secret", "T1_CREDENTIAL_ACCESS")
+        self.assert_allow("grep secret src/app.py")
+        # git grep gets the identical treatment (offset by 'git'+'grep').
+        self.assert_deny("git grep client_secret client_secret", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("git grep -f client_secret src/app.py", "T1_CREDENTIAL_ACCESS")
+        self.assert_deny("git grep -e secret client_secret", "T1_CREDENTIAL_ACCESS")
+        self.assert_allow("git grep secret src/app.py")
+        # rg mirrors grep's own argument grammar and is in scope for G1.
+        self.assert_deny("rg client_secret client_secret", "T1_CREDENTIAL_ACCESS")
+
     # ------------------------------------------------------------------
     # T2: Network Exfiltration
     # ------------------------------------------------------------------
