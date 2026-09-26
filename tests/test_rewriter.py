@@ -752,6 +752,342 @@ class MobileRewriteTests(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------
+# TK-57 STEP-03 (REQ-04): endpoint/credential/project flag class per CLI
+# family, incl. pflag_short clusters. Family flag matrix (head, denied
+# member, semantics, spellings checked, source, verdict) - every head of
+# cli_families.FAMILIES must have a row (test_family_matrix_covers_every_
+# family below); a head added to FAMILIES without a matching row here
+# fails that test on purpose.
+# ----------------------------------------------------------------------
+
+FAMILY_FLAG_MATRIX = {
+    "docker": {
+        "source": "docker --help (local, 2026-09-26, docker 29.1.5)",
+        "members": (
+            ("-H/--host", "daemon socket endpoint switch",
+             ("-H tcp://e", "--host tcp://e", "--host=tcp://e")),
+            ("-c/--context", "daemon context (endpoint) switch",
+             ("-c ctx", "--context ctx", "--context=ctx",
+              "-Ac ctx (clustered after boolean -A... n/a; -ac ctx)")),
+            ("--config", "alternate client config dir (incl. contexts)",
+             ("--config /tmp/x",)),
+            ("--tlscacert", "alternate TLS CA (trust root) file",
+             ("--tlscacert=/tmp/x",)),
+            ("--tlscert", "alternate TLS client cert", ("--tlscert=/tmp/x",)),
+            ("--tlskey", "alternate TLS client key", ("--tlskey=/tmp/x",)),
+        ),
+    },
+    "kubectl": {
+        "source": "kubectl options; kubectl get/describe/top/events/logs "
+                   "--help (local, 2026-09-26, kubectl v1.x)",
+        "members": (
+            ("-s/--server", "API server endpoint switch",
+             ("-s https://e", "-s=https://e", "--server https://e",
+              "-As https://e (clustered behind boolean -A)")),
+            ("--token", "bearer credential handover", ("--token=x",)),
+            ("--user", "kubeconfig user (credential) switch",
+             ("--user=admin",)),
+            ("--username", "basic-auth credential handover",
+             ("--username=x",)),
+            ("--password", "basic-auth credential handover",
+             ("--password=x",)),
+            ("--as/--as-group/--as-uid", "impersonation", ("--as=admin",)),
+            ("--client-certificate/--client-key", "TLS identity swap",
+             ("--client-certificate=/tmp/x",)),
+            ("--certificate-authority", "TLS trust root swap",
+             ("--certificate-authority=/tmp/x",)),
+            ("--insecure-skip-tls-verify", "disables cert validation", ()),
+            ("--tls-server-name", "redirects cert validation target", ()),
+        ),
+    },
+    "helm": {
+        "source": "helm.sh/docs/helm/helm/ (fetched 2026-09-26; helm not "
+                   "installed locally)",
+        "members": (
+            ("--kube-apiserver", "API server endpoint switch", ()),
+            ("--kube-token", "bearer credential handover", ()),
+            ("--kube-as-user/--kube-as-group", "impersonation", ()),
+            ("--kube-ca-file", "TLS trust root swap", ()),
+            ("--kube-tls-server-name", "redirects cert validation target", ()),
+            ("--kube-insecure-skip-tls-verify", "disables cert validation", ()),
+            ("--kube-context", "kubeconfig context switch", ()),
+            ("--kubeconfig", "alternate kubeconfig file", ()),
+            ("--registry-config", "alternate registry credential file", ()),
+            ("--repository-config", "alternate repo config file", ()),
+        ),
+    },
+    "gh": {
+        "source": "gh <ns> --help (local, 2026-09-26, gh 2.100.0)",
+        "members": (
+            ("--hostname", "GitHub host switch",
+             ("--hostname=evil.com",)),
+        ),
+        "note": "no short form; not accepted by any declared RO-verb "
+                "subcommand in gh 2.100.0 (verified live: errors 'unknown "
+                "flag') - kept per plan as defensive/inert, flagged "
+                "unconfirmed-live in the stream report. -R/--repo stays "
+                "OUT (REQ-11 NON-GOAL).",
+    },
+    "gcloud": {
+        "source": "docs.cloud.google.com/sdk/gcloud/reference (fetched "
+                   "2026-09-26; gcloud not installed locally)",
+        "members": (
+            ("--impersonate-service-account", "impersonation", ()),
+            ("--account", "identity switch", ()),
+            ("--access-token-file", "credential handover", ()),
+            ("--configuration", "named config bundle switch", ()),
+            ("--credential-file-override", "credential handover", ()),
+            ("--flags-file", "flag injection from file", ()),
+            ("--project", "project switch", ()),
+            ("--billing-project", "billing project switch", ()),
+        ),
+    },
+    "bq": {
+        "source": "plan v4 S7 STEP-03 (absl flags; bq not installed "
+                   "locally) - --location excluded (region, not project)",
+        "members": (
+            ("credential_file", "credential handover", ("-credential_file=x",)),
+            ("service_account", "identity switch", ()),
+            ("service_account_credential_file", "credential handover", ()),
+            ("service_account_private_key_file", "credential handover", ()),
+            ("api", "API endpoint switch", ()),
+            ("use_gce_service_account", "identity switch", ()),
+            ("application_default_credential_file", "credential handover", ()),
+            ("oauth_access_token", "credential handover", ()),
+            ("project_id", "project switch", ("--project_id=p",)),
+            ("dataset_id", "dataset scope switch", ()),
+        ),
+    },
+    "vercel": {
+        "source": "plan v4 S7 STEP-03 (vercel docs; not installed locally)",
+        "members": (
+            ("-t/--token", "credential handover", ("--token x",)),
+            ("-S/--scope", "account scope switch", ("--scope t",)),
+            ("-Q/--global-config", "alternate global config dir", ()),
+            ("-A/--local-config", "alternate local config file", ()),
+            ("--team", "team context switch", ()),
+            ("--api", "API endpoint switch", ()),
+        ),
+    },
+    "netlify": {
+        "source": "plan v4 S7 STEP-03 (netlify docs; not installed locally)",
+        "members": (
+            ("--auth", "credential handover", ()),
+            ("--site", "site (project) switch", ()),
+        ),
+    },
+    "flyctl": {
+        "source": "plan v4 S7 STEP-03 (fly.io docs; not installed locally)",
+        "members": (
+            ("-t/--access-token", "credential handover",
+             ("--access-token x",)),
+            ("-a/--app", "target app switch", ()),
+            ("--org", "organization switch", ()),
+        ),
+    },
+    "supabase": {
+        "source": "supabase.com/docs/reference/cli/introduction "
+                   "(fetched 2026-09-26; not installed locally)",
+        "members": (
+            ("--project-ref", "project switch", ()),
+            ("--profile", "auth profile switch (doc-confirmed sibling, "
+                          "not in the plan's original list)", ()),
+        ),
+        "note": "--token/--access-token checked and NOT found (auth is "
+                "via the SUPABASE_ACCESS_TOKEN env var) - excluded.",
+    },
+    "railway": {
+        "source": "plan v4 S7 STEP-03 (railway docs; not installed locally)",
+        "members": (
+            ("--project", "project switch", ()),
+            ("--environment", "environment switch", ()),
+            ("--service", "service switch", ()),
+        ),
+    },
+    "wrangler": {
+        "source": "developers.cloudflare.com/workers/wrangler/commands/"
+                   "general/ (fetched 2026-09-26; not installed locally)",
+        "members": (
+            ("--config/-c", "alternate wrangler config file", ()),
+            ("--env/-e", "environment switch", ()),
+            ("--profile", "auth profile switch (doc-confirmed sibling, "
+                          "not in the plan's original list)", ()),
+        ),
+        "note": "--account-id checked and NOT found as a global flag "
+                "(only --account on `whoami`) - excluded.",
+    },
+    "terraform": {
+        "source": "developer.hashicorp.com/terraform/cli/commands "
+                   "(fetched 2026-09-26)",
+        "members": (
+            ("-chdir", "switches the working dir (config/backend/creds)", ()),
+        ),
+        "note": "-state checked and NOT a current global flag - excluded; "
+                "-var-file only supplies variable values, not an "
+                "endpoint/account switch - excluded (plan's own '?' "
+                "markers).",
+    },
+    "redis-cli": {
+        "source": "REQ-11 NON-GOAL (TK-40/TK-43 value_flags decision)",
+        "members": (),
+        "note": "checked, no REQ-04 members beyond the already-excluded "
+                "-h/-p/-a (host/port/password - declared value_flags, "
+                "out of contract by REQ-11).",
+    },
+}
+
+
+class FamilyFlagMatrixTests(unittest.TestCase):
+    def test_family_matrix_covers_every_family(self):
+        # A head added to cli_families.FAMILIES without a matching matrix
+        # row (members or an explicit "checked, no members" note) fails
+        # this test - the TK-57 REQ-04 test-invariant (plan S7 STEP-03).
+        import actx_lib.cli_families as cli_families
+
+        missing = sorted(
+            set(cli_families.FAMILIES) - set(FAMILY_FLAG_MATRIX)
+        )
+        self.assertEqual(missing, [], "families missing a matrix row")
+        for head, row in FAMILY_FLAG_MATRIX.items():
+            self.assertTrue(row["source"], head)
+            self.assertTrue(row["members"] or "note" in row, head)
+
+
+class DeniedEndpointFlagTests(unittest.TestCase):
+    def test_docker_endpoint_flags_rejected(self):
+        for command in (
+            "docker ps -H tcp://e:2375",
+            "docker -H tcp://e ps",
+            "docker ps --host=tcp://e",
+            "docker ps -c prod",
+            "docker -c prod ps",
+            "docker ps --context=prod",
+            "docker ps --config /tmp/x",
+            "docker ps --tlscacert=/tmp/ca.pem",
+            "docker ps --tlscert=/tmp/c.pem",
+            "docker ps --tlskey=/tmp/k.pem",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_docker_ro_forms_still_rewrite(self):
+        for command in (
+            "docker ps",
+            "docker logs c",
+            "docker ps -a",
+            "docker images -a",
+            "docker ps -n 5 web",
+            "docker system df -v",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(rewrite(command), "actx " + command)
+
+    def test_kubectl_endpoint_flags_rejected(self):
+        for command in (
+            "kubectl get pods --as=admin",
+            "kubectl get pods -As https://evil:6443",
+            "kubectl get pods -s=https://e",
+            "kubectl get pods --server https://e",
+            "kubectl get pods --user=admin",
+            "kubectl get pods --token=x",
+            "kubectl get pods --username=x",
+            "kubectl get pods --password=x",
+            "kubectl get pods --client-certificate=/tmp/x",
+            "kubectl get pods --client-key=/tmp/x",
+            "kubectl get pods --certificate-authority=/tmp/x",
+            "kubectl get pods --insecure-skip-tls-verify=true",
+            "kubectl get pods --tls-server-name=evil",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_kubectl_ro_forms_still_rewrite(self):
+        for command in (
+            "kubectl get pods -n prod --context x",
+            "kubectl get pods -o wide",
+            "kubectl get pods -ojson",
+            "kubectl get pods -A",
+            "kubectl get pods -w",
+            "kubectl logs -f pod/web-abc",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(rewrite(command), "actx " + command)
+
+    def test_helm_endpoint_flags_rejected(self):
+        for command in (
+            "helm list --kube-token x",
+            "helm list --kube-context prod",
+            "helm list --kube-apiserver https://e",
+            "helm list --kubeconfig /tmp/x",
+            "helm list --registry-config /tmp/x",
+            "helm list --repository-config /tmp/x",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_helm_ro_forms_still_rewrite(self):
+        self.assertEqual(rewrite("helm list"), "actx helm list")
+        self.assertEqual(
+            rewrite("helm template mychart"), "actx helm template mychart"
+        )
+
+    def test_gcloud_endpoint_flags_rejected(self):
+        for command in (
+            "gcloud projects list --impersonate-service-account=a@b",
+            "gcloud projects list --project p",
+            "gcloud projects list --flags-file f.yaml",
+            "gcloud projects list --account=a@b",
+            "gcloud projects list --billing-project=p",
+            "gcloud projects list --access-token-file=/tmp/x",
+            "gcloud projects list --configuration=other",
+            "gcloud projects list --credential-file-override=/tmp/x",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_bq_endpoint_flags_rejected(self):
+        for command in (
+            "bq ls --project_id=p",
+            "bq ls -credential_file=x",
+            "bq ls --service_account=a@b",
+            "bq ls --api=https://evil",
+            "bq ls --oauth_access_token=x",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_bq_ro_forms_still_rewrite(self):
+        self.assertEqual(rewrite("bq ls"), "actx bq ls")
+
+    def test_vercel_endpoint_flags_rejected(self):
+        for command in (
+            "vercel whoami --token x",
+            "vercel list --scope t",
+            "vercel list -S t",
+            "vercel whoami -t x",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_flyctl_endpoint_flags_rejected(self):
+        self.assertIsNone(rewrite("flyctl status --access-token x"))
+
+    def test_gh_endpoint_flags_rejected(self):
+        self.assertIsNone(rewrite("gh pr list --hostname e.com"))
+
+    def test_gh_repo_selector_still_rewrites(self):
+        # REQ-11 NON-GOAL: -R/--repo stays out of this class.
+        for command in (
+            "gh pr list",
+            "gh pr -R o/r list",
+            "gh issue --repo o/r list",
+            "gh --repo=o/r pr list",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(rewrite(command), "actx " + command)
+
+
+# ----------------------------------------------------------------------
 # TK-57 STEP-04 (REQ-05): `next` closed RO-subcommand allow-list.
 # ----------------------------------------------------------------------
 
@@ -792,6 +1128,36 @@ class FindWriteActionTests(unittest.TestCase):
         self.assertEqual(
             rewrite("find . -name '*.py'"), "actx find . -name '*.py'"
         )
+
+
+# ----------------------------------------------------------------------
+# TK-57 STEP-06 rewriter part (REQ-08): git argv exec-flags on the
+# rewritten mutators.
+# ----------------------------------------------------------------------
+
+class GitExecFlagTests(unittest.TestCase):
+    def test_exec_flags_rejected(self):
+        for command in (
+            "git fetch --upload-pack='touch x' .",
+            "git pull --upload-pack=x",
+            "git push --receive-pack=x origin",
+            "git push --exec=x origin",
+            "git fetch --upl=x .",       # unambiguous abbreviation
+            "git push --rece=x origin",  # unambiguous abbreviation
+            "git push --ex=x origin",    # unambiguous abbreviation
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_ro_and_unrelated_forms_still_rewrite(self):
+        for command in (
+            "git fetch",
+            "git pull --rebase",
+            "git push origin main",
+            "git push --recurse-submodules=check",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(rewrite(command), "actx " + command)
 
 
 if __name__ == "__main__":

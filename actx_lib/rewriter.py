@@ -47,12 +47,39 @@ _WRITE_TOKENS = frozenset({"--fix", "fix", "format"})
 #              is compared to `tok.lstrip("-").split("=",1)[0]`
 #   nameci  -- same as `name` but case-insensitive (tsc strips 1-2 leading
 #              dashes and matches option names case-insensitively)
+#   pflag_short -- TK-57 REQ-04, pflag/Cobra heads only (docker, kubectl,
+#              helm, gh): a single-dash token IS a short-flag CLUSTER
+#              (`-As` == `-A -s`, pflag/Cobra semantics), so a denied
+#              short flag can hide behind a leading boolean short flag
+#              (E-009: `kubectl get pods -As https://evil:6443`). Value:
+#              {"denied": {...}, "bool": {...}, "value": {...}} - single
+#              chars (no leading dash). Scanned left to right: a denied
+#              char -> caught; a declared value char -> the rest of the
+#              token is its glued value (matches pflag's own glue-value
+#              parsing), stop scanning this token; a declared boolean char
+#              -> keep scanning; any other char -> unknown, fail closed
+#              (denied). "bool"/"value" are the head's known short flags
+#              (from --help / fixtures), NOT the denied set itself - they
+#              only disambiguate cluster boundaries; an omitted benign
+#              short flag fails closed (safe direction), it does not open
+#              a hole.
 # The scan runs on the EFFECTIVE head: inside `uv run <argv>` /
 # `xcrun simctl <argv>` the inner head is matched (cli_families
 # run_prefix_split, shared with the security gate). This table folds in
 # the former per-predicate `sort -o`/`--output` and `git --out*` rejects.
 _DENIED_WRITE_FLAGS = {
-    "git": {"prefix": ("--out",)},
+    # git exec-flags (TK-57 REQ-08): --upload-pack/--receive-pack/--exec
+    # run an arbitrary local program as the "git" side of a smart-HTTP/SSH
+    # transport on the rewritten mutators (fetch/pull/push) - E-015. `git
+    # <verb> -h` (verified: fetch/push/pull) gives the unambiguous
+    # abbreviation prefixes (git's parse-options accepts them like
+    # getopt_long): "--upl" (fetch/pull "--upload-pack" vs "--unshallow"/
+    # "--update-*"; also clear of add's "--update"), "--ex" (push
+    # "--exec"; clear of pull's "--edit"), "--rece" (push
+    # "--receive-pack" vs "--recurse-submodules" - the plan's own
+    # called-out collision for a bare "--rec" prefix). Each prefix also
+    # matches the full spelling and its "=value" form.
+    "git": {"prefix": ("--out", "--upl", "--ex", "--rece")},
     # getopt_long resolves unambiguous abbreviations (verified on Apple
     # sort: `sort --o file` writes); --output is the only --o* long option.
     # --compress-program=<prog> execs the program on temp-file spills
@@ -102,14 +129,14 @@ _DENIED_WRITE_FLAGS = {
     # getopt_long abbreviations of --follow (--f/--fo/...) defeat the
     # never-wrap check and would hang the wrapper — defer instead.
     "tail": {"prefix": ("--f",), "attach": ("-f", "-F")},
-    # `helm template --output-dir <dir>` writes every rendered manifest;
-    # helm (pflag) has no abbreviations. Eq only: `helm list --output`
-    # is a legit RO format flag. --post-renderer execs the named program;
-    # the prefix also covers --post-renderer-args.
-    "helm": {"eq": ("--output-dir",), "prefix": ("--post-renderer",)},
-    # `terraform plan -out[=]<file>` writes a plan file (canonical
-    # single-dash form of the documented =-form gap).
-    "terraform": {"eq": ("-out",)},
+    # helm's TK-43 `--output-dir`/`--post-renderer` entry is merged into
+    # the single "helm" key further below, next to its TK-57 REQ-04
+    # --kube-*/--registry-config/--repository-config entries (Python dict
+    # literals silently let a later duplicate key win).
+    # terraform's REQ-04 entry (-chdir) is merged into the single
+    # "terraform" key further below, next to its TK-43 `-out` entry
+    # (Python dict literals silently let a later duplicate key win, so the
+    # two are kept together instead of split across the table).
     # swiftlint lint: --autocorrect is an exact alias of the denied --fix
     # (@Flag on the same `fix` var); --output/--write-baseline/--benchmark
     # write files (SAP has no abbreviations).
@@ -118,7 +145,178 @@ _DENIED_WRITE_FLAGS = {
     # swiftformat --lint --report <file> writes the report (--output is
     # inert in --lint mode — deliberately not listed).
     "swiftformat": {"eq": ("--report",)},
+
+    # --- TK-57 REQ-04: "switches endpoint/account/project/scope,
+    # impersonates, or hands over a credential/flags file" class. Sources
+    # cited per head; §11/report flags any unconfirmed member excluded on
+    # purpose (plan stop-rule: do not add a class member silently).
+    #
+    # docker (Cobra/pflag; verified `docker --help` locally, 2026-09-26):
+    # -H/--host and -c/--context switch the daemon endpoint; --config
+    # points at a whole alternate client-config dir (incl. contexts);
+    # --tlscacert/--tlscert/--tlskey swap the TLS identity used to talk to
+    # the daemon. -D/--debug, -l/--log-level, --tls, --tlsverify, -v/
+    # --version are NOT in this class (checked, excluded) but -D/-v are
+    # still declared boolean below so a cluster containing them doesn't
+    # fail closed (docker_tk41_golden.json: `docker system df -v` must
+    # stay "prefix"/rewrite - CHK-07). bool/value otherwise observed from
+    # docker_tk41_golden.json + test_cli_families.py fixtures (must stay
+    # green, CHK-07): -a/-q boolean, -n/-f value.
+    "docker": {
+        "eq": ("--context", "--host", "--config", "--tlscacert",
+               "--tlscert", "--tlskey"),
+        "pflag_short": {
+            "denied": frozenset("cH"),
+            "bool": frozenset("aqDv"),
+            "value": frozenset("nf"),
+        },
+    },
+    # kubectl (Cobra/pflag; verified `kubectl options` + `kubectl get/
+    # describe/top/events/logs --help` locally, 2026-09-26): -s/--server
+    # switches the API server; --token/--username/--password/--user hand
+    # over or switch credentials; --as/--as-group/--as-uid impersonate;
+    # --client-certificate/--client-key/--certificate-authority swap the
+    # TLS identity/trust root; --insecure-skip-tls-verify/--tls-server-name
+    # weaken or redirect certificate validation. --context/--cluster/
+    # --kubeconfig/--namespace/-n stay OUT (REQ-11 NON-GOAL, TK-40 value_
+    # flags decision) - not repeated here. bool/value short-flag sets are
+    # the union across get/describe/top/events/logs --help plus the
+    # global -n/-s/-v (kubectl options): -A/-w/-R/-p boolean, -o/-n/-l/
+    # -f/-k/-L/-c/-v value (kubectl logs -c is --container, unrelated to
+    # docker's -c; per-head sets, no cross-contamination).
+    "kubectl": {
+        "eq": ("--token", "--user", "--username", "--password", "--as",
+               "--as-group", "--as-uid", "--client-certificate",
+               "--client-key", "--certificate-authority",
+               "--insecure-skip-tls-verify", "--tls-server-name",
+               "--server"),
+        "pflag_short": {
+            "denied": frozenset("s"),
+            "bool": frozenset("AwRp"),
+            "value": frozenset("onlfkLcv"),
+        },
+    },
+    # helm (Cobra/pflag; verified via helm.sh docs, 2026-09-26 - helm not
+    # installed locally): every --kube-* flag switches the target cluster/
+    # identity/TLS trust the same way kubectl's globals do; --registry-
+    # config/--repository-config point at alternate credential/registry
+    # config files. None of these have a single-letter short form (only
+    # -n/--namespace and -h/--help do, neither denied) -> no pflag_short
+    # entry needed. `--output-dir` (TK-43: `helm template` writes every
+    # rendered manifest) and `--post-renderer`/`--post-renderer-args`
+    # (TK-43: execs the named program) are the pre-existing entries, kept
+    # here (single "helm" key - see the note left at their old location).
+    "helm": {
+        "eq": ("--kube-apiserver", "--kube-token", "--kube-as-user",
+               "--kube-as-group", "--kube-ca-file",
+               "--kube-tls-server-name", "--kube-insecure-skip-tls-verify",
+               "--kube-context", "--kubeconfig", "--registry-config",
+               "--repository-config", "--output-dir"),
+        "prefix": ("--post-renderer",),
+    },
+    # gh (Cobra/pflag; `gh <ns> --help` locally, 2026-09-26): --hostname
+    # switches the GitHub host. No short form found on any declared
+    # RO-verb subcommand in the installed gh 2.100.0 (`gh pr/issue/repo/
+    # release/run/workflow/gist ... --hostname` all error "unknown flag");
+    # kept per plan (harmless if genuinely inert on this version - a
+    # rejected flag just fails the underlying gh call either way) but
+    # flagged as unconfirmed-live in the stream report. -R/--repo is
+    # REQ-11 (its [HOST/]OWNER/REPO form is the real host-switch vector,
+    # deliberately out of this class; tests/test_cli_families.py:493-498).
+    "gh": {"eq": ("--hostname",)},
+
+    # gcloud (Python/argparse-derived "calliope" parser; docs.cloud.
+    # google.com/sdk/gcloud/reference, fetched 2026-09-26): --account/
+    # --impersonate-service-account switch/impersonate the identity;
+    # --project/--billing-project switch the project; --configuration
+    # switches the whole named config bundle; --access-token-file/
+    # --credential-file-override hand over a credential file; --flags-file
+    # can inject any of the above from a file. No short forms confirmed;
+    # abbreviation support not confirmed either (not asserted - "eq" only,
+    # unverified area noted in the stream report).
+    "gcloud": {
+        "eq": ("--impersonate-service-account", "--account",
+               "--access-token-file", "--configuration",
+               "--credential-file-override", "--flags-file", "--project",
+               "--billing-project"),
+    },
+    # bq (absl flags: single dash == double dash, case-sensitive
+    # underscore names - "name" match kind, dash-agnostic via
+    # tok.lstrip("-")). --location deliberately excluded (plan: it names a
+    # region, not a project/account - out of this semantic class).
+    "bq": {
+        "name": ("credential_file", "service_account",
+                 "service_account_credential_file",
+                 "service_account_private_key_file", "api",
+                 "use_gce_service_account",
+                 "application_default_credential_file",
+                 "oauth_access_token", "project_id", "dataset_id"),
+    },
+    # vercel (per plan/docs): -t/--token, -S/--scope, -Q/--global-config,
+    # -A/--local-config switch credentials/account/scope/config-dir;
+    # --team switches the team context; --api points at an alternate API
+    # endpoint.
+    "vercel": {
+        "eq": ("--team", "--api", "--token", "--scope", "--global-config",
+               "--local-config"),
+        "attach": ("-t", "-S", "-Q", "-A"),
+    },
+    "netlify": {"eq": ("--auth", "--site")},
+    # flyctl: -t/--access-token switches credentials; -a/--app switches
+    # the target app; --org switches the target organization.
+    "flyctl": {
+        "eq": ("--org", "--access-token"),
+        "attach": ("-t", "-a"),
+    },
+    # supabase (docs.supabase.com, fetched 2026-09-26): --project-ref
+    # switches the target project; --profile switches the named auth
+    # profile (a doc-confirmed sibling found during this pass - not in
+    # the plan's original list). "--token"/"--access-token" checked and
+    # NOT found as a supabase CLI flag (auth is via the
+    # SUPABASE_ACCESS_TOKEN env var instead) - deliberately excluded.
+    "supabase": {"eq": ("--project-ref", "--profile")},
+    "railway": {"eq": ("--project", "--environment", "--service")},
+    # wrangler (developers.cloudflare.com/workers/wrangler/commands/
+    # general/, fetched 2026-09-26): --config/-c points at an alternate
+    # wrangler config file; --env/-e switches the environment (and its
+    # .env/.dev.vars files); --profile switches the named auth profile (a
+    # doc-confirmed sibling found during this pass). "--account-id" was
+    # checked and is NOT listed as a global flag in current docs (only
+    # "--account" on `whoami`) - deliberately excluded.
+    "wrangler": {
+        "eq": ("--profile", "--env"),
+        "attach": ("-c", "-e"),
+    },
+    # terraform: `-out[=]<file>` (TK-43) persists a plan file that a later
+    # `terraform apply` executes without re-reading the diff. `-chdir`
+    # (TK-57 REQ-04) switches the whole working directory Terraform reads
+    # its configuration/backend/credentials from - developer.hashicorp.
+    # com/terraform/cli/commands confirms it (fetched 2026-09-26);
+    # "-state" is NOT a current global flag per that page (deliberately
+    # excluded, unconfirmed) and "-var-file" only supplies variable values
+    # to the current config (not an endpoint/account switch) - both left
+    # out per the plan's own "?" markers.
+    "terraform": {"eq": ("-out", "-chdir")},
 }
+
+
+def _pflag_cluster_denied(pflag_short, body):
+    """TK-57 REQ-04: True when `body` (a single-dash token's characters
+    after the leading '-') is a pflag/Cobra short-flag cluster containing
+    a denied character. See the pflag_short match-kind doc above
+    _DENIED_WRITE_FLAGS for the algorithm."""
+    denied = pflag_short["denied"]
+    bools = pflag_short.get("bool", frozenset())
+    values = pflag_short.get("value", frozenset())
+    for ch in body:
+        if ch in denied:
+            return True
+        if ch in values:
+            return False  # rest of the token is this flag's glued value
+        if ch in bools:
+            continue
+        return True  # unknown char: fail closed
+    return False
 
 
 def _has_denied_write_flag(head, argv):
@@ -129,6 +327,7 @@ def _has_denied_write_flag(head, argv):
     spec = _DENIED_WRITE_FLAGS.get(head)
     if spec is None:
         return False
+    pflag_short = spec.get("pflag_short")
     for tok in argv:
         # go: `-args`/`--args` ends the go flag space; what follows belongs
         # to the test binary, not to the go tool.
@@ -157,6 +356,13 @@ def _has_denied_write_flag(head, argv):
             for flag in spec.get("nameci", ()):
                 if lname == flag:
                     return True
+            if (
+                pflag_short is not None
+                and not tok.startswith("--")
+                and len(tok) >= 2
+                and _pflag_cluster_denied(pflag_short, tok[1:])
+            ):
+                return True
     return False
 
 
