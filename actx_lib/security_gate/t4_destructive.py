@@ -243,12 +243,77 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> S
 
 _FIND_EXEC_FLAGS = ("-exec", "-execdir", "-ok", "-okdir")
 _FIND_EXEC_INTERPRETERS = frozenset({
-    "sh", "bash", "zsh", "dash", "ksh", "perl", "ruby", "node", "php",
+    "sh", "bash", "zsh", "dash", "ksh", "perl", "ruby", "node", "nodejs", "php",
 })
 
 
 def _is_find_exec_interpreter(head: str) -> bool:
     return head in _FIND_EXEC_INTERPRETERS or head.startswith("python")
+
+
+# TK-60 STEP-G2 (REQ-09): interpreter -> its own VALUE-taking options (the
+# option consumes the NEXT argv token as a value). Any other "-x"-shaped
+# token is assumed boolean and consumes nothing - the class this table
+# exists for is "find substitutes {} into the interpreter's OWN argv",
+# never the specific spelling of a boolean switch, so booleans need no
+# enumeration. Sources (local --help, 2026-09-27, except php - well-known
+# documented CLI flag, php not installed here): sh/bash/zsh/dash/ksh -c
+# (inline script) / -o (named option, e.g. -o pipefail); node -e/--eval
+# (inline script) / -r/--require (preload module); perl/ruby -e (inline
+# script, `perl -h`/`ruby --help`); php -r (inline code, official docs).
+_INTERPRETER_VALUE_FLAGS = {
+    "sh": frozenset({"-c", "-o"}),
+    "bash": frozenset({"-c", "-o"}),
+    "zsh": frozenset({"-c", "-o"}),
+    "dash": frozenset({"-c", "-o"}),
+    "ksh": frozenset({"-c", "-o"}),
+    "node": frozenset({"-e", "--eval", "-r", "--require"}),
+    "nodejs": frozenset({"-e", "--eval", "-r", "--require"}),
+    "perl": frozenset({"-e"}),
+    "ruby": frozenset({"-e"}),
+    "php": frozenset({"-r"}),
+}
+# python*: -c (inline script), -m (run module), -W (warning filter value),
+# -X (implementation option value) - `python3 -h`.
+_PYTHON_VALUE_FLAGS = frozenset({"-c", "-m", "-W", "-X"})
+
+
+def _interpreter_value_flags(head: str) -> frozenset:
+    if head.startswith("python"):
+        return _PYTHON_VALUE_FLAGS
+    return _INTERPRETER_VALUE_FLAGS.get(head, frozenset())
+
+
+def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> bool:
+    """True when `{}` reaches the interpreter's OWN argv as its script or
+    as a value-flag's value (REQ-09 G2) - direct execution of an unknown
+    discovered file (`sh {}`, `python3 -u {}`), or `{}` fed straight into
+    an inline-code invocation (`sh -c 'echo ok' {}`, `node -r {}`).
+
+    Walks past the interpreter's own value-flags (table above, value
+    consumed with them) and unrecognized boolean-shaped flags; the first
+    non-flag token reached is the "script position". A script FILE given
+    there (anything other than `{}`) is the standard, safe find-exec idiom
+    (`-exec python3 lint.py {} \\;`) - later positionals are the KNOWN
+    script's own arguments and are deliberately not inspected further.
+    """
+    value_flags = _interpreter_value_flags(interpreter)
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if tok in value_flags:
+            if i + 1 >= n:
+                return False
+            if args[i + 1] == "{}":
+                return True
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        return tok == "{}"
+    return False
 
 
 def _check_find_exec_subcommands(raw_tokens: list[str]) -> SecurityDecision | None:
@@ -297,7 +362,8 @@ def _check_find_exec_subcommands(raw_tokens: list[str]) -> SecurityDecision | No
 
         if args:
             if args[0] == "{}" or (
-                _is_find_exec_interpreter(args[0]) and len(args) >= 2 and args[1] == "{}"
+                _is_find_exec_interpreter(args[0])
+                and _find_exec_script_arg_is_placeholder(args[0], args[1:])
             ):
                 ask_decision = ask_decision or SecurityDecision(
                     decision="ask",

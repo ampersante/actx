@@ -351,6 +351,24 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_ask(r"find . -exec sh {} \;", "T4_DESTRUCTIVE_MUTATION")
         self.assert_allow(r"find . -exec cat {} +")
 
+    def test_g2_find_exec_interpreter_placeholder_after_options(self):
+        # TK-60 STEP-G2 (REQ-09): `{}` reaching the interpreter's OWN argv
+        # (as its script, or fed into an inline -c/-e invocation) asks even
+        # when interpreter options come first - not just the bare
+        # `interpreter {}` case already covered above. Plan pins, verbatim.
+        self.assert_ask(r"find . -exec sh -x {} \;", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_ask(r"find . -exec sh -c 'echo ok' {} \;", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_ask(r"find . -exec bash -e {} \;", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_ask(r"find . -exec python3 -u {} \;", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_allow(r"find . -exec cat {} +")
+        # The common, safe idiom - a KNOWN script consumes the discovered
+        # file as its own argument - must not regress to ask.
+        self.assert_allow(r"find . -name '*.py' -exec python3 lint.py {} \;")
+        self.assert_allow(r"find . -exec sh knownscript.sh {} \;")
+        # A value-flag's OWN value being the placeholder is equally unknown
+        # code/module reaching the interpreter - also asks.
+        self.assert_ask(r"find . -exec node -r {} \;", "T4_DESTRUCTIVE_MUTATION")
+
     # ------------------------------------------------------------------
     # T5: Supply Chain & Package Lifecycle Security
     # ------------------------------------------------------------------
