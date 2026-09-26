@@ -163,7 +163,51 @@ def generate_synthetic_corpus():
             for _sname, sep in _SYNTH_SEPARATORS:
                 commands.add(f"{wrapped_str}{sep}echo done")
                 commands.add(f"echo start{sep}{wrapped_str}")
+    commands.update(_SYNTH_RAW_EDGE_CASES)
     return commands
+
+
+# ----------------------------------------------------------------------
+# Coverage-driven additions (STEP-R3(d)): raw whole-command strings that
+# close specific engine.py/_split_into_chunks/_evaluate_chunk branches the
+# trigger x wrapper x separator grid above does not reach on its own.
+# tools/gate_trace_coverage.py identified each corresponding gap.
+# ----------------------------------------------------------------------
+_SYNTH_RAW_EDGE_CASES = [
+    "",  # evaluate_security: `not command` short-circuit to allow
+    "true", "false", "pwd", "whoami", "date", "clear",  # _evaluate_chunk fast-path allow
+    "find . -exec ;",  # empty -exec clause -> _evaluate_chunk('') -> empty tokens -> allow
+    'echo "value is \\$HOME"',  # _mask_literal_semicolons: escaped char inside a double-quoted run
+    'echo "unbalanced && rm -rf /',  # _split_into_chunks: shlex.split ValueError fallback (has an operator + a quote)
+    "echo 'unterminated rm -rf /",  # _evaluate_chunk: _fast_tokenize's own shlex.split ValueError,
+                                     # caught by evaluate_security's per-chunk except ValueError fallback regex
+    ";".join(["true"] * 101),  # > 100 chunks -> deny (chunk-complexity guard)
+    "eval $(true)",  # builtin/eval T3 payload branches (obfuscation/eval dynamic-exec forms)
+    "builtin eval $(true)",
+    "exec $(true)",
+    "printenv -a",  # printenv with a flag (still "dumps everything" branch)
+    "git branch -d -f old",  # git branch: separate -d and -f tokens (not a single -D/-df/-fd cluster)
+    "pip install --index-url http://example.com/simple pkg",  # pip HTTP index via separate token+value
+    "npm install --registry http://example.com pkg",  # npm HTTP registry via separate token+value
+    "python3 -c 'import os; os.environ'",  # inline python env-dump branch
+    "python3 -c 'import socket; socket.socket()'",  # inline python network branch
+    "rm -rf /Users/x/Desktop/*",  # protected-user-dir wildcard-suffix branch
+    "rm -rf ~/Desktop/*",  # protected-user-dir wildcard-suffix branch (tilde form)
+    "bash -c 'true' extra",  # sh/-c inner-command recursion (t1_paths back-edge) with trailing args
+    "grep -e secret -f patterns.txt src/app.py",  # grep: both -e and -f present branch
+    "git grep -e secret -f patterns.txt",  # git grep: both -e and -f present branch
+    "cat authorization: bearer abc",  # _is_sensitive_path auth-header exclusion branch
+    "cat x-api-key: abc",
+    "curl https://example.com --post-file=/tmp/notsecret.txt",  # wget/curl --post-file non-sensitive branch
+    "bash -c 'a\\|b'",  # top-level backslash-escaped non-semicolon char outside quotes
+    "python3 -c 'import subprocess; subprocess.Popen(1)' extra_arg_forces_recursion",
+    "_tmp_script.zsh",  # temp-script extension variants beyond .py/.sh
+    "bash _tmp_script.bash",
+    "ruby _tmp_script.rb",
+    "perl _tmp_script.pl",
+    "node _tmp_script.js",
+    "tsc _tmp_script.ts",
+]
 
 
 # ----------------------------------------------------------------------
