@@ -1,646 +1,28 @@
+"""TK-60: closed-grammar rewrite engine.
+
+Replaces the former "head allowed, dangerous flag denied by name" model
+(open by construction: an unlisted flag was silently admitted) with a
+closed one: a command rewrites only if EVERY token after the head matches
+an explicit admission rule in `actx_lib.rewrite_spec.HEAD_SPECS` (data,
+per plan `2026-09-27-gate-split-allowlist.md` S5.1). A head absent from
+HEAD_SPECS, or any token the matching head-spec does not explicitly admit,
+means "do not rewrite" - never a fallback to the old predicate-based
+admission. This module is the engine only; the specs are pure data in
+`rewrite_spec.py`.
+"""
 import os
 import shlex
 
-from actx_lib import cli_families, sql_verbs
+from actx_lib import cli_families, rewrite_spec, sql_verbs
 
 _FORBIDDEN = set("\n\r\t\0;&&|<>$`(){}#")
 
-# Owned here so rewriter never imports filters (hook/rewrite perf boundary).
-BRANCH_READ_ONLY = frozenset({
-    "-a", "-r", "-l", "--list", "--show-current",
-    "-v", "--verbose", "-vv", "--no-color",
-})
-
-_LS_FLAGS = frozenset({
-    "-l", "-a", "-la", "-al", "-lh", "-lah", "-ahl", "-hal", "-hla", "-alh",
-    "-1", "-F",
-})
-
-_GIT_RO = frozenset({"status", "diff", "log", "show", "blame", "rev-parse"})
-_GIT_MUTATE = frozenset({"add", "commit", "push", "pull", "fetch"})
-
-_PIP_RO = frozenset({"list", "show", "freeze", "outdated"})
-# TK-51 (user policy 2026-09-05): install-class verbs left the mutator
-# allow-list (roll-back of v2.3.0) — package installs are never rewritten;
-# the T5 security gate escalates them to "ask" on the hook path instead.
-_NPM_RO = frozenset({"list"})
-_CARGO_PURE_RO = frozenset({"check", "test", "build", "tree"})
-_CARGO_1ARG_FLAGS = frozenset({
-    "-q", "--quiet", "-v", "-vv", "-vvv", "--verbose",
-    "--offline", "--locked", "--frozen",
-})
-_CARGO_2ARG_FLAGS = frozenset({
-    "--color", "--config", "-C", "-Z", "--manifest-path", "--target-dir",
-})
-
-_WRITE_TOKENS = frozenset({"--fix", "fix", "format"})
-
-# TK-55 F3: flags whose value is a write path / output redirect on
-# otherwise-RO heads (rule: "the flag's value is a file the command
-# writes"). Per-head match kinds:
-#   eq      -- `tok == flag` or the `flag=value` single-token form
-#   attach  -- one-letter short flag, bare or with a glued value
-#              (`-o out`, `-oout`); only for non-"--" tokens
-#   prefix  -- plain startswith (`git --out*` catches --output too)
-#   name    -- dash-insensitive name match: go's flag package accepts
-#              `--flag` == `-flag` verbatim, so the stored name (no dashes)
-#              is compared to `tok.lstrip("-").split("=",1)[0]`
-#   nameci  -- same as `name` but case-insensitive (tsc strips 1-2 leading
-#              dashes and matches option names case-insensitively)
-#   pflag_short -- TK-57 REQ-04, pflag/Cobra heads only (docker, kubectl,
-#              helm, gh): a single-dash token IS a short-flag CLUSTER
-#              (`-As` == `-A -s`, pflag/Cobra semantics), so a denied
-#              short flag can hide behind a leading boolean short flag
-#              (E-009: `kubectl get pods -As https://evil:6443`). Value:
-#              {"denied": {...}, "bool": {...}, "value": {...}} - single
-#              chars (no leading dash). Scanned left to right: a denied
-#              char -> caught; a declared value char -> the rest of the
-#              token is its glued value (matches pflag's own glue-value
-#              parsing), stop scanning this token; a declared boolean char
-#              -> keep scanning; any other char -> unknown, fail closed
-#              (denied). "bool"/"value" are the head's known short flags
-#              (from --help / fixtures), NOT the denied set itself - they
-#              only disambiguate cluster boundaries; an omitted benign
-#              short flag fails closed (safe direction), it does not open
-#              a hole.
-# The scan runs on the EFFECTIVE head: inside `uv run <argv>` /
-# `xcrun simctl <argv>` the inner head is matched (cli_families
-# run_prefix_split, shared with the security gate). This table folds in
-# the former per-predicate `sort -o`/`--output` and `git --out*` rejects.
-_DENIED_WRITE_FLAGS = {
-    # git exec-flags (TK-57 REQ-08): --upload-pack/--receive-pack/--exec
-    # run an arbitrary local program as the "git" side of a smart-HTTP/SSH
-    # transport on the rewritten mutators (fetch/pull/push) - E-015. `git
-    # <verb> -h` (verified: fetch/push/pull) gives the unambiguous
-    # abbreviation prefixes (git's parse-options accepts them like
-    # getopt_long): "--upl" (fetch/pull "--upload-pack" vs "--unshallow"/
-    # "--update-*"; also clear of add's "--update"), "--ex" (push
-    # "--exec"; clear of pull's "--edit"), "--rece" (push
-    # "--receive-pack" vs "--recurse-submodules" - the plan's own
-    # called-out collision for a bare "--rec" prefix). Each prefix also
-    # matches the full spelling and its "=value" form.
-    "git": {"prefix": ("--out", "--upl", "--ex", "--rece")},
-    # getopt_long resolves unambiguous abbreviations (verified on Apple
-    # sort: `sort --o file` writes); --output is the only --o* long option.
-    # --compress-program=<prog> execs the program on temp-file spills
-    # (GNU; accepted-but-inert on BSD sort).
-    "sort": {"eq": ("--compress-program",), "prefix": ("--o",),
-             "attach": ("-o",)},
-    # GNU tree resolves long-option abbreviations (`--out` -> --output);
-    # on BSD tree long options don't exist and the flag simply errors.
-    "tree": {"prefix": ("--o",), "attach": ("-o",)},
-    # jest uses yargs: dashed spellings map onto the camelCase options.
-    # -u/--updateSnapshot rewrites inline snapshots in source files —
-    # the --fix sibling (source-mutation flag).
-    "jest": {"eq": ("--outputFile", "--output-file",
-                    "--coverageDirectory", "--coverage-directory",
-                    "--updateSnapshot", "--update-snapshot", "--update"),
-             "attach": ("-u",)},
-    "vitest": {"eq": ("--outputFile", "--output-file", "--update"),
-               "attach": ("-u",),
-               "prefix": ("--outputFile.", "--output-file.")},
-    # optionator accepts unambiguous long-option abbreviations (any
-    # non-empty prefix of --output-file: --o, --ou, --out, ...); it is the
-    # only --o* long option in eslint's space.
-    "eslint": {"eq": ("--output-file",), "attach": ("-o",),
-               "prefix": ("--o",)},
-    # --add-noqa rewrites source files in place (sibling of --fix).
-    "ruff": {"eq": ("--output-file", "--cache-dir", "--add-noqa"),
-             "attach": ("-o",)},
-    "go": {"name": ("o", "c", "coverprofile", "cpuprofile", "memprofile",
-                    "blockprofile", "mutexprofile", "trace", "outputdir")},
-    # --init writes tsconfig.json (file-creation flag).
-    "tsc": {"nameci": ("out", "outfile", "outdir", "declarationdir",
-                       "tsbuildinfofile", "generatetrace", "init")},
-    # pytest's parser allows unambiguous abbreviations; "--junitx"/
-    # "--junit-x" cover every prefix of both --junitxml and --junit-xml
-    # without catching the RO --junit-prefix flag.
-    "pytest": {"eq": ("--basetemp", "--junitxml", "--junit-xml"),
-               "prefix": ("--junitx", "--junit-x", "--baset")},
-    # Acceptance residuals (pre-existing holes, same defer outcome):
-    # rg --pre/--pre-glob execute an arbitrary command per file —
-    # exec-capable, not a write flag, but refused here by the same
-    # mechanism ("--pretty" pins the eq form: a "--pre" prefix would FP).
-    "rg": {"eq": ("--pre", "--pre-glob", "--hostname-bin")},
-    # psql -o/--output and -L/--log-file write query output to files; psql
-    # uses getopt_long, so abbreviations resolve too (--o and --lo are
-    # unique; --l would collide with --list).
-    "psql": {"prefix": ("--o", "--lo"), "attach": ("-o", "-L")},
-    # getopt_long abbreviations of --follow (--f/--fo/...) defeat the
-    # never-wrap check and would hang the wrapper — defer instead.
-    "tail": {"prefix": ("--f",), "attach": ("-f", "-F")},
-    # helm's TK-43 `--output-dir`/`--post-renderer` entry is merged into
-    # the single "helm" key further below, next to its TK-57 REQ-04
-    # --kube-*/--registry-config/--repository-config entries (Python dict
-    # literals silently let a later duplicate key win).
-    # terraform's REQ-04 entry (-chdir) is merged into the single
-    # "terraform" key further below, next to its TK-43 `-out` entry
-    # (Python dict literals silently let a later duplicate key win, so the
-    # two are kept together instead of split across the table).
-    # swiftlint lint: --autocorrect is an exact alias of the denied --fix
-    # (@Flag on the same `fix` var); --output/--write-baseline/--benchmark
-    # write files (SAP has no abbreviations).
-    "swiftlint": {"eq": ("--autocorrect", "--output", "--write-baseline",
-                         "--benchmark")},
-    # swiftformat --lint --report <file> writes the report (--output is
-    # inert in --lint mode — deliberately not listed).
-    "swiftformat": {"eq": ("--report",)},
-
-    # --- TK-57 REQ-04: "switches endpoint/account/project/scope,
-    # impersonates, or hands over a credential/flags file" class. Sources
-    # cited per head; §11/report flags any unconfirmed member excluded on
-    # purpose (plan stop-rule: do not add a class member silently).
-    #
-    # docker (Cobra/pflag; verified `docker --help` locally, 2026-09-26):
-    # -H/--host and -c/--context switch the daemon endpoint; --config
-    # points at a whole alternate client-config dir (incl. contexts);
-    # --tlscacert/--tlscert/--tlskey swap the TLS identity used to talk to
-    # the daemon. -D/--debug, -l/--log-level, --tls, --tlsverify, -v/
-    # --version are NOT in this class (checked, excluded) but -D/-v are
-    # still declared boolean below so a cluster containing them doesn't
-    # fail closed (docker_tk41_golden.json: `docker system df -v` must
-    # stay "prefix"/rewrite - CHK-07). bool/value otherwise observed from
-    # docker_tk41_golden.json + test_cli_families.py fixtures (must stay
-    # green, CHK-07): -a/-q boolean, -n/-f value.
-    "docker": {
-        "eq": ("--context", "--host", "--config", "--tlscacert",
-               "--tlscert", "--tlskey"),
-        "pflag_short": {
-            "denied": frozenset("cH"),
-            "bool": frozenset("aqDv"),
-            "value": frozenset("nf"),
-        },
-    },
-    # kubectl (Cobra/pflag; verified `kubectl options` + `kubectl get/
-    # describe/top/events/logs --help` locally, 2026-09-26): -s/--server
-    # switches the API server; --token/--username/--password/--user hand
-    # over or switch credentials; --as/--as-group/--as-uid impersonate;
-    # --client-certificate/--client-key/--certificate-authority swap the
-    # TLS identity/trust root; --insecure-skip-tls-verify/--tls-server-name
-    # weaken or redirect certificate validation. --context/--cluster/
-    # --kubeconfig/--namespace/-n stay OUT (REQ-11 NON-GOAL, TK-40 value_
-    # flags decision) - not repeated here. bool/value short-flag sets are
-    # the union across get/describe/top/events/logs --help plus the
-    # global -n/-s/-v (kubectl options): -A/-w/-R/-p boolean, -o/-n/-l/
-    # -f/-k/-L/-c/-v value (kubectl logs -c is --container, unrelated to
-    # docker's -c; per-head sets, no cross-contamination).
-    "kubectl": {
-        "eq": ("--token", "--user", "--username", "--password", "--as",
-               "--as-group", "--as-uid", "--client-certificate",
-               "--client-key", "--certificate-authority",
-               "--insecure-skip-tls-verify", "--tls-server-name",
-               "--server"),
-        "pflag_short": {
-            "denied": frozenset("s"),
-            "bool": frozenset("AwRp"),
-            "value": frozenset("onlfkLcv"),
-        },
-    },
-    # helm (Cobra/pflag; verified via helm.sh docs, 2026-09-26 - helm not
-    # installed locally): every --kube-* flag switches the target cluster/
-    # identity/TLS trust the same way kubectl's globals do; --registry-
-    # config/--repository-config point at alternate credential/registry
-    # config files. None of these have a single-letter short form (only
-    # -n/--namespace and -h/--help do, neither denied) -> no pflag_short
-    # entry needed. `--output-dir` (TK-43: `helm template` writes every
-    # rendered manifest) and `--post-renderer`/`--post-renderer-args`
-    # (TK-43: execs the named program) are the pre-existing entries, kept
-    # here (single "helm" key - see the note left at their old location).
-    "helm": {
-        "eq": ("--kube-apiserver", "--kube-token", "--kube-as-user",
-               "--kube-as-group", "--kube-ca-file",
-               "--kube-tls-server-name", "--kube-insecure-skip-tls-verify",
-               "--kube-context", "--kubeconfig", "--registry-config",
-               "--repository-config", "--output-dir"),
-        "prefix": ("--post-renderer",),
-    },
-    # gh (Cobra/pflag; `gh <ns> --help` locally, 2026-09-26): --hostname
-    # switches the GitHub host. No short form found on any declared
-    # RO-verb subcommand in the installed gh 2.100.0 (`gh pr/issue/repo/
-    # release/run/workflow/gist ... --hostname` all error "unknown flag");
-    # kept per plan (harmless if genuinely inert on this version - a
-    # rejected flag just fails the underlying gh call either way) but
-    # flagged as unconfirmed-live in the stream report. -R/--repo is
-    # REQ-11 (its [HOST/]OWNER/REPO form is the real host-switch vector,
-    # deliberately out of this class; tests/test_cli_families.py:493-498).
-    "gh": {"eq": ("--hostname",)},
-
-    # gcloud (Python/argparse-derived "calliope" parser; docs.cloud.
-    # google.com/sdk/gcloud/reference, fetched 2026-09-26): --account/
-    # --impersonate-service-account switch/impersonate the identity;
-    # --project/--billing-project switch the project; --configuration
-    # switches the whole named config bundle; --access-token-file/
-    # --credential-file-override hand over a credential file; --flags-file
-    # can inject any of the above from a file. No short forms confirmed;
-    # abbreviation support not confirmed either (not asserted - "eq" only,
-    # unverified area noted in the stream report).
-    "gcloud": {
-        "eq": ("--impersonate-service-account", "--account",
-               "--access-token-file", "--configuration",
-               "--credential-file-override", "--flags-file", "--project",
-               "--billing-project"),
-    },
-    # bq (absl flags: single dash == double dash, case-sensitive
-    # underscore names - "name" match kind, dash-agnostic via
-    # tok.lstrip("-")). --location deliberately excluded (plan: it names a
-    # region, not a project/account - out of this semantic class).
-    "bq": {
-        "name": ("credential_file", "service_account",
-                 "service_account_credential_file",
-                 "service_account_private_key_file", "api",
-                 "use_gce_service_account",
-                 "application_default_credential_file",
-                 "oauth_access_token", "project_id", "dataset_id"),
-    },
-    # vercel (per plan/docs): -t/--token, -S/--scope, -Q/--global-config,
-    # -A/--local-config switch credentials/account/scope/config-dir;
-    # --team switches the team context; --api points at an alternate API
-    # endpoint.
-    "vercel": {
-        "eq": ("--team", "--api", "--token", "--scope", "--global-config",
-               "--local-config"),
-        "attach": ("-t", "-S", "-Q", "-A"),
-    },
-    "netlify": {"eq": ("--auth", "--site")},
-    # flyctl: -t/--access-token switches credentials; -a/--app switches
-    # the target app; --org switches the target organization.
-    "flyctl": {
-        "eq": ("--org", "--access-token"),
-        "attach": ("-t", "-a"),
-    },
-    # supabase (docs.supabase.com, fetched 2026-09-26): --project-ref
-    # switches the target project; --profile switches the named auth
-    # profile (a doc-confirmed sibling found during this pass - not in
-    # the plan's original list). "--token"/"--access-token" checked and
-    # NOT found as a supabase CLI flag (auth is via the
-    # SUPABASE_ACCESS_TOKEN env var instead) - deliberately excluded.
-    "supabase": {"eq": ("--project-ref", "--profile")},
-    "railway": {"eq": ("--project", "--environment", "--service")},
-    # wrangler (developers.cloudflare.com/workers/wrangler/commands/
-    # general/, fetched 2026-09-26): --config/-c points at an alternate
-    # wrangler config file; --env/-e switches the environment (and its
-    # .env/.dev.vars files); --profile switches the named auth profile (a
-    # doc-confirmed sibling found during this pass). "--account-id" was
-    # checked and is NOT listed as a global flag in current docs (only
-    # "--account" on `whoami`) - deliberately excluded.
-    "wrangler": {
-        "eq": ("--profile", "--env"),
-        "attach": ("-c", "-e"),
-    },
-    # terraform: `-out[=]<file>` (TK-43) persists a plan file that a later
-    # `terraform apply` executes without re-reading the diff. `-chdir`
-    # (TK-57 REQ-04) switches the whole working directory Terraform reads
-    # its configuration/backend/credentials from - developer.hashicorp.
-    # com/terraform/cli/commands confirms it (fetched 2026-09-26);
-    # "-state" is NOT a current global flag per that page (deliberately
-    # excluded, unconfirmed) and "-var-file" only supplies variable values
-    # to the current config (not an endpoint/account switch) - both left
-    # out per the plan's own "?" markers.
-    "terraform": {"eq": ("-out", "-chdir")},
-}
-
-
-def _pflag_cluster_denied(pflag_short, body):
-    """TK-57 REQ-04: True when `body` (a single-dash token's characters
-    after the leading '-') is a pflag/Cobra short-flag cluster containing
-    a denied character. See the pflag_short match-kind doc above
-    _DENIED_WRITE_FLAGS for the algorithm."""
-    denied = pflag_short["denied"]
-    bools = pflag_short.get("bool", frozenset())
-    values = pflag_short.get("value", frozenset())
-    for ch in body:
-        if ch in denied:
-            return True
-        if ch in values:
-            return False  # rest of the token is this flag's glued value
-        if ch in bools:
-            continue
-        return True  # unknown char: fail closed
-    return False
-
-
-def _has_denied_write_flag(head, argv):
-    """True when a token of argv (the tokens after the effective head)
-    carries a denied write-path flag of `head` (TK-55 F3). For `go` the
-    scan stops at `-args`: flags behind it belong to the test binary, not
-    to the go tool."""
-    spec = _DENIED_WRITE_FLAGS.get(head)
-    if spec is None:
-        return False
-    pflag_short = spec.get("pflag_short")
-    for tok in argv:
-        # go: `-args`/`--args` ends the go flag space; what follows belongs
-        # to the test binary, not to the go tool.
-        if head == "go" and tok.lstrip("-") == "args":
-            break
-        for flag in spec.get("eq", ()):
-            if tok == flag or tok.startswith(flag + "="):
-                return True
-        if not tok.startswith("--"):
-            for flag in spec.get("attach", ()):
-                if tok.startswith(flag):
-                    return True
-        for flag in spec.get("prefix", ()):
-            if tok.startswith(flag):
-                return True
-        if tok.startswith("-"):
-            name = tok.lstrip("-").split("=", 1)[0]
-            # go test accepts test-binary flags under the `-test.` prefix
-            # verbatim (`go test -test.coverprofile=x` writes the file).
-            if head == "go" and name.startswith("test."):
-                name = name[5:]
-            for flag in spec.get("name", ()):
-                if name == flag:
-                    return True
-            lname = name.lower()
-            for flag in spec.get("nameci", ()):
-                if lname == flag:
-                    return True
-            if (
-                pflag_short is not None
-                and not tok.startswith("--")
-                and len(tok) >= 2
-                and _pflag_cluster_denied(pflag_short, tok[1:])
-            ):
-                return True
-    return False
-
-
-def _parse_cargo(tokens):
-    """Extracts (subcmd, cargo_args, forwarded_args) from cargo tokens."""
-    idx = 1
-    n = len(tokens)
-    while idx < n:
-        tok = tokens[idx]
-        if tok == "--":
-            return None, [], []
-        if tok.startswith("+"):
-            idx += 1
-            continue
-        if tok in _CARGO_1ARG_FLAGS:
-            idx += 1
-            continue
-        if tok in _CARGO_2ARG_FLAGS:
-            idx += 2
-            continue
-        if tok.startswith("--color=") or tok.startswith("--config=") or tok.startswith("-C=") or tok.startswith("-Z="):
-            idx += 1
-            continue
-        if tok.startswith("-"):
-            idx += 1
-            continue
-        subcmd = tok
-        rest = tokens[idx + 1 :]
-        if "--" in rest:
-            dash_idx = rest.index("--")
-            cargo_args = rest[:dash_idx]
-            forwarded_args = rest[dash_idx + 1 :]
-        else:
-            cargo_args = rest
-            forwarded_args = []
-        return subcmd, cargo_args, forwarded_args
-    return None, [], []
-
-
-def _cargo_ok(tokens):
-    if len(tokens) < 2:
-        return False
-    subcmd, cargo_args, forwarded_args = _parse_cargo(tokens)
-    if subcmd is None:
-        return False
-
-    if subcmd in _CARGO_PURE_RO:
-        return True
-
-    if subcmd == "clippy":
-        return not any(tok == "--fix" or tok.startswith("--fix=") for tok in cargo_args)
-
-    if subcmd == "fmt":
-        all_args = cargo_args + forwarded_args
-        has_check = "--check" in all_args
-        has_emit_files = False
-        for i, tok in enumerate(all_args):
-            if tok in ("--emit=files", "--emit=file"):
-                has_emit_files = True
-                break
-            if tok == "--emit" and i + 1 < len(all_args) and all_args[i + 1] in ("files", "file"):
-                has_emit_files = True
-                break
-        return has_check and not has_emit_files
-
-    if subcmd == "metadata":
-        return "--no-deps" in cargo_args
-
-    if subcmd == "package":
-        return "--list" in cargo_args
-
-    return False
-
-
-
-def _has_write_token(tokens):
-    return any(tok in _WRITE_TOKENS or tok.startswith("--fix") for tok in tokens[1:])
-
-
-def _git_ok(tokens):
-    if len(tokens) < 2:
-        return False
-    sub = tokens[1]
-    if sub in _GIT_RO:
-        return True
-    if sub in _GIT_MUTATE:
-        return True
-    if sub == "branch":
-        rest = tokens[2:]
-        return (not rest) or all(arg in BRANCH_READ_ONLY for arg in rest)
-    if sub == "stash" and len(tokens) >= 3 and tokens[2] == "list":
-        return True
-    return False
-
-
-def _ls_ok(tokens):
-    rest = tokens[1:]
-    if not rest:
-        return True
-    flags = []
-    paths = []
-    for tok in rest:
-        if tok.startswith("-"):
-            flags.append(tok)
-        else:
-            paths.append(tok)
-    if len(paths) > 1:
-        return False
-    if any(not p for p in paths):
-        return False
-    if flags and any(f not in _LS_FLAGS for f in flags):
-        return False
-    return True
-
-
-def _find_ok(tokens):
-    # TK-57 STEP-04b: -fprint0 is a sibling of -fprint/-fprintf/-fls (same
-    # "writes a file" class, GNU findutils `man find`) that was missing -
-    # `find . -fprint0 x` rewrote and allowed a write action.
-    forbidden = {
-        "-delete", "-exec", "-execdir", "-ok", "-okdir",
-        "-fprint", "-fprint0", "-fprintf", "-fls",
-    }
-    return forbidden.isdisjoint(tokens)
-
-
-def _wc_family_ok(tokens):
-    head = tokens[0]
-    if head == "tail" and any(
-        tok == "-f" or tok == "--follow" or tok.startswith("--follow=")
-        for tok in tokens
-    ):
-        return False
-    if head == "uniq":
-        # POSIX `uniq [input [output]]`: a second positional is a write
-        # path — skip uniq's value-flags (-f/-s/-w and long forms) first.
-        positionals = 0
-        idx = 1
-        while idx < len(tokens):
-            tok = tokens[idx]
-            if tok in ("-f", "-s", "-w", "--skip-fields",
-                       "--skip-chars", "--check-chars"):
-                idx += 2
-                continue
-            if tok.startswith("-"):
-                idx += 1
-                continue
-            positionals += 1
-            idx += 1
-        if positionals >= 2:
-            return False
-    return True
-
-
-def _pip_ok(tokens):
-    if len(tokens) < 2:
-        return False
-    return tokens[1] in _PIP_RO
-
-
-def _uv_ok(tokens):
-    # TK-51: `uv pip install` left the allow-list; `uv run` stays (primary
-    # semantics: run — the install matrix lives in the T5 gate).
-    # TK-55: the inner head must be locatable — an unparseable `uv run`
-    # (unknown flag, bare `run`) defers instead of being auto-approved.
-    if len(tokens) < 2 or tokens[1] != "run":
-        return False
-    return cli_families.run_prefix_split(tokens) is not None
-
-
-def _npm_ok(tokens):
-    if len(tokens) < 2:
-        return False
-    return tokens[1] in _NPM_RO
-
-
-def _ruff_ok(tokens):
-    return not _has_write_token(tokens)
-
-
-def _eslint_ok(tokens):
-    return not _has_write_token(tokens)
-
-
-# TK-57 STEP-04 (REQ-05): `next` rewrites only a closed RO-subcommand
-# list - the prior always-true predicate (bare `--fix`-scan only) allowed
-# `next dev`/`next start`/`next telemetry` etc. through unconditionally.
-_NEXT_RO = frozenset({"lint", "build", "info"})
-
-
-def _next_ok(tokens):
-    if len(tokens) < 2 or tokens[1] not in _NEXT_RO:
-        return False
-    return not any(tok == "--fix" or tok.startswith("--fix") for tok in tokens[1:])
-
-
-# --- mobile toolchains (TK-42) ---
-_FLUTTER_RO = frozenset({"doctor", "analyze", "test"})
-_DART_RO = frozenset({"analyze", "test"})
-_SWIFT_RO = frozenset({"build", "test"})
-_XCODEBUILD_INFO_FLAGS = frozenset({"-list", "-showsdks", "-showBuildSettings"})
-_SWIFTFORMAT_READONLY = frozenset({"--lint", "--dryrun", "--dry-run"})
+# Re-exported for `filters/git_filter.py` (`from actx_lib.rewriter import
+# BRANCH_READ_ONLY`); rewrite_spec.py is the single source of the value.
+BRANCH_READ_ONLY = rewrite_spec.BRANCH_READ_ONLY
 
 # --- SQL CLIs (TK-43, REQ-06): the ONLY heads with the quote-aware guard ---
 _SQL_HEADS = frozenset({"psql", "sqlite3", "duckdb"})
-
-
-def _flutter_ok(tokens):
-    if len(tokens) < 2:
-        return False
-    if tokens[1] == "doctor":
-        # License acceptance is an interactive prompt (never-wrap upstream).
-        return "--android-licenses" not in tokens[2:]
-    if tokens[1] in _FLUTTER_RO:
-        return True
-    return (
-        tokens[1] == "pub"
-        and len(tokens) >= 3
-        and tokens[2] in ("outdated", "deps")
-    )
-
-
-def _swiftformat_ok(tokens):
-    # Mutating mode (bare, paths, fix/format) never matches: the read-only
-    # lint/dry flags are required verbatim and write tokens reject outright.
-    if _has_write_token(tokens):
-        return False
-    return any(tok in _SWIFTFORMAT_READONLY for tok in tokens[1:])
-
-
-def _xcodebuild_ok(tokens):
-    rest = tokens[1:]
-    # Interactive signing update prompts (never-wrap upstream).
-    if "-allowProvisioningUpdates" in rest:
-        return False
-    if any(tok in _XCODEBUILD_INFO_FLAGS for tok in rest):
-        return True
-    # A build pinned to a scheme/destination compacts to diagnostics only;
-    # the bare invocation stays unwrapped (interactive signing prompts).
-    return "-scheme" in rest or "-destination" in rest
-
-
-def _gradlew_ok(tokens):
-    """./gradlew dispatch (TK-55 F5): every positional token is a gradle
-    task and must classify "ro" via cli_families.gradle_task_class —
-    multi-task invocations rewrite only when ALL tasks are RO
-    (`publish`/`clean`-class and unknown verbs defer). Declared gradle
-    value flags are skipped with their value (separate or `=`-form),
-    `-P...`/`-D...` glued properties and declared boolean flags are
-    skipped whole; an undeclared `-`-token fails closed. Bare `./gradlew`
-    keeps rewriting (parity with the former always-true predicate —
-    default tasks)."""
-    args = tokens[1:]
-    i = 0
-    n = len(args)
-    while i < n:
-        tok = args[i]
-        if tok in cli_families.GRADLE_VALUE_FLAGS:
-            i += 2  # flag + separate value token
-            continue
-        if any(
-            tok.startswith(vf + "=")
-            for vf in cli_families.GRADLE_VALUE_FLAGS
-        ):
-            i += 1  # --flag=value: value stays inside the token
-            continue
-        if tok.startswith(cli_families.GRADLE_ATTACHED_VALUE_PREFIXES):
-            i += 1  # glued -Pprop=v / -Dprop=v
-            continue
-        if tok in cli_families.GRADLE_BOOL_FLAGS:
-            i += 1
-            continue
-        if tok.startswith("-"):
-            return False  # undeclared flag: fail closed
-        if cli_families.gradle_task_class(tok) != "ro":
-            return False
-        i += 1
-    return True
 
 
 def _quoted_token(tok):
@@ -678,7 +60,8 @@ def _sql_guard_ok(command):
       (sqlite3) - else reject.
 
     Structural only; the SQL class (RO vs dangerous) is decided by the
-    dispatch predicate below, so guard and predicate both must pass."""
+    per-head spec's `sql_payload` hook below, so guard and hook both must
+    pass."""
     try:
         toks = shlex.split(command, posix=False)
     except ValueError:
@@ -698,118 +81,290 @@ def _sql_guard_ok(command):
     return False
 
 
-def _sql_cli_ok(tokens):
-    """psql/sqlite3/duckdb dispatch predicate (TK-43): every SQL payload
-    (sql_verbs.sql_payloads - one shared extraction with the security
-    gate) must classify RO; file-based SQL (`-f`/`--file`/`-init`) never
-    rewrites; no payload (bare REPL) never rewrites (hang policy owns it,
-    exit 125)."""
-    rest = tokens[1:]
-    if any(
-        tok in sql_verbs.SQL_FILE_FLAGS or tok.startswith("--file=")
-        for tok in rest
-    ):
-        return False
-    payloads = sql_verbs.sql_payloads(tokens[0], rest)
-    if not payloads:
-        return False
-    return all(sql_verbs.classify_payload(p) == "ro" for p in payloads)
+# ---------------------------------------------------------------------
+# Named semantic hooks (REQ-06). Each hook wraps an EXISTING function
+# (cli_families.gradle_task_class, sql_verbs.sql_payloads/classify_payload)
+# verbatim - no logic is duplicated here, only orchestrated.
+# ---------------------------------------------------------------------
+
+def _hook_gradle_task_ok(token):
+    return cli_families.gradle_task_class(token) == "ro"
 
 
-_DBT_RO = frozenset({"run", "test", "build"})
-
-
-def _terraform_ok(tokens):
-    """terraform dispatch (TK-43): the family ro_verbs generation EXCEPT the
-    flag-sensitive `plan -out <file>` form - a persisted plan is what a
-    later `terraform apply` executes without re-reading the diff. A plain
-    prefix table cannot express the exclusion, so terraform keeps a manual
-    predicate here (rewriter-side twin of the hang-policy dedicated
-    predicates; the T6 ask spec itself lives in FAMILIES). Limitation
-    (documented): the `-out=file` =-form is a single token and slips this
-    token check, same as the T6 matcher."""
-    if "-out" in tokens[1:]:
-        return False
-    return _cloud_family_ok(
-        tokens, cli_families.FAMILIES["terraform"]["ro_verbs"]
-    )
-
-
-# head -> predicate(tokens) ; None predicate means always rewrite when head matches
-_DISPATCH = {
-    "git": _git_ok,
-    "ls": _ls_ok,
-    "grep": lambda _t: True,
-    "find": _find_ok,
-    "wc": _wc_family_ok,
-    "head": _wc_family_ok,
-    "tail": _wc_family_ok,
-    "sort": _wc_family_ok,
-    "uniq": _wc_family_ok,
-    "rg": lambda _t: True,
-    "cat": lambda _t: True,
-    "tree": lambda _t: True,
-    "pytest": lambda _t: True,
-    "jest": lambda _t: True,
-    "vitest": lambda _t: True,
-    "ruff": _ruff_ok,
-    "eslint": _eslint_ok,
-    "golangci-lint": lambda t: not _has_write_token(t),
-    "tsc": lambda _t: True,
-    "next": _next_ok,
-    "cargo": _cargo_ok,
-    "go": lambda t: len(t) >= 2 and t[1] == "test",
-    "pip": _pip_ok,
-    "uv": _uv_ok,
-    "npm": _npm_ok,
-    "pnpm": _npm_ok,
-    # --- mobile toolchains (TK-42); "./gradlew" matches the argv token ---
-    "flutter": _flutter_ok,
-    "dart": lambda t: len(t) >= 2 and t[1] in _DART_RO,
-    "swift": lambda t: len(t) >= 2 and t[1] in _SWIFT_RO,
-    "swiftlint": lambda t: len(t) >= 2 and t[1] == "lint" and not _has_write_token(t),
-    "swiftformat": _swiftformat_ok,
-    "xcodebuild": _xcodebuild_ok,
-    "xcrun": lambda t: len(t) >= 3 and t[1] == "simctl" and t[2] == "list",
-    "pod": lambda t: len(t) >= 2 and t[1] in ("outdated", "list"),
-    "./gradlew": _gradlew_ok,
-    # --- data stack (TK-43); bq/redis-cli join via FAMILIES generation ---
-    "psql": _sql_cli_ok,
-    "sqlite3": _sql_cli_ok,
-    "duckdb": _sql_cli_ok,
-    "dbt": lambda t: len(t) >= 2 and t[1] in _DBT_RO,
-    # terraform: family ro_verbs minus the `plan -out` form (manual entry -
-    # the FAMILIES loop never overwrites manual predicates)
-    "terraform": _terraform_ok,
+# Per-positional-token semantic classifiers (REQ-06): a level declaring one
+# of these names has EVERY positional token it encounters (not its
+# sub-levels' tokens) checked through the classifier instead of being
+# accepted unconditionally. Each wraps an existing function verbatim
+# (cli_families.gradle_task_class) or is a tiny, self-contained rule that
+# has no separate "existing function" to reuse (cargo's "+toolchain"
+# leading-token convention; ls's POSIX non-empty-path rule).
+_POSITIONAL_HOOKS = {
+    "gradle_task": _hook_gradle_task_ok,
+    "cargo_toolchain": lambda tok: tok.startswith("+"),
+    "nonempty_positional": lambda tok: tok != "",
 }
 
 
-def _cloud_family_ok(tokens, ro_verbs):
-    """Family predicate: the effective verb tokens (head dropped; boolean
-    global flags and value-flags-with-their-value skipped by
-    cli_families.effective_verbs - the single skip-logic source) must start
-    with one of the ro_verbs sequences (exact token equality on every
-    element). Stream/secret verbs are simply absent from ro_verbs, so they
-    never match here."""
-    verbs = cli_families.effective_verbs(tokens)
-    if verbs is None:
+def _hook_sql_payload_ok(head, argv):
+    payloads = sql_verbs.sql_payloads(head, argv)
+    if not payloads:
+        return False  # bare REPL / no payload: hang_policy owns it, not us
+    return all(sql_verbs.classify_payload(p) == "ro" for p in payloads)
+
+
+# ---------------------------------------------------------------------
+# Closed-grammar matcher
+# ---------------------------------------------------------------------
+
+def _own_flags(level):
+    return (level["bool"], level["value"], level["optional"],
+            level["cluster"], level["numeric"])
+
+
+def _merge_flags(inner, outer):
+    """`inner`'s admissions win on key overlap (value/optional domains)."""
+    i_bool, i_value, i_optional, i_cluster, i_numeric = inner
+    o_bool, o_value, o_optional, o_cluster, o_numeric = outer
+    return (
+        i_bool | o_bool,
+        {**o_value, **i_value},
+        {**o_optional, **i_optional},
+        i_cluster or o_cluster,
+        i_numeric or o_numeric,
+    )
+
+
+def _scanning_eff(level, ancestor_eff):
+    """(bool, value, optional, cluster, numeric) admitted while scanning
+    THIS level's own tokens - folds in `ancestor_eff` (the accumulated
+    flags of every strict ancestor) only when `level["inherit"]` is True
+    (pflag/Cobra persistent-flag semantics; git: False; an intermediate
+    multi-token verb-path node: False, so no family flag can be interposed
+    between the path's own tokens - see `_verb_tree`)."""
+    own = _own_flags(level)
+    if not level["inherit"] or ancestor_eff is None:
+        return own
+    return _merge_flags(own, ancestor_eff)
+
+
+def _child_ancestor_eff(level, ancestor_eff):
+    """What gets passed down to a matched verb-child as ITS `ancestor_eff`
+    - ALWAYS accumulates this level's own flags, regardless of whether
+    this level itself inherited from its own parent: "inherit=False" only
+    means "I don't admit my ancestors' flags in MY OWN scanning zone", it
+    must not also erase the ancestor chain for further descendants (a
+    terminal leaf under a non-inheriting intermediate node still needs the
+    family's root-level flags after the whole verb path completes)."""
+    own = _own_flags(level)
+    if ancestor_eff is None:
+        return own
+    return _merge_flags(own, ancestor_eff)
+
+
+def _looks_like_signed_numeric_value(tok):
+    """True for a POSIX-style signed numeric value token: an optional
+    leading `+`/`-` immediately followed by a digit, then anything (`-1`,
+    `+7`, `-1h30m`, `+10M`) - used ONLY to let a required-value flag
+    accept a leading-sign numeric next token (`find ... -mtime -1`,
+    `-size +10M`) without opening the general "value looks like the next
+    flag" ambiguity: no declared flag of any head in this module is
+    spelled with a digit immediately after its leading dash, so this can
+    never be confused with an actual flag spelling."""
+    return len(tok) >= 2 and tok[0] in "+-" and tok[1].isdigit()
+
+
+def _match_value_flag(tok, next_tok, flag, domain):
+    """Required-value flag `flag` against `tok` (+ `next_tok` for the
+    separate-token form). Returns tokens-consumed (1 or 2) or None. A
+    following token starting with "-" is never accepted as the value,
+    EXCEPT a POSIX-style signed numeric token (see
+    `_looks_like_signed_numeric_value`)."""
+    if tok == flag:
+        if next_tok is None:
+            return None
+        if next_tok.startswith("-") and not _looks_like_signed_numeric_value(next_tok):
+            return None
+        return 2 if _value_ok(domain, next_tok) else None
+    if tok.startswith(flag + "="):
+        return 1 if _value_ok(domain, tok[len(flag) + 1:]) else None
+    if len(flag) == 2 and flag[0] == "-" and flag[1] != "-" and tok.startswith(flag) and len(tok) > 2:
+        # glued short form: -fVALUE
+        return 1 if _value_ok(domain, tok[2:]) else None
+    return None
+
+
+def _match_optional_flag(tok, flag, domain):
+    """Optional-value flag: glued/`=` form only, or the bare flag with an
+    empty value; a following bare token is never consumed."""
+    if tok == flag:
+        return 1
+    if tok.startswith(flag + "="):
+        return 1 if _value_ok(domain, tok[len(flag) + 1:]) else None
+    if len(flag) == 2 and flag[0] == "-" and flag[1] != "-" and tok.startswith(flag) and len(tok) > 2:
+        return 1 if _value_ok(domain, tok[2:]) else None
+    return None
+
+
+def _value_ok(domain, value):
+    if domain == "any":
+        return True
+    if domain == "int":
+        return value.lstrip("+-").isdigit()
+    return value in domain  # frozenset of allowed literal values
+
+
+def _cluster_ok(bool_set, body):
+    """A cluster of short boolean flags (`-la`): every character, prefixed
+    with "-", must be an admitted single-dash boolean flag; any other
+    character (unknown, or a value-flag's letter) fails closed."""
+    for ch in body:
+        if f"-{ch}" not in bool_set:
+            return False
+    return True
+
+
+def _match_cluster_with_trailing_value(tok, next_tok, eff):
+    """A short-flag cluster (`cluster=True`) whose LAST character is a
+    declared single-char value flag, the rest boolean (`-am` == `-a -m`,
+    getopt-style clustering where only the final flag in the group may
+    take a value). Returns tokens-consumed (2, since the value is always
+    the separate next token here) or None. Distinct from `_cluster_ok`
+    (all-boolean clusters) and from `_match_value_flag`'s own glued-value
+    form (`-mVALUE`, a single flag, not a cluster of several)."""
+    bool_set, value_map, _optional_map, cluster, _numeric = eff
+    if not cluster or len(tok) <= 2 or tok[1] == "-":
+        return None
+    body = tok[1:]
+    prefix, last = body[:-1], body[-1]
+    for ch in prefix:
+        if f"-{ch}" not in bool_set:
+            return None
+    last_flag = f"-{last}"
+    domain = value_map.get(last_flag)
+    if domain is None:
+        return None
+    if next_tok is None or (
+        next_tok.startswith("-") and not _looks_like_signed_numeric_value(next_tok)
+    ):
+        return None
+    return 2 if _value_ok(domain, next_tok) else None
+
+
+def _match_flag(tok, eff):
+    """One flag token -> tokens-consumed, given as a 1-tuple (consumed,)
+    when `tok` alone is the whole match, or None when unmatched. Caller
+    supplies the next token separately for required-value flags."""
+    bool_set, value_map, optional_map, cluster, numeric = eff
+    if tok in bool_set:
+        return 1
+    if numeric and tok[1:].isdigit():
+        return 1
+    if cluster and len(tok) > 2 and tok[1] != "-" and _cluster_ok(bool_set, tok[1:]):
+        return 1
+    for flag, domain in optional_map.items():
+        if tok == flag or tok.startswith(flag + "="):
+            n = _match_optional_flag(tok, flag, domain)
+            if n is not None:
+                return n
+    return None
+
+
+def _match_level(level, tokens, ancestor_eff):
+    """True when `tokens` (everything after the head, or after the last
+    matched verb token) fully satisfies `level`'s grammar. `ancestor_eff`
+    is the accumulated (bool, value, optional, cluster, numeric) admission
+    of every strict ancestor level, or None at the head."""
+    require_any_of = level["require_any_of"]
+    if require_any_of and require_any_of.isdisjoint(tokens):
+        # Checked against the WHOLE tail (including anything past a `--`
+        # boundary this level forwards) so e.g. `cargo fmt -- --check`
+        # satisfies fmt's "must carry --check somewhere" requirement the
+        # same as the direct `cargo fmt --check` form does.
         return False
-    for verb in ro_verbs:
-        if tuple(verbs[: len(verb)]) == verb:
-            return True
+    if level["forbid_write_token"] and any(
+        tok in ("--fix", "fix", "format") or tok.startswith("--fix")
+        for tok in tokens
+    ):
+        return False
+    eff = _scanning_eff(level, ancestor_eff)
+    bool_set, value_map, optional_map, cluster, numeric = eff
+    verbs = level["verbs"]
+    hook = level["hook"]
+    i, n = 0, len(tokens)
+    positionals = 0
+    verb_matched = False
+    while i < n:
+        tok = tokens[i]
+        if tok in level["dashdash_literals"]:
+            return _match_after_dashdash(level, tokens[i + 1:])
+        if not verb_matched and verbs and tok in verbs:
+            verb_matched = True
+            return _match_level(verbs[tok], tokens[i + 1:],
+                                 _child_ancestor_eff(level, ancestor_eff))
+        if tok.startswith("-") and tok != "-":
+            consumed = _match_flag(tok, eff)
+            if consumed is not None:
+                i += consumed
+                continue
+            next_tok = tokens[i + 1] if i + 1 < n else None
+            matched = None
+            for flag, domain in value_map.items():
+                c = _match_value_flag(tok, next_tok, flag, domain)
+                if c is not None:
+                    matched = c
+                    break
+            if matched is None:
+                matched = _match_cluster_with_trailing_value(tok, next_tok, eff)
+            if matched is None:
+                return False
+            i += matched
+            continue
+        # positional (or, for hook-bearing levels, a semantically
+        # classified positional - REQ-06, e.g. gradle task tokens)
+        classifier = _POSITIONAL_HOOKS.get(hook)
+        if classifier is not None and not classifier(tok):
+            return False
+        cap = level["positional"]
+        if cap == "none":
+            return False
+        if isinstance(cap, tuple) and positionals >= cap[1]:
+            return False
+        positionals += 1
+        i += 1
+    if verbs and level["require_verb"] and not verb_matched:
+        return False
+    return True
+
+
+def _match_after_dashdash(level, rest):
+    mode = level["after_dashdash"]
+    if mode == "forbid":
+        return False
+    if mode == "positional":
+        cap = level["positional"]
+        if cap == "none":
+            return not rest
+        if isinstance(cap, tuple):
+            return len(rest) <= cap[1]
+        return True
+    if isinstance(mode, tuple) and mode[0] == "forward":
+        forward_spec = rewrite_spec.FORWARD_SPECS[mode[1]]
+        return _match_level(forward_spec, rest, None)
     return False
 
 
-# CLI families join the dispatch from the declarative table (TK-39; docker
-# in TK-41 and kubectl/helm in TK-40 — their manual predicates removed: no
-# manual predicate may shadow a family head, or the generated predicate
-# would silently never run); manual predicates above
-# are never overwritten.
-for _head, _spec in cli_families.FAMILIES.items():
-    if _head not in _DISPATCH:
-        _DISPATCH[_head] = (
-            lambda t, _ro=_spec["ro_verbs"]: _cloud_family_ok(t, _ro)
-        )
+def _match_head(head_spec, argv):
+    return _match_level(head_spec, argv, None)
+
+
+def _sql_head_ok(head, argv):
+    """SQL heads (psql/sqlite3/duckdb): the closed flag/positional grammar
+    (file flags, admin flags like `-cmd`/`-init`/`-unsafe-testing` are
+    closed simply by never being declared) plus the `sql_payload` hook."""
+    head_spec = rewrite_spec.HEAD_SPECS.get(head)
+    if head_spec is None or not _match_level(head_spec, argv, None):
+        return False
+    return _hook_sql_payload_ok(head, argv)
 
 
 def rewrite(command):
@@ -820,10 +375,9 @@ def rewrite(command):
     if len(command) > 4096:
         return None
     if any(ch in _FORBIDDEN for ch in command):
-        # TK-43 (wave-2 plan section 3, REQ-06): SQL heads swap the raw
-        # metachar reject for the quote-aware guard (real SQL almost always
-        # carries `;`/`()`); every other head keeps the strict byte-identical
-        # guard - `git commit -m "fix; drop"` still rejects (red-gate 13).
+        # TK-43: SQL heads swap the raw metachar reject for the
+        # quote-aware guard (real SQL almost always carries `;`/`()`);
+        # every other head keeps the strict byte-identical guard.
         parts = command.split()
         head = parts[0] if parts else ""
         if head not in _SQL_HEADS:
@@ -837,23 +391,40 @@ def rewrite(command):
     if not tokens:
         return None
 
-    # TK-55 F3: denied write-path flags are checked on the EFFECTIVE
-    # head — inside a run-prefix (`uv run <argv>`, `xcrun simctl <argv>`)
-    # the inner argv is scanned, otherwise the command's own tail.
-    inner = cli_families.run_prefix_split(tokens)
-    if inner is not None:
-        inner_argv, _consumed = inner
-        w_head = os.path.basename(inner_argv[0])
-        w_argv = inner_argv[1:]
-    else:
-        w_head = os.path.basename(tokens[0])
-        w_argv = tokens[1:]
-    if _has_denied_write_flag(w_head, w_argv):
-        return None
+    argv = tokens[1:]
 
-    pred = _DISPATCH.get(tokens[0])
-    if pred is None:
+    # Run-prefixes (`uv run <inner>`, `xcrun simctl <inner>`, REQ-07): the
+    # wrapper's OWN flags are validated by cli_families.run_prefix_split
+    # (shared with the security gate, not duplicated here); the INNER
+    # command is then validated against ITS OWN head-spec - a head without
+    # a confirmed spec never rewrites, closing "uv run <anything>". Basename
+    # lookup here mirrors run_prefix_split's own internal basename lookup.
+    if os.path.basename(tokens[0]) in cli_families.RUN_PREFIXES:
+        inner = cli_families.run_prefix_split(tokens)
+        if inner is None:
+            return None
+        inner_argv, _consumed = inner
+        inner_head = inner_argv[0]
+        inner_spec = rewrite_spec.HEAD_SPECS.get(inner_head)
+        if inner_spec is None:
+            return None
+        if inner_head in _SQL_HEADS:
+            if not _sql_head_ok(inner_head, inner_argv[1:]):
+                return None
+        elif not _match_head(inner_spec, inner_argv[1:]):
+            return None
+        return "actx " + command
+
+    # Dispatch keyed by the literal head token (no basename normalization),
+    # matching the exact-string dispatch table this replaces.
+    if tokens[0] in _SQL_HEADS:
+        if not _sql_head_ok(tokens[0], argv):
+            return None
+        return "actx " + command
+
+    head_spec = rewrite_spec.HEAD_SPECS.get(tokens[0])
+    if head_spec is None:
         return None
-    if not pred(tokens):
+    if not _match_head(head_spec, argv):
         return None
     return "actx " + command

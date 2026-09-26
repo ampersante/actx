@@ -375,7 +375,6 @@ class RewriteUnitTests(unittest.TestCase):
             "go test -count=1 ./...",
             "go test --count=1 ./...",
             "go test -run X ./...",
-            "go test -args -o x",      # -o after -args belongs to the binary
             "tsc --noEmit",
             "tsc --project .",
             "pytest -q",

@@ -50,6 +50,7 @@ CLI_FILTER_PATH_MODULES = {
     "actx_lib.hang_policy",
     "actx_lib.redaction",
     "actx_lib.rewriter",
+    "actx_lib.rewrite_spec",
     "actx_lib.sql_verbs",
     "actx_lib.runner",
     "actx_lib.tracking",
@@ -91,14 +92,14 @@ class LazyImportTests(unittest.TestCase):
         self.assertEqual(
             modules,
             {"actx_lib", "actx_lib.cli", "actx_lib.cli_families",
-             "actx_lib.rewriter", "actx_lib.sql_verbs"},
+             "actx_lib.rewriter", "actx_lib.rewrite_spec", "actx_lib.sql_verbs"},
         )
 
     def test_rewrite_path_imports_only_allowed(self):
         self.assertEqual(
             self.run_path(["rewrite", "git status"]),
             {"actx_lib", "actx_lib.cli", "actx_lib.cli_families",
-             "actx_lib.rewriter", "actx_lib.sql_verbs"},
+             "actx_lib.rewriter", "actx_lib.rewrite_spec", "actx_lib.sql_verbs"},
         )
 
     def test_hook_path_imports_only_allowed(self):
@@ -115,6 +116,7 @@ class LazyImportTests(unittest.TestCase):
                 "actx_lib.cli_families",
                 "actx_lib.conventions",
                 "actx_lib.rewriter",
+                "actx_lib.rewrite_spec",
                 "actx_lib.sql_verbs",
                 "actx_lib.hook",
                 "actx_lib.security_gate",

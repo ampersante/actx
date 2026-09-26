@@ -118,16 +118,22 @@ class SqlGuardRewriteTests(unittest.TestCase):
 
 
 class DbtRewriteTests(unittest.TestCase):
-    def test_run_test_build_rewrite(self):
-        for command in ("dbt run", "dbt test", "dbt build",
-                        "dbt run --select stg_orders"):
+    def test_test_compile_list_rewrite(self):
+        # TK-60 owner decision: "run"/"build" removed (warehouse-mutating,
+        # data-integrity criterion); "test" (read-only assertions by
+        # design), "compile" (renders SQL without executing it), and
+        # "list"/"ls" (pure DAG/selection metadata) stay admitted.
+        for command in ("dbt test", "dbt compile", "dbt test --select stg_orders"):
             with self.subTest(command=command):
                 self.assertEqual(
                     rewriter.rewrite(command), "actx " + command
                 )
 
-    def test_other_verbs_not_rewritten(self):
-        for command in ("dbt deps", "dbt compile", "dbt debug", "dbt"):
+    def test_run_build_and_other_verbs_not_rewritten(self):
+        # "run"/"build" (approved loss, TK-60 owner decision) alongside
+        # the pre-existing non-admitted verbs.
+        for command in ("dbt run", "dbt build", "dbt run --select stg_orders",
+                        "dbt deps", "dbt debug", "dbt"):
             with self.subTest(command=command):
                 self.assertIsNone(rewriter.rewrite(command))
 
