@@ -136,8 +136,8 @@ def _git_config_is_write(sub_args: list[str]):
 # make fetch/pull/push/clone/ls-remote/archive execute an arbitrary program
 # on the remote side of the connection (git-fetch(1)/git-push(1)
 # "--upload-pack"/"--receive-pack"/"--exec"), including minimal unambiguous
-# long-option abbreviations per verb (cli_families.GIT_EXEC_FLAGS - the one
-# canonical table the rewriter's own deny table also reads).
+# long-option abbreviations per verb (cli_families.GIT_EXEC_FLAGS). The
+# rewriter needs no copy: its closed grammar simply never admits them.
 _GIT_EXEC_FLAG_VERBS = frozenset(cli_families.GIT_EXEC_FLAGS)
 
 
@@ -224,8 +224,8 @@ def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecisio
             )
 
     # TK-57 S7 (STEP-06, REQ-08): git exec-class argv flags on a rewritten
-    # mutator (fetch/pull/push/clone/ls-remote/archive) - the gate side of
-    # the fix; the rewriter's deny table lives in a separate file/stream.
+    # mutator (fetch/pull/push/clone/ls-remote/archive) ask; the rewriter
+    # never admits them (closed grammar), so they also never auto-rewrite.
     if subcmd in _GIT_EXEC_FLAG_VERBS and _has_git_exec_argv_flag(subcmd, sub_args):
         return SecurityDecision(
             decision="ask",
