@@ -273,9 +273,12 @@ def _ls_ok(tokens):
 
 
 def _find_ok(tokens):
+    # TK-57 STEP-04b: -fprint0 is a sibling of -fprint/-fprintf/-fls (same
+    # "writes a file" class, GNU findutils `man find`) that was missing -
+    # `find . -fprint0 x` rewrote and allowed a write action.
     forbidden = {
         "-delete", "-exec", "-execdir", "-ok", "-okdir",
-        "-fprint", "-fprintf", "-fls",
+        "-fprint", "-fprint0", "-fprintf", "-fls",
     }
     return forbidden.isdisjoint(tokens)
 
@@ -338,7 +341,15 @@ def _eslint_ok(tokens):
     return not _has_write_token(tokens)
 
 
+# TK-57 STEP-04 (REQ-05): `next` rewrites only a closed RO-subcommand
+# list - the prior always-true predicate (bare `--fix`-scan only) allowed
+# `next dev`/`next start`/`next telemetry` etc. through unconditionally.
+_NEXT_RO = frozenset({"lint", "build", "info"})
+
+
 def _next_ok(tokens):
+    if len(tokens) < 2 or tokens[1] not in _NEXT_RO:
+        return False
     return not any(tok == "--fix" or tok.startswith("--fix") for tok in tokens[1:])
 
 

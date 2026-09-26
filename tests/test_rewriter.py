@@ -751,5 +751,48 @@ class MobileRewriteTests(unittest.TestCase):
         self.assertIsNone(rewrite("./gradlew --stop; ls"))
 
 
+# ----------------------------------------------------------------------
+# TK-57 STEP-04 (REQ-05): `next` closed RO-subcommand allow-list.
+# ----------------------------------------------------------------------
+
+class NextClosedSubcommandTests(unittest.TestCase):
+    def test_ro_subcommands_rewritten(self):
+        for command in ("next lint", "next build", "next info"):
+            with self.subTest(command=command):
+                self.assertEqual(rewrite(command), "actx " + command)
+
+    def test_other_forms_rejected(self):
+        for command in (
+            "next",
+            "next dev",
+            "next start -p 3000",
+            "next telemetry disable",
+            "next lint --fix",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+
+# ----------------------------------------------------------------------
+# TK-57 STEP-04b: `_find_ok` -fprint0 and siblings (class "writes a file").
+# ----------------------------------------------------------------------
+
+class FindWriteActionTests(unittest.TestCase):
+    def test_fprint_family_rejected(self):
+        for command in (
+            "find . -fprint0 /tmp/out",
+            "find . -fprint /tmp/out",
+            "find . -fprintf /tmp/out %p",
+            "find . -fls /tmp/out",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(rewrite(command))
+
+    def test_plain_find_still_rewrites(self):
+        self.assertEqual(
+            rewrite("find . -name '*.py'"), "actx find . -name '*.py'"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
