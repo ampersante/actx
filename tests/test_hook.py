@@ -84,6 +84,15 @@ class HookCliTests(unittest.TestCase):
         self.assertEqual(data["decision"], "deny")
         self.assertIn("client_secret", data["reason"])
 
+    def test_gemini_git_config_alias_exec_class_asks(self):
+        # TK-57 S7 (STEP-06 gate part): matches the Claude-schema pin above.
+        payload = gemini_input("run_command", {"CommandLine": "git config alias.p '!id'"})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["decision"], "force_ask")
+        self.assertIn("alias.p", data["reason"])
+
     def test_gemini_find_exec_escaped_semicolon_denied(self):
         # TK-57 S6 (STEP-05): matches the Claude-schema pin above.
         payload = gemini_input("run_command", {"CommandLine": "find . -type f -exec sudo rm -rf {} \\;"})
@@ -237,6 +246,24 @@ class HookCliTests(unittest.TestCase):
         output = data["hookSpecificOutput"]
         self.assertEqual(output["permissionDecision"], "allow")
         self.assertEqual(output["updatedInput"]["command"], "actx kubectl get secrets")
+
+    def test_security_gate_asks_git_config_alias_exec_class(self):
+        # TK-57 S7 (STEP-06 gate part, REQ-07): alias.* (any value) asks.
+        p = self.run_hook(hook_input("Bash", {"command": "git config alias.p '!id'"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "ask")
+        self.assertIn("confirmation required", output["permissionDecisionReason"])
+
+    def test_security_gate_asks_git_fetch_upload_pack(self):
+        # REQ-08 (gate side).
+        p = self.run_hook(hook_input("Bash", {"command": "git fetch --upload-pack='touch x' ."}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "ask")
+        self.assertIn("confirmation required", output["permissionDecisionReason"])
 
     def test_security_gate_denies_destructive_mutation(self):
         p = self.run_hook(hook_input("Bash", {"command": "rm -rf /"}))
