@@ -75,6 +75,15 @@ class HookCliTests(unittest.TestCase):
         self.assertEqual(data["decision"], "force_ask")
         self.assertIn("Force-pushing to remote git repository requires human confirmation", data["reason"])
 
+    def test_gemini_find_exec_escaped_semicolon_denied(self):
+        # TK-57 S6 (STEP-05): matches the Claude-schema pin above.
+        payload = gemini_input("run_command", {"CommandLine": "find . -type f -exec sudo rm -rf {} \\;"})
+        p = self.run_hook(payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["decision"], "deny")
+        self.assertIn("Privilege escalation", data["reason"])
+
     def test_gemini_action_space_denied(self):
         payload = gemini_input("run_command", {"CommandLine": "sed -i 's/foo/bar/g' main.py"})
         p = self.run_hook(payload)
@@ -199,6 +208,27 @@ class HookCliTests(unittest.TestCase):
         self.assertEqual(output["hookEventName"], "PreToolUse")
         self.assertEqual(output["permissionDecision"], "ask")
         self.assertIn("confirmation required", output["permissionDecisionReason"])
+
+    def test_security_gate_denies_find_exec_escaped_semicolon(self):
+        # TK-57 S6 (STEP-05): a literal '\;' must not split the find
+        # command into a bogus '-exec ...' chunk (E-012) - the whole
+        # invocation stays one chunk and each -exec subcommand is
+        # re-checked on its own.
+        p = self.run_hook(hook_input("Bash", {"command": "find . -type f -exec sudo rm -rf {} \\;"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("T4_DESTRUCTIVE_MUTATION", output["permissionDecisionReason"])
+
+    def test_security_gate_asks_find_exec_brace_head_position(self):
+        # '{}' as the executed program itself (no fixed head to classify) asks.
+        p = self.run_hook(hook_input("Bash", {"command": "find /tmp -name '*.sh' -exec {} \\;"}))
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        output = data["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "ask")
+        self.assertIn("unknown discovered file", output["permissionDecisionReason"])
 
     def test_t6_infra_ask_passthrough(self):
         # TK-37: kubectl apply is a T6 ask (not denied, not rewritten)

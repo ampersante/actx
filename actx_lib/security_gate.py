@@ -1094,6 +1094,87 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> S
 
 
 # ----------------------------------------------------------------------
+# T4 (recursive): find -exec/-execdir/-ok/-okdir subcommand re-evaluation
+# (TK-57 S6, REQ-06)
+# ----------------------------------------------------------------------
+
+_FIND_EXEC_FLAGS = ("-exec", "-execdir", "-ok", "-okdir")
+_FIND_EXEC_INTERPRETERS = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "perl", "ruby", "node", "php",
+})
+
+
+def _is_find_exec_interpreter(head: str) -> bool:
+    return head in _FIND_EXEC_INTERPRETERS or head.startswith("python")
+
+
+def _check_find_exec_subcommands(raw_tokens: list[str]) -> SecurityDecision | None:
+    """Re-evaluate every find -exec/-execdir/-ok/-okdir subcommand as its
+    own command, per find's own terminator grammar: ';' always ends a
+    clause; '+' ends one only when it directly follows '{}' (elsewhere '+'
+    is an ordinary argument, e.g. `git -C + reset --hard`); an unterminated
+    clause runs to the end of the token list (fail-open, no exception).
+    '{}' standing in head position (`-exec {} \\;`) or as the first
+    argument to a known interpreter (`-exec sh {} \\;`) means find would
+    execute an unknown discovered file directly - ask (T4) regardless of
+    what the recursive re-evaluation of the rest of the clause finds.
+    Multiple clauses: deny on the first one that denies; otherwise ask if
+    any clause asks (REQ-06's "same or a stricter verdict").
+    """
+    tokens = _unwrap_tokens(raw_tokens)
+    if not tokens or os.path.basename(tokens[0]) != "find":
+        return None
+
+    ask_decision: SecurityDecision | None = None
+    i = 1
+    n = len(tokens)
+    while i < n:
+        if tokens[i] not in _FIND_EXEC_FLAGS:
+            i += 1
+            continue
+        j = i + 1
+        args: list[str] = []
+        terminated = False
+        while j < n:
+            t = tokens[j]
+            if t == ";":
+                j += 1
+                terminated = True
+                break
+            if t == "+":
+                if args and args[-1] == "{}":
+                    j += 1
+                    terminated = True
+                    break
+                args.append(t)
+                j += 1
+                continue
+            args.append(t)
+            j += 1
+
+        if args:
+            if args[0] == "{}" or (
+                _is_find_exec_interpreter(args[0]) and len(args) >= 2 and args[1] == "{}"
+            ):
+                ask_decision = ask_decision or SecurityDecision(
+                    decision="ask",
+                    reason="find executes an unknown discovered file directly ('{}' as the executed program)",
+                    category="T4_DESTRUCTIVE_MUTATION",
+                )
+
+            sub_tokens = ["actx_find_arg" if t == "{}" else t for t in args]
+            sub_dec = _evaluate_chunk(shlex.join(sub_tokens))
+            if sub_dec.decision == "deny":
+                return sub_dec
+            if sub_dec.decision == "ask":
+                ask_decision = ask_decision or sub_dec
+
+        i = j if terminated else n
+
+    return ask_decision
+
+
+# ----------------------------------------------------------------------
 # T5: Supply Chain & Package Lifecycle Security
 # ----------------------------------------------------------------------
 
@@ -2243,6 +2324,12 @@ def _evaluate_chunk(chunk: str) -> SecurityDecision:
     if t4:
         return t4
 
+    # 1b. T4 (recursive): find -exec/-execdir/-ok/-okdir subcommands
+    # (TK-57 S6) - each gets the same or a stricter verdict as standalone.
+    t4_find = _check_find_exec_subcommands(tokens)
+    if t4_find:
+        return t4_find
+
     # 2. T3: Obfuscation & Dynamic Eval
     t3 = _check_obfuscation_and_eval(chunk, tokens)
     if t3:
@@ -2312,11 +2399,87 @@ def _evaluate_chunk(chunk: str) -> SecurityDecision:
 # Main Public Entrypoint
 # ----------------------------------------------------------------------
 
+# TK-57 S6 (STEP-05, REQ-06): a semicolon that is backslash-escaped or
+# quoted is a literal shell argument, not a chunk separator - `find ...
+# -exec ... \;` must stay one chunk so its own -exec/;/+' grammar (not the
+# naive operator split) decides where each subcommand ends. _mask_literal_
+# semicolons runs a single quote/escape-aware pass over the WHOLE command
+# before any of the existing operator-detection logic sees it, replacing
+# each literal ';' with a sentinel that contains none of the characters
+# _split_into_chunks branches on (';', '&', '|', quotes, backslash); the
+# rest of the function is unchanged and only ever sees real separators.
+# _unmask_literal_semicolons restores ';' in the final chunk strings.
+_CHUNK_SEMI_SENTINEL = "\x00ACTX_SEMI\x00"
+
+
+def _mask_literal_semicolons(text: str) -> str:
+    out = []
+    i = 0
+    n = len(text)
+    in_single = False
+    in_double = False
+    while i < n:
+        ch = text[i]
+        if in_single:
+            if ch == "'":
+                in_single = False
+                out.append(ch)
+            elif ch == ";":
+                out.append(_CHUNK_SEMI_SENTINEL)
+            else:
+                out.append(ch)
+            i += 1
+            continue
+        if in_double:
+            if ch == "\\" and i + 1 < n and text[i + 1] in ('"', "\\", "$", "`"):
+                out.append(ch)
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_double = False
+                out.append(ch)
+            elif ch == ";":
+                out.append(_CHUNK_SEMI_SENTINEL)
+            else:
+                out.append(ch)
+            i += 1
+            continue
+        # Outside quotes
+        if ch == "'":
+            in_single = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt == ";":
+                out.append(_CHUNK_SEMI_SENTINEL)
+            else:
+                out.append(ch)
+                out.append(nxt)
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _unmask_literal_semicolons(text: str) -> str:
+    return text.replace(_CHUNK_SEMI_SENTINEL, ";")
+
+
 def _split_into_chunks(command: str) -> list[str]:
     """Split compound command into logical chunks while respecting quotes and lines."""
+    command = _mask_literal_semicolons(command)
     lines = [l.strip() for l in command.splitlines() if l.strip()]
     if len(lines) == 1 and not any(op in command for op in (";", "&&", "||", "|", "&")):
-        return [command]
+        return [_unmask_literal_semicolons(command)]
 
     chunks = []
     for line in lines:
@@ -2352,7 +2515,7 @@ def _split_into_chunks(command: str) -> list[str]:
                 curr.append(tok)
         if curr:
             chunks.append(" ".join(shlex.quote(t) for t in curr))
-    return chunks
+    return [_unmask_literal_semicolons(c) for c in chunks]
 
 
 def evaluate_security(command: str, cwd: str | None = None) -> SecurityDecision:

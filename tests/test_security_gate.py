@@ -303,6 +303,38 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_allow("crontab -l")
 
     # ------------------------------------------------------------------
+    # TK-57 S6 (STEP-05, REQ-06): find -exec re-evaluation + literal ';'
+    # sentinel in the chunk splitter
+    # ------------------------------------------------------------------
+    def test_chunk_split_literal_semicolon_not_a_separator(self):
+        # Postcondition pins (plan STEP-05): a real, unescaped/unquoted ';'
+        # (and other operators) still splits and denies as before; an
+        # escaped '\;' or a quoted ';'/";" is a literal argument, not a
+        # chunk separator.
+        self.assert_deny("ls ; sudo id", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_deny("ls;sudo id", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_deny("echo a && sudo id", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_deny("echo a; rm -rf /", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_allow("echo a ';' sudo id")
+        self.assert_allow(r"echo a \; sudo id")
+
+    def test_find_exec_subcommand_reevaluation(self):
+        # REQ-06: every -exec/-execdir/-ok/-okdir subcommand is evaluated
+        # on its own, per find's own terminator grammar (';' always ends a
+        # clause, '+' only right after '{}', an unterminated clause runs to
+        # the end); '{}' in head or interpreter-first-arg position asks
+        # (T4 - an unknown discovered file would be executed directly).
+        self.assert_allow("find . -name '*.py' -exec wc -l {} +")
+        self.assert_deny(r"find . -type f -exec sudo rm -rf {} \;", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_deny(r"find . -exec true {} \; -exec sudo rm -rf ~ \;", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_ask(r"find . -exec git -C + reset --hard \;", "T6_HIGH_RISK_GIT")
+        self.assert_deny(r"find . -exec sh -c 'cat .env' \;", "T1_CREDENTIAL_ACCESS")
+        self.assert_ask(r"find . -ok npm install x \;", "T5_SUPPLY_CHAIN")
+        self.assert_ask(r"find /tmp -name '*.sh' -exec {} \;", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_ask(r"find . -exec sh {} \;", "T4_DESTRUCTIVE_MUTATION")
+        self.assert_allow(r"find . -exec cat {} +")
+
+    # ------------------------------------------------------------------
     # T5: Supply Chain & Package Lifecycle Security
     # ------------------------------------------------------------------
     def test_t5_supply_chain_insecurity_denied(self):
