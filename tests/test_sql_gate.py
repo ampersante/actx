@@ -98,6 +98,30 @@ class SqlGateAskTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assert_ask(command)
 
+    def test_tk57_mode_flags_ask(self):
+        # TK-57 REQ-02: mode-altering flags force ask via the marker
+        # payload sql_verbs.sql_payloads injects - no gate code changed.
+        for command in (
+            "sqlite3 -A -x a.sar SELECT",
+            "sqlite3 --A -x a.sar SELECT",
+            "sqlite3 -Ax a.sar SELECT",
+            "sqlite3 -append db 'select 1'",
+            "sqlite3 -zip a.zip 'select 1'",
+            "sqlite3 -unsafe-testing db 'select 1'",
+            "sqlite3 --init boot.sql db 'select 1'",
+            "duckdb -unsigned db 'select 1'",
+        ):
+            with self.subTest(command=command):
+                self.assert_ask(command)
+
+    def test_tk57_all_positionals_after_db_classified(self):
+        # TK-57 REQ-03/E-004: an earlier dangerous positional must ask
+        # even when the LAST positional is RO.
+        self.assert_ask("sqlite3 db.sqlite \"DROP TABLE t\" \"SELECT 1\"")
+        self.assert_ask(
+            "duckdb db.duckdb \"DROP TABLE t\" \"SELECT 1\""
+        )
+
     def test_gate_error_asks_not_fails_open(self):
         # N-F8: the outer fail-open returning allow is unacceptable for SQL
         # heads - any internal error must land on ask.
