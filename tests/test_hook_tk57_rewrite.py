@@ -256,6 +256,8 @@ class FindExecInterpreterFormsTests(unittest.TestCase):
             "find . -exec node --no-warnings known.js {} \\;",
             "find . -exec node --max-old-space-size=4096 known.js {} \\;",
             "find . -exec bash --norc known.sh {} \\;",
+            "find . -exec env X=1 python3 known.py {} \\;",
+            "find . -exec timeout 5 cat {} \\;",
         ):
             with self.subTest(command=command):
                 self.assertEqual(self.verdict(command).decision, "allow")
@@ -275,6 +277,14 @@ class FindExecInterpreterFormsTests(unittest.TestCase):
             "find . -exec sh -- ./{} \\;",
             "find . -exec ./{} \\;",
             "find . -exec python3 ./{} \\;",
+            # through wrapper chains
+            "find . -exec env {} \\;",
+            "find . -exec env X=1 {} \\;",
+            "find . -exec nice {} \\;",
+            "find . -exec nice -n 5 {} \\;",
+            "find . -exec timeout 1 {} \\;",
+            "find . -exec timeout 1 sh {} \\;",
+            "find . -exec env -u {} x \\;",
         ):
             with self.subTest(command=command):
                 dec = self.verdict(command)

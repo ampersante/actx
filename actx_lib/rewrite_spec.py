@@ -1076,7 +1076,8 @@ HEAD_SPECS["pytest"] = spec(
 # it exists" - destructive delete); -o/--override-ini (arbitrary config
 # override, could inject further dangerous flags via addopts); --debug
 # (docs: opened with 'w' and truncated); --log-file* family (writes a
-# named path); --cache-clear (deletes .pytest_cache contents).
+# named path). --cache-clear IS admitted: it only empties pytest's own
+# .pytest_cache (tool-internal, regenerated) - TK-55 owner decision.
 
 # jest: DOC jestjs.io/docs/cli (no node/npm/jest installed locally - not
 # --help-verified). `--env`/`--reporters` restricted to built-in names -

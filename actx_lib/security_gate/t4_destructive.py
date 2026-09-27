@@ -9,7 +9,10 @@ import posixpath
 import re
 import shlex
 
-from .common import SecurityDecision, _strip_redirection, _unwrap_tokens, _RE_FORK_BOMB
+from .common import (
+    SecurityDecision, _strip_redirection, _unwrap_tokens, _RE_FORK_BOMB,
+    _WRAPPER_COMMANDS,
+)
 
 
 _PERSISTENCE_FILES = {
@@ -348,6 +351,28 @@ def _has_placeholder(tok: str) -> bool:
     return "{}" in tok
 
 
+def _executes_placeholder(args: list[str]) -> bool:
+    """True when the -exec clause runs the discovered file as a program or
+    interpreter script - directly, or through wrapper chains (`env {}`,
+    `nice -n 5 {}`, `timeout 1 sh {}`) resolved with the gate's own
+    unwrapper before any placeholder substitution."""
+    effective = args
+    if os.path.basename(args[0]) in _WRAPPER_COMMANDS:
+        effective = _unwrap_tokens(args)
+        if not effective:
+            return True
+        head = effective[0]
+        # A placeholder the unwrapper skipped as a wrapper option/value
+        # (`env -u {} x`) is still reachable: fail closed.
+        skipped = args[:args.index(head)] if head in args else args
+        if any(_has_placeholder(t) for t in skipped):
+            return True
+    return _has_placeholder(effective[0]) or (
+        _is_find_exec_interpreter(effective[0])
+        and _find_exec_script_arg_is_placeholder(effective[0], effective[1:])
+    )
+
+
 def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> bool:
     """True when `{}` reaches the interpreter's OWN argv as its script or
     as a value-flag's value (REQ-09 G2) - direct execution of an unknown
@@ -457,10 +482,7 @@ def _check_find_exec_subcommands(raw_tokens: list[str]) -> SecurityDecision | No
             j += 1
 
         if args:
-            if _has_placeholder(args[0]) or (
-                _is_find_exec_interpreter(args[0])
-                and _find_exec_script_arg_is_placeholder(args[0], args[1:])
-            ):
+            if _executes_placeholder(args):
                 ask_decision = ask_decision or SecurityDecision(
                     decision="ask",
                     reason="find executes an unknown discovered file directly ('{}' as the executed program)",
