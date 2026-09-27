@@ -219,7 +219,44 @@ def help_flags(argv):
             documented.add("-" + ch)
     for ch in PUNCT_SHORT_RE.findall(text):
         documented.add("-" + ch)
+    if not documented:
+        # An empty inventory is a failed source, never "the tool has no flags".
+        return None, f"no flags extracted (exit {p.returncode})"
     return documented, None
+
+
+# Admitted flags the local help cannot show, each a documented platform or
+# version difference - the ONLY UNKNOWN entries that do not fail the run.
+# GNU coreutils/grep spellings (https://www.gnu.org/software/coreutils/manual,
+# https://www.gnu.org/software/grep/manual): this box ships BSD tools, the
+# specs deliberately also admit the GNU forms agents use on Linux.
+_GNU = "GNU coreutils/grep manual"
+PLATFORM_CITED = {
+    "cat": ({"--help", "--number", "--number-nonblank", "--show-all", "--show-ends",
+             "--show-nonprinting", "--show-tabs", "--squeeze-blank", "--version",
+             "-A", "-E", "-T"}, _GNU),
+    "grep": ({"--exclude-from", "--perl-regexp", "-P"}, _GNU),
+    "head": ({"--help", "--quiet", "--silent", "--verbose", "--version",
+              "--zero-terminated", "-q", "-v", "-z"}, _GNU),
+    "ls": ({"--all", "--almost-all", "--author", "--block-size", "--classify",
+            "--dereference", "--dereference-command-line",
+            "--dereference-command-line-symlink-to-dir", "--directory", "--dired",
+            "--escape", "--file-type", "--format", "--full-time",
+            "--group-directories-first", "--help", "--hide", "--hide-control-chars",
+            "--human-readable", "--hyperlink", "--ignore", "--ignore-backups",
+            "--indicator-style", "--inode", "--kibibytes", "--literal", "--no-group",
+            "--numeric-uid-gid", "--quote-name", "--quoting-style", "--recursive",
+            "--reverse", "--show-control-chars", "--si", "--size", "--sort",
+            "--tabsize", "--time", "--time-style", "--version", "--width", "--zero"}, _GNU),
+    "tail": ({"--help", "--version", "--zero-terminated", "-z"}, _GNU),
+    "uniq": ({"--check-chars", "--group", "--help", "--version",
+              "--zero-terminated", "-w", "-z"}, _GNU),
+    "wc": ({"--bytes", "--chars", "--files0-from", "--help", "--lines",
+            "--max-line-length", "--total", "--version", "--words"}, _GNU),
+    # git-add(1) in git >= 2.51 documents --[no-]auto-advance; Apple git 2.50
+    # on this box predates it.
+    ("git", "add"): ({"--auto-advance"}, "git-add(1), git >= 2.51"),
+}
 
 
 def spec_flags(level):
@@ -244,6 +281,8 @@ def find_level(path):
 
 
 total_unknown = 0
+uncited = 0
+unavailable = 0
 for path, argv in sorted(HELP.items()):
     lvl = find_level(path)
     if lvl is None:
@@ -251,6 +290,7 @@ for path, argv in sorted(HELP.items()):
         continue
     documented, err = help_flags(argv)
     if documented is None:
+        unavailable += 1
         print(f"{' '.join(path):20} HELP UNAVAILABLE: {err}")
         continue
     admitted = spec_flags(lvl)
@@ -279,8 +319,15 @@ for path, argv in sorted(HELP.items()):
 
     unknown = sorted(f for f in admitted if not known(f))
     unclassified = sorted(f for f in documented - admitted)
+    cited_flags, source = PLATFORM_CITED.get(path if len(path) > 1 else head, (set(), ""))
+    not_cited = [f for f in unknown if f not in cited_flags]
     total_unknown += len(unknown)
+    uncited += len(not_cited)
     print(f"{' '.join(path):20} admitted={len(admitted):3} documented={len(documented):3} "
-          f"UNKNOWN={unknown}")
+          f"UNKNOWN={unknown}" + (f" (cited: {source})" if unknown and not not_cited else ""))
+    if not_cited:
+        print(f"{'':20} UNCITED={not_cited}")
     print(f"{'':20} not-admitted-from-help={len(unclassified)}: {' '.join(unclassified)[:300]}")
-print("TOTAL UNKNOWN (must be 0, or every entry independently cited as a documented platform difference):", total_unknown)
+print("TOTAL UNKNOWN:", total_unknown, "| UNCITED (must be 0):", uncited,
+      "| HELP UNAVAILABLE (must be 0):", unavailable)
+sys.exit(1 if uncited or unavailable else 0)

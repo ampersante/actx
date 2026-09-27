@@ -215,8 +215,8 @@ class RewriteSpecPlanPinTests(unittest.TestCase):
         for command in (
             "cargo test --config build.rustc-wrapper=/usr/bin/false --no-run",
             "cargo build -Z unstable-options",
-            "./gradlew --init-script evil.gradle build",
-            "./gradlew -I evil.gradle build",
+            # (gradle --init-script/-I select a FILE - rewritten under the
+            # owner's inline-code boundary, see InlineCodeBoundaryTests)
             "ruff check --config fix=true .",
             "vitest run --environment ./evil-env.js",
             "tsc --plugins ./evil-plugin.js",

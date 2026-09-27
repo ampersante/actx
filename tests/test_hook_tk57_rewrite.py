@@ -200,55 +200,69 @@ class HookRewriteProbeTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assert_allow_rewritten(command)
 
-    def test_reacceptance_executable_config_selectors_not_auto_allowed(self):
-        # Re-acceptance 2026-09-27: flags selecting an executable build/
-        # config file (Gradle DSL, JS configs, plugin-loading configs).
+
+class InlineCodeBoundaryTests(unittest.TestCase):
+    """Owner boundary 2026-09-27 (PRD §7): code written INLINE in argv is
+    never auto-approved; selecting a file/directory/project is equivalent
+    to `cd` there and running the same verb, so it stays rewritten."""
+
+    run_hook = HookRewriteProbeTests.run_hook
+    assert_allow_rewritten = HookRewriteProbeTests.assert_allow_rewritten
+    assert_not_auto_allowed = HookRewriteProbeTests.assert_not_auto_allowed
+
+    def test_inline_code_not_auto_allowed(self):
         for command in (
-            "./gradlew --build-file evil.gradle tasks",
-            "./gradlew -b evil.gradle tasks",
-            "./gradlew --settings-file evil.gradle tasks",
-            "./gradlew -c evil.gradle tasks",
-            "jest --config evil.config.js",
-            "vitest run --config evil.config.ts",
-            "eslint --config evil.config.js .",
-            "pytest -c evil.ini",
-            "golangci-lint run --config evil.yml",
-            "git add --auto-advance f",
-            "./gradlew -Dorg.gradle.java.home=/tmp/x tasks",
-            "./gradlew -Pa=b tasks",
-            "./gradlew --project-dir other tasks",
-            "pod outdated --project-directory other",
-            "jest --projects other",
-            "kubectl --kubeconfig evil get pods",
-            "kubectl get pods --kubeconfig=evil",
+            "cargo test --config 'build.rustc-wrapper=\"/usr/bin/false\"' --no-run",
+            "cargo check -Zunstable-options",
+            "ruff check --config 'fix = true' .",
+            "cargo fmt --check -- --emit files",
         ):
             with self.subTest(command=command):
                 self.assert_not_auto_allowed(command)
 
-    def test_reacceptance_safe_forms_still_rewrite(self):
-        for command in ("./gradlew tasks", "jest", "eslint .", "pytest -q",
-                        "git add -A"):
+    def test_file_and_project_selectors_rewrite(self):
+        for command in (
+            "./gradlew --init-script init.gradle tasks",
+            "./gradlew -b other.gradle tasks",
+            "./gradlew -Dorg.gradle.jvmargs=-Xmx2g test",
+            "./gradlew -Pkotlin.incremental=true build",
+            "jest --config jest.config.js",
+            "eslint --config eslint.config.js .",
+            "kubectl --kubeconfig /tmp/cfg get pods",
+            "cargo check --manifest-path sub/Cargo.toml",
+            "git add --auto-advance -A",
+        ):
             with self.subTest(command=command):
                 self.assert_allow_rewritten(command)
 
 
-class FindExecDashDashTests(unittest.TestCase):
-    """`--` ends interpreter options: the next token is the script."""
-
+class FindExecInterpreterFormsTests(unittest.TestCase):
     def verdict(self, command):
         from actx_lib import security_gate
         return security_gate.evaluate_security(command)
 
-    def test_known_script_after_dashdash_not_escalated(self):
-        for command in ("find . -exec sh -- known.sh {} \\;",
-                        "find . -exec python3 -- known.py {} \\;",
-                        "find . -exec bash --norc -- known.sh {} \\;"):
+    def test_known_script_forms_not_escalated(self):
+        for command in (
+            "find . -exec sh -- known.sh {} \\;",
+            "find . -exec python3 -- known.py {} \\;",
+            "find . -exec bash -ex known.sh {} \\;",
+            "find . -exec python3 -bb known.py {} \\;",
+            "find . -exec node --no-warnings known.js {} \\;",
+            "find . -exec node --max-old-space-size=4096 known.js {} \\;",
+            "find . -exec bash --norc known.sh {} \\;",
+        ):
             with self.subTest(command=command):
                 self.assertEqual(self.verdict(command).decision, "allow")
 
-    def test_placeholder_after_dashdash_asks(self):
-        for command in ("find . -exec sh -- {} \\;",
-                        "find . -exec python3 -- {} \\;"):
+    def test_placeholder_as_script_asks(self):
+        for command in (
+            "find . -exec sh -- {} \\;",
+            "find . -exec bash -ex {} \\;",
+            "find . -exec bash -xc 'echo' {} \\;",
+            "find . -exec bash --rcfile rc {} \\;",
+            "find . -exec python3 --check-hash-based-pycs always {} \\;",
+            "find . -exec node --require={} x.js \\;",
+        ):
             with self.subTest(command=command):
                 dec = self.verdict(command)
                 self.assertEqual((dec.decision, dec.category),

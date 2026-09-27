@@ -371,7 +371,7 @@ HEAD_SPECS = {
                       "--show-object-format": frozenset({"storage", "input", "output", "compat"})},
             positional="any"),
         "add": spec(
-            bool=("-n", "--dry-run", "-v", "--verbose",
+            bool=("-n", "--dry-run", "-v", "--verbose", "--auto-advance",
                   "-f", "--force", "-u", "--update", "--renormalize",
                   "-N", "--intent-to-add", "-A", "--all", "--ignore-removal",
                   "--refresh", "--ignore-errors", "--ignore-missing", "--sparse",
@@ -1055,8 +1055,7 @@ HEAD_SPECS["pytest"] = spec(
         "--import-mode": frozenset({"prepend", "append", "importlib"}),
         "--doctest-report": frozenset({"none", "cdiff", "ndiff", "udiff", "only_first_failure"}),
         "--doctest-glob": "any",
-        # -c/--config-file EXCLUDED: an ini/toml can set addopts=-p <module>,
-        # i.e. name code to load (executable-config class, wave 2026-09-27).
+        "-c": "any", "--config-file": "any",
         "--rootdir": "any",
         "--assert": frozenset({"plain", "rewrite"}),
         "--log-level": "any", "--log-format": "any", "--log-date-format": "any",
@@ -1096,7 +1095,7 @@ HEAD_SPECS["jest"] = spec(
         "--watchman", "--workerThreads",
     ),
     value={
-        # -c/--config EXCLUDED: jest.config.js is executable code.
+        "-c": "any", "--config": "any",
         "--changedSince": "any",
         "--collectCoverageFrom": "any",
         "--coverageProvider": frozenset({"babel", "v8"}),
@@ -1108,8 +1107,7 @@ HEAD_SPECS["jest"] = spec(
         "--testPathIgnorePatterns": "any", "--testMatch": "any",
         "--testEnvironmentOptions": "any", "--testTimeout": "int",
         "--seed": "any", "--shard": "any",
-        # --projects EXCLUDED: points at dirs whose jest configs (JS) run.
-        "--selectProjects": "any", "--ignoreProjects": "any",
+        "--projects": "any", "--selectProjects": "any", "--ignoreProjects": "any",
         "--roots": "any",
         "--env": frozenset({"node", "jsdom"}),
         "--reporters": frozenset({"default", "github-actions", "summary"}),
@@ -1170,7 +1168,7 @@ HEAD_SPECS["vitest"] = spec(
     value={
         "-t": "any", "--testNamePattern": "any",
         "--dir": "any", "-r": "any", "--root": "any",
-        # -c/--config EXCLUDED: vitest.config.* is executable code.
+        "-c": "any", "--config": "any",
         "--reporter": frozenset({"default", "verbose", "dot", "json", "junit",
                                   "tap", "tap-flat", "hanging-process", "basic"}),
         "--coverage.provider": frozenset({"v8", "istanbul"}),
@@ -1341,7 +1339,7 @@ HEAD_SPECS["eslint"] = spec(
         "--debug", "-h", "--help", "-v", "--version", "--env-info", "--stats",
     ),
     value={
-        # -c/--config EXCLUDED: eslint.config.* is executable code.
+        "-c": "any", "--config": "any",
         "-f": frozenset({"stylish", "json", "json-with-metadata", "compact",
                           "unix", "visualstudio", "html", "checkstyle",
                           "codeframe", "tap", "junit", "jslint-xml"}),
@@ -1394,8 +1392,7 @@ HEAD_SPECS["golangci-lint"] = spec(
                 "--max-same-issues": "int", "--path-prefix": "any", "--path-mode": "any",
                 "--new-from-rev": "any", "--new-from-patch": "any",
                 "--new-from-merge-base": "any",
-                # -c/--config EXCLUDED: a config can load custom linter
-                # plugins (code) - executable-config class.
+                "-c": "any", "--config": "any",
                 # every --output.<fmt>.path is restricted to {stdout,stderr}:
                 # its domain is otherwise an arbitrary user-named file path.
                 "--output.text.path": frozenset({"stdout", "stderr"}),
@@ -1413,7 +1410,8 @@ HEAD_SPECS["golangci-lint"] = spec(
         "linters": spec(inherit=True, bool=("--json", "--fast-only"),
                          value={"-D": "any", "--disable": "any", "-E": "any",
                                 "--enable": "any", "--enable-only": "any",
-                                "--default": frozenset({"standard", "none", "all", "fast"})},
+                                "--default": frozenset({"standard", "none", "all", "fast"}),
+                                "-c": "any", "--config": "any"},
                          positional="none"),
         "version": spec(bool=("--json", "--short", "--debug"), positional="none"),
     },
@@ -1906,9 +1904,7 @@ HEAD_SPECS["simctl"] = spec(verbs={"list": spec(bool=("-j", "--json"), positiona
 HEAD_SPECS["pod"] = spec(verbs={
     "outdated": spec(bool=("--ignore-prerelease", "--no-repo-update",
                            "--allow-root", "--silent", "--version", "--verbose", "--no-ansi"),
-                     # --project-directory EXCLUDED: another dir's Podfile
-                     # (Ruby) is evaluated.
-                     positional="any"),
+                     value={"--project-directory": "any"}, positional="any"),
     # NOTE: "--update" is deliberately NOT admitted on `list` - it
     # triggers a `pod repo update` first (writes/fetches into the local
     # spec-repo cache); the research proposal's own flag table said
@@ -1953,24 +1949,11 @@ _GRADLEW_EXTRA_BOOL = (
 #   --refresh-keys, --export-keys (write/refresh the local verification
 #   keyring); --stop, --foreground, --write-locks, --update-locks,
 #   --write-verification-metadata (already excluded - endorsed, unchanged).
-# EXCLUDED from cli_families.GRADLE_VALUE_FLAGS (finding A, wave
-# 2026-09-27, confirmed live: `./gradlew --init-script evil.gradle build`
-# was admitted): `-I`/`--init-script <FILE>` makes Gradle EXECUTE the named
-# file as a Groovy/Kotlin init script before the build starts - unlike a
-# declarative config-file-path flag, the file's entire content runs as
-# code (can itself `exec` arbitrary commands). GRADLE_VALUE_FLAGS is
-# shared with the security gate's task scanner (t6_tools.py, needs the
-# full table to correctly skip flag VALUES while looking for task
-# tokens) so it is not edited there; only the rewriter's own admission
-# excludes these two spellings.
-# Same class: -b/--build-file and -c/--settings-file select the build /
-# settings script Gradle executes (re-acceptance 2026-09-27).
-# -p/--project-dir runs another directory's build scripts; -D/-P properties
-# can name a program (e.g. -Dorg.gradle.java.home=<dir> selects the java
-# binary Gradle executes) - same class.
-_GRADLEW_VALUE_EXCLUDED = frozenset({"-I", "--init-script", "-b", "--build-file",
-                                     "-c", "--settings-file", "-p", "--project-dir",
-                                     "-D", "--system-prop", "-P", "--project-prop"})
+# Boundary (owner, 2026-09-27, PRD §7): only code written INLINE in argv is
+# excluded; flags that select a file, directory or project (init/build/
+# settings scripts, -p, -D/-P properties) are equivalent to `cd` into that
+# project and running it - which a build/test verb already does by design.
+_GRADLEW_VALUE_EXCLUDED = frozenset()
 HEAD_SPECS["./gradlew"] = spec(
     bool=cli_families.GRADLE_BOOL_FLAGS + _GRADLEW_EXTRA_BOOL,
     value=dict({f: "any" for f in cli_families.GRADLE_VALUE_FLAGS
@@ -2434,21 +2417,11 @@ def _verb_tree(ro_verbs, family_bool=(), family_value=None):
     return _freeze(root, ())
 
 
-# FAMILIES flags the rewriter must NOT admit even though the family table
-# (read by the gate/hang policy for parsing) declares them. kubeconfig can
-# carry a users[].user.exec credential plugin - a program kubectl runs -
-# so pointing at an arbitrary one is the executable-config class
-# (re-acceptance 2026-09-27; supersedes the TK-40 targeting exception for
-# this one flag).
-FAMILY_EXCLUDED = {"kubectl": frozenset({"--kubeconfig"})}
-
-
 def _family_spec(head):
     fam = cli_families.FAMILIES[head]
     extra = FAMILY_EXTRAS.get(head, {"bool": (), "value": {}})
-    excluded = FAMILY_EXCLUDED.get(head, frozenset())
-    family_bool = tuple(f for f in fam["global_flags"] if f not in excluded)
-    family_value = {f: "any" for f in fam.get("value_flags", ()) if f not in excluded}
+    family_bool = tuple(fam["global_flags"])
+    family_value = {f: "any" for f in fam.get("value_flags", ())}
     bool_flags = family_bool + tuple(extra["bool"])
     value_flags = dict(family_value)
     value_flags.update(extra["value"])

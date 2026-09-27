@@ -313,7 +313,16 @@ _INTERPRETER_BOOL_FLAGS = {
         "-a", "-c", "-d", "--debug", "-l", "-n", "-p", "-s", "-S", "-v",
         "-w", "--verbose", "--version", "--help", "--copyright",
     }),
+    # node --help: common no-value options (value-taking long options are
+    # normally spelled --opt=value, which the scan treats as self-contained).
+    "node": frozenset({
+        "-c", "--check", "-i", "--interactive", "--no-warnings",
+        "--no-deprecation", "--throw-deprecation", "--trace-deprecation",
+        "--trace-warnings", "--pending-deprecation", "--enable-source-maps",
+        "--preserve-symlinks", "--preserve-symlinks-main", "--experimental-vm-modules",
+    }),
 }
+_INTERPRETER_BOOL_FLAGS["nodejs"] = _INTERPRETER_BOOL_FLAGS["node"]
 _PYTHON_BOOL_FLAGS = frozenset({
     "-b", "-B", "-d", "-E", "-h", "-i", "-I", "-O", "-OO", "-P", "-q", "-s",
     "-S", "-t", "-u", "-v", "-V", "-x", "--help", "--help-env",
@@ -353,8 +362,8 @@ def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> b
     while i < n:
         tok = args[i]
         if tok == "--":
-            # Standard end-of-options marker for every supported interpreter:
-            # the next token is the script position.
+            # End-of-options marker (every supported interpreter): the next
+            # token is the script position.
             return i + 1 < n and args[i + 1] == "{}"
         if tok in value_flags:
             if i + 1 >= n:
@@ -366,6 +375,28 @@ def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> b
         if tok in bool_flags:
             i += 1
             continue
+        if tok.startswith("--") and "=" in tok:
+            # --opt=value carries its value inline; nothing else consumed.
+            if tok.split("=", 1)[1] == "{}":
+                return True
+            i += 1
+            continue
+        if (tok.startswith("-") and not tok.startswith("--") and len(tok) > 2
+                and all("-" + c in bool_flags for c in tok[1:-1])):
+            # Short-option cluster (`-ex`, `-bb`): every char but the last
+            # is a documented boolean; the last is a boolean too, or a
+            # value option that takes the next token (`-xc CODE`).
+            last = "-" + tok[-1]
+            if last in bool_flags:
+                i += 1
+                continue
+            if last in value_flags:
+                if i + 1 >= n:
+                    return False
+                if args[i + 1] == "{}":
+                    return True
+                i += 2
+                continue
         if tok.startswith("-"):
             # Unrecognized option (finding C): fail closed rather than
             # assume it takes no value - we cannot prove it won't swallow

@@ -205,13 +205,11 @@ class KubectlHelmRewriterTests(unittest.TestCase):
             "kubectl --all-namespaces get pods",
             "kubectl --context ctx describe pod web-abc",
             "kubectl --cluster c1 top pods",
+            "kubectl --kubeconfig /tmp/cfg events",
             "kubectl -n prod logs pod/web-abc",
         ):
             with self.subTest(command=command):
                 self.assert_rewrite(command)
-        # --kubeconfig no longer rewrites (2026-09-27): a kubeconfig can
-        # carry an exec credential plugin, i.e. name a program to run.
-        self.assert_none("kubectl --kubeconfig /tmp/cfg events")
 
     def test_mutating_and_escape_verbs_never_rewrite(self):
         for command in (

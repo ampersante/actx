@@ -722,17 +722,11 @@ class MobileRewriteTests(unittest.TestCase):
             "./gradlew test --tests com.Foo",
             "./gradlew test --tests=com.Foo",
             "./gradlew check --parallel -q",
-        ):
-            with self.subTest(command=command):
-                self.assertEqual(rewrite(command), "actx " + command)
-        # -D/-P no longer rewrite (2026-09-27): a property value can name
-        # code to run (org.gradle.java.home, jvmargs=-javaagent:...).
-        for command in (
             "./gradlew -Dorg.gradle.jvmargs=-Xmx2g test",
             "./gradlew -Pkotlin.incremental=true build",
         ):
             with self.subTest(command=command):
-                self.assertIsNone(rewrite(command))
+                self.assertEqual(rewrite(command), "actx " + command)
 
     def test_gradlew_ask_and_unknown_rejected(self):
         # TK-55 F5: publish/clean-class and unknown task verbs defer;
