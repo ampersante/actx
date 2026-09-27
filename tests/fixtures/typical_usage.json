@@ -219,7 +219,7 @@
  "golangci-lint run --new-from-rev=HEAD~1": "actx golangci-lint run --new-from-rev=HEAD~1",
  "golangci-lint run --output.json.path report.json": null,
  "golangci-lint run --output.json.path stdout": "actx golangci-lint run --output.json.path stdout",
- "golangci-lint run -c .golangci.yml": "actx golangci-lint run -c .golangci.yml",
+ "golangci-lint run -c .golangci.yml": null,
  "golangci-lint run -j 4 --show-stats": "actx golangci-lint run -j 4 --show-stats",
  "golangci-lint version --short": "actx golangci-lint version --short",
  "grep --binary-files=execute pattern file": null,

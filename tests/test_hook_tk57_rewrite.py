@@ -200,6 +200,53 @@ class HookRewriteProbeTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assert_allow_rewritten(command)
 
+    def test_reacceptance_executable_config_selectors_not_auto_allowed(self):
+        # Re-acceptance 2026-09-27: flags selecting an executable build/
+        # config file (Gradle DSL, JS configs, plugin-loading configs).
+        for command in (
+            "./gradlew --build-file evil.gradle tasks",
+            "./gradlew -b evil.gradle tasks",
+            "./gradlew --settings-file evil.gradle tasks",
+            "./gradlew -c evil.gradle tasks",
+            "jest --config evil.config.js",
+            "vitest run --config evil.config.ts",
+            "eslint --config evil.config.js .",
+            "pytest -c evil.ini",
+            "golangci-lint run --config evil.yml",
+            "git add --auto-advance f",
+        ):
+            with self.subTest(command=command):
+                self.assert_not_auto_allowed(command)
+
+    def test_reacceptance_safe_forms_still_rewrite(self):
+        for command in ("./gradlew tasks", "jest", "eslint .", "pytest -q",
+                        "git add -A"):
+            with self.subTest(command=command):
+                self.assert_allow_rewritten(command)
+
+
+class FindExecDashDashTests(unittest.TestCase):
+    """`--` ends interpreter options: the next token is the script."""
+
+    def verdict(self, command):
+        from actx_lib import security_gate
+        return security_gate.evaluate_security(command)
+
+    def test_known_script_after_dashdash_not_escalated(self):
+        for command in ("find . -exec sh -- known.sh {} \\;",
+                        "find . -exec python3 -- known.py {} \\;",
+                        "find . -exec bash --norc -- known.sh {} \\;"):
+            with self.subTest(command=command):
+                self.assertEqual(self.verdict(command).decision, "allow")
+
+    def test_placeholder_after_dashdash_asks(self):
+        for command in ("find . -exec sh -- {} \\;",
+                        "find . -exec python3 -- {} \\;"):
+            with self.subTest(command=command):
+                dec = self.verdict(command)
+                self.assertEqual((dec.decision, dec.category),
+                                 ("ask", "T4_DESTRUCTIVE_MUTATION"))
+
 
 if __name__ == "__main__":
     unittest.main()

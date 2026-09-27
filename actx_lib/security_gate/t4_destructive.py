@@ -297,7 +297,7 @@ _POSIX_SET_BOOL_FLAGS = frozenset({"-a", "-b", "-C", "-e", "-f", "-h", "-m", "-n
 _INTERPRETER_BOOL_FLAGS = {
     "sh": _POSIX_SET_BOOL_FLAGS | {"-i", "-s"},
     "bash": _POSIX_SET_BOOL_FLAGS | {
-        "-i", "-l", "-r", "-s", "-t", "-k", "-p", "-B", "-E", "-H", "-P", "-T", "-D", "--",
+        "-i", "-l", "-r", "-s", "-t", "-k", "-p", "-B", "-E", "-H", "-P", "-T", "-D",
         "--debugger", "--dump-po-strings", "--dump-strings", "--help",
         "--login", "--noediting", "--noprofile", "--norc", "--posix",
         "--restricted", "--verbose", "--version",
@@ -352,6 +352,10 @@ def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> b
     n = len(args)
     while i < n:
         tok = args[i]
+        if tok == "--":
+            # Standard end-of-options marker for every supported interpreter:
+            # the next token is the script position.
+            return i + 1 < n and args[i + 1] == "{}"
         if tok in value_flags:
             if i + 1 >= n:
                 return False

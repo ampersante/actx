@@ -371,7 +371,7 @@ HEAD_SPECS = {
                       "--show-object-format": frozenset({"storage", "input", "output", "compat"})},
             positional="any"),
         "add": spec(
-            bool=("-n", "--dry-run", "-v", "--verbose", "--auto-advance",
+            bool=("-n", "--dry-run", "-v", "--verbose",
                   "-f", "--force", "-u", "--update", "--renormalize",
                   "-N", "--intent-to-add", "-A", "--all", "--ignore-removal",
                   "--refresh", "--ignore-errors", "--ignore-missing", "--sparse",
@@ -1055,7 +1055,8 @@ HEAD_SPECS["pytest"] = spec(
         "--import-mode": frozenset({"prepend", "append", "importlib"}),
         "--doctest-report": frozenset({"none", "cdiff", "ndiff", "udiff", "only_first_failure"}),
         "--doctest-glob": "any",
-        "-c": "any", "--config-file": "any",
+        # -c/--config-file EXCLUDED: an ini/toml can set addopts=-p <module>,
+        # i.e. name code to load (executable-config class, wave 2026-09-27).
         "--rootdir": "any",
         "--assert": frozenset({"plain", "rewrite"}),
         "--log-level": "any", "--log-format": "any", "--log-date-format": "any",
@@ -1095,7 +1096,7 @@ HEAD_SPECS["jest"] = spec(
         "--watchman", "--workerThreads",
     ),
     value={
-        "-c": "any", "--config": "any",
+        # -c/--config EXCLUDED: jest.config.js is executable code.
         "--changedSince": "any",
         "--collectCoverageFrom": "any",
         "--coverageProvider": frozenset({"babel", "v8"}),
@@ -1168,7 +1169,7 @@ HEAD_SPECS["vitest"] = spec(
     value={
         "-t": "any", "--testNamePattern": "any",
         "--dir": "any", "-r": "any", "--root": "any",
-        "-c": "any", "--config": "any",
+        # -c/--config EXCLUDED: vitest.config.* is executable code.
         "--reporter": frozenset({"default", "verbose", "dot", "json", "junit",
                                   "tap", "tap-flat", "hanging-process", "basic"}),
         "--coverage.provider": frozenset({"v8", "istanbul"}),
@@ -1339,7 +1340,7 @@ HEAD_SPECS["eslint"] = spec(
         "--debug", "-h", "--help", "-v", "--version", "--env-info", "--stats",
     ),
     value={
-        "-c": "any", "--config": "any",
+        # -c/--config EXCLUDED: eslint.config.* is executable code.
         "-f": frozenset({"stylish", "json", "json-with-metadata", "compact",
                           "unix", "visualstudio", "html", "checkstyle",
                           "codeframe", "tap", "junit", "jslint-xml"}),
@@ -1392,7 +1393,8 @@ HEAD_SPECS["golangci-lint"] = spec(
                 "--max-same-issues": "int", "--path-prefix": "any", "--path-mode": "any",
                 "--new-from-rev": "any", "--new-from-patch": "any",
                 "--new-from-merge-base": "any",
-                "-c": "any", "--config": "any",
+                # -c/--config EXCLUDED: a config can load custom linter
+                # plugins (code) - executable-config class.
                 # every --output.<fmt>.path is restricted to {stdout,stderr}:
                 # its domain is otherwise an arbitrary user-named file path.
                 "--output.text.path": frozenset({"stdout", "stderr"}),
@@ -1410,8 +1412,7 @@ HEAD_SPECS["golangci-lint"] = spec(
         "linters": spec(inherit=True, bool=("--json", "--fast-only"),
                          value={"-D": "any", "--disable": "any", "-E": "any",
                                 "--enable": "any", "--enable-only": "any",
-                                "--default": frozenset({"standard", "none", "all", "fast"}),
-                                "-c": "any", "--config": "any"},
+                                "--default": frozenset({"standard", "none", "all", "fast"})},
                          positional="none"),
         "version": spec(bool=("--json", "--short", "--debug"), positional="none"),
     },
@@ -1959,7 +1960,10 @@ _GRADLEW_EXTRA_BOOL = (
 # full table to correctly skip flag VALUES while looking for task
 # tokens) so it is not edited there; only the rewriter's own admission
 # excludes these two spellings.
-_GRADLEW_VALUE_EXCLUDED = frozenset({"-I", "--init-script"})
+# Same class: -b/--build-file and -c/--settings-file select the build /
+# settings script Gradle executes (re-acceptance 2026-09-27).
+_GRADLEW_VALUE_EXCLUDED = frozenset({"-I", "--init-script", "-b", "--build-file",
+                                     "-c", "--settings-file"})
 HEAD_SPECS["./gradlew"] = spec(
     bool=cli_families.GRADLE_BOOL_FLAGS + _GRADLEW_EXTRA_BOOL,
     value=dict({f: "any" for f in cli_families.GRADLE_VALUE_FLAGS
