@@ -1108,7 +1108,8 @@ HEAD_SPECS["jest"] = spec(
         "--testPathIgnorePatterns": "any", "--testMatch": "any",
         "--testEnvironmentOptions": "any", "--testTimeout": "int",
         "--seed": "any", "--shard": "any",
-        "--projects": "any", "--selectProjects": "any", "--ignoreProjects": "any",
+        # --projects EXCLUDED: points at dirs whose jest configs (JS) run.
+        "--selectProjects": "any", "--ignoreProjects": "any",
         "--roots": "any",
         "--env": frozenset({"node", "jsdom"}),
         "--reporters": frozenset({"default", "github-actions", "summary"}),
@@ -1905,7 +1906,9 @@ HEAD_SPECS["simctl"] = spec(verbs={"list": spec(bool=("-j", "--json"), positiona
 HEAD_SPECS["pod"] = spec(verbs={
     "outdated": spec(bool=("--ignore-prerelease", "--no-repo-update",
                            "--allow-root", "--silent", "--version", "--verbose", "--no-ansi"),
-                     value={"--project-directory": "any"}, positional="any"),
+                     # --project-directory EXCLUDED: another dir's Podfile
+                     # (Ruby) is evaluated.
+                     positional="any"),
     # NOTE: "--update" is deliberately NOT admitted on `list` - it
     # triggers a `pod repo update` first (writes/fetches into the local
     # spec-repo cache); the research proposal's own flag table said
@@ -1962,8 +1965,12 @@ _GRADLEW_EXTRA_BOOL = (
 # excludes these two spellings.
 # Same class: -b/--build-file and -c/--settings-file select the build /
 # settings script Gradle executes (re-acceptance 2026-09-27).
+# -p/--project-dir runs another directory's build scripts; -D/-P properties
+# can name a program (e.g. -Dorg.gradle.java.home=<dir> selects the java
+# binary Gradle executes) - same class.
 _GRADLEW_VALUE_EXCLUDED = frozenset({"-I", "--init-script", "-b", "--build-file",
-                                     "-c", "--settings-file"})
+                                     "-c", "--settings-file", "-p", "--project-dir",
+                                     "-D", "--system-prop", "-P", "--project-prop"})
 HEAD_SPECS["./gradlew"] = spec(
     bool=cli_families.GRADLE_BOOL_FLAGS + _GRADLEW_EXTRA_BOOL,
     value=dict({f: "any" for f in cli_families.GRADLE_VALUE_FLAGS
@@ -2427,11 +2434,21 @@ def _verb_tree(ro_verbs, family_bool=(), family_value=None):
     return _freeze(root, ())
 
 
+# FAMILIES flags the rewriter must NOT admit even though the family table
+# (read by the gate/hang policy for parsing) declares them. kubeconfig can
+# carry a users[].user.exec credential plugin - a program kubectl runs -
+# so pointing at an arbitrary one is the executable-config class
+# (re-acceptance 2026-09-27; supersedes the TK-40 targeting exception for
+# this one flag).
+FAMILY_EXCLUDED = {"kubectl": frozenset({"--kubeconfig"})}
+
+
 def _family_spec(head):
     fam = cli_families.FAMILIES[head]
     extra = FAMILY_EXTRAS.get(head, {"bool": (), "value": {}})
-    family_bool = tuple(fam["global_flags"])
-    family_value = {f: "any" for f in fam.get("value_flags", ())}
+    excluded = FAMILY_EXCLUDED.get(head, frozenset())
+    family_bool = tuple(f for f in fam["global_flags"] if f not in excluded)
+    family_value = {f: "any" for f in fam.get("value_flags", ()) if f not in excluded}
     bool_flags = family_bool + tuple(extra["bool"])
     value_flags = dict(family_value)
     value_flags.update(extra["value"])

@@ -214,6 +214,13 @@ class HookRewriteProbeTests(unittest.TestCase):
             "pytest -c evil.ini",
             "golangci-lint run --config evil.yml",
             "git add --auto-advance f",
+            "./gradlew -Dorg.gradle.java.home=/tmp/x tasks",
+            "./gradlew -Pa=b tasks",
+            "./gradlew --project-dir other tasks",
+            "pod outdated --project-directory other",
+            "jest --projects other",
+            "kubectl --kubeconfig evil get pods",
+            "kubectl get pods --kubeconfig=evil",
         ):
             with self.subTest(command=command):
                 self.assert_not_auto_allowed(command)
