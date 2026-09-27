@@ -216,6 +216,9 @@ class InlineCodeBoundaryTests(unittest.TestCase):
             "cargo check -Zunstable-options",
             "ruff check --config 'fix = true' .",
             "cargo fmt --check -- --emit files",
+            # dotted warning category imports that module
+            "pytest -W ignore::this.X --version",
+            "pytest --pythonwarnings=error::pkg.mod.Warn",
         ):
             with self.subTest(command=command):
                 self.assert_not_auto_allowed(command)
@@ -231,6 +234,9 @@ class InlineCodeBoundaryTests(unittest.TestCase):
             "kubectl --kubeconfig /tmp/cfg get pods",
             "cargo check --manifest-path sub/Cargo.toml",
             "git add --auto-advance -A",
+            "pytest -W error",
+            "pytest -W ignore::DeprecationWarning",
+            "pytest -W ignore::pytest.PytestUnraisableExceptionWarning",
         ):
             with self.subTest(command=command):
                 self.assert_allow_rewritten(command)
@@ -262,6 +268,13 @@ class FindExecInterpreterFormsTests(unittest.TestCase):
             "find . -exec bash --rcfile rc {} \\;",
             "find . -exec python3 --check-hash-based-pycs always {} \\;",
             "find . -exec node --require={} x.js \\;",
+            # embedded placeholders: find substitutes `{}` inside arguments
+            "find . -exec node --require=./{} known.js \\;",
+            "find . -exec node --require={}/payload.js known.js \\;",
+            "find . -exec bash --init-file=./{} known.sh \\;",
+            "find . -exec sh -- ./{} \\;",
+            "find . -exec ./{} \\;",
+            "find . -exec python3 ./{} \\;",
         ):
             with self.subTest(command=command):
                 dec = self.verdict(command)

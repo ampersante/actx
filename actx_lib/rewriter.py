@@ -205,11 +205,35 @@ def _match_optional_flag(tok, flag, domain):
     return None
 
 
+# Python warning-filter categories resolvable without importing arbitrary
+# code: builtins, plus pytest's own (the pytest module is already loaded).
+# A dotted category (`ignore::pkg.Mod`) makes Python IMPORT `pkg` - inline
+# code-loading, excluded by the owner boundary (PRD §7).
+_BUILTIN_WARNING_CATEGORIES = frozenset({
+    "Warning", "UserWarning", "DeprecationWarning", "PendingDeprecationWarning",
+    "SyntaxWarning", "RuntimeWarning", "FutureWarning", "ImportWarning",
+    "UnicodeWarning", "BytesWarning", "ResourceWarning", "EncodingWarning",
+})
+
+
+def _warning_filter_ok(value):
+    """action[:message[:category[:module[:lineno]]]] - only the category
+    field can trigger an import; message and module are regexes."""
+    parts = value.split(":")
+    if len(parts) < 3 or not parts[2]:
+        return True
+    category = parts[2]
+    return category in _BUILTIN_WARNING_CATEGORIES or (
+        category.startswith("pytest.") and category.count(".") == 1)
+
+
 def _value_ok(domain, value):
     if domain == "any":
         return True
     if domain == "int":
         return value.lstrip("+-").isdigit()
+    if domain == "warning_filter":
+        return _warning_filter_ok(value)
     return value in domain  # frozenset of allowed literal values
 
 

@@ -1048,7 +1048,8 @@ HEAD_SPECS["pytest"] = spec(
         "--color": frozenset({"yes", "no", "auto"}),
         "--code-highlight": frozenset({"yes", "no"}),
         "--junit-prefix": "any",
-        "-W": "any", "--pythonwarnings": "any",
+        # warning_filter: a dotted category would import arbitrary code.
+        "-W": "warning_filter", "--pythonwarnings": "warning_filter",
         "--max-warnings": "int",
         "--ignore": "any", "--ignore-glob": "any", "--deselect": "any",
         "--confcutdir": "any",

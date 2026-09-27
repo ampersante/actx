@@ -342,6 +342,12 @@ def _interpreter_bool_flags(head: str) -> frozenset:
     return _INTERPRETER_BOOL_FLAGS.get(head, frozenset())
 
 
+def _has_placeholder(tok: str) -> bool:
+    # find substitutes `{}` anywhere inside an argument (`./{}`, `{}/x.js`,
+    # `--require=./{}`), not only as a whole token.
+    return "{}" in tok
+
+
 def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> bool:
     """True when `{}` reaches the interpreter's OWN argv as its script or
     as a value-flag's value (REQ-09 G2) - direct execution of an unknown
@@ -364,11 +370,11 @@ def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> b
         if tok == "--":
             # End-of-options marker (every supported interpreter): the next
             # token is the script position.
-            return i + 1 < n and args[i + 1] == "{}"
+            return i + 1 < n and _has_placeholder(args[i + 1])
         if tok in value_flags:
             if i + 1 >= n:
                 return False
-            if args[i + 1] == "{}":
+            if _has_placeholder(args[i + 1]):
                 return True
             i += 2
             continue
@@ -377,7 +383,7 @@ def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> b
             continue
         if tok.startswith("--") and "=" in tok:
             # --opt=value carries its value inline; nothing else consumed.
-            if tok.split("=", 1)[1] == "{}":
+            if _has_placeholder(tok):
                 return True
             i += 1
             continue
@@ -393,7 +399,7 @@ def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> b
             if last in value_flags:
                 if i + 1 >= n:
                     return False
-                if args[i + 1] == "{}":
+                if _has_placeholder(args[i + 1]):
                     return True
                 i += 2
                 continue
@@ -402,7 +408,7 @@ def _find_exec_script_arg_is_placeholder(interpreter: str, args: list[str]) -> b
             # assume it takes no value - we cannot prove it won't swallow
             # the next token, so `{}` is treated as reachable here.
             return True
-        return tok == "{}"
+        return _has_placeholder(tok)
     return False
 
 
@@ -451,7 +457,7 @@ def _check_find_exec_subcommands(raw_tokens: list[str]) -> SecurityDecision | No
             j += 1
 
         if args:
-            if args[0] == "{}" or (
+            if _has_placeholder(args[0]) or (
                 _is_find_exec_interpreter(args[0])
                 and _find_exec_script_arg_is_placeholder(args[0], args[1:])
             ):
@@ -461,7 +467,7 @@ def _check_find_exec_subcommands(raw_tokens: list[str]) -> SecurityDecision | No
                     category="T4_DESTRUCTIVE_MUTATION",
                 )
 
-            sub_tokens = ["actx_find_arg" if t == "{}" else t for t in args]
+            sub_tokens = [t.replace("{}", "actx_find_arg") for t in args]
             # Back-edge (TK-59 STEP-R2): local import avoids a t4_destructive
             # <-> engine module cycle (engine imports _check_find_exec_
             # subcommands at module load time).
