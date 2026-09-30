@@ -50,7 +50,7 @@ class RunnerCliTests(unittest.TestCase):
                 )
                 self.assertEqual(p.returncode, 128)
 
-    def test_tee_file_never_contains_secret_lines(self):
+    def test_tee_file_never_contains_secret_values(self):
         # E2E over the actx process: _write_tee masks every caller's streams,
         # so a secret line must not reach the tee file in any path.
         with tempfile.TemporaryDirectory() as home:
@@ -70,14 +70,17 @@ class RunnerCliTests(unittest.TestCase):
                 home,
             )
             self.assertEqual(p.returncode, 0, p.stderr)
-            self.assertNotIn("API_KEY", p.stdout)
+            # TK-61 C1: the key survives, the value is masked (was: the
+            # whole secret line dropped) - on screen and in the tee file.
+            self.assertIn("API_KEY=‹masked›\n", p.stdout)
+            self.assertNotIn("sk-e2e-secret", p.stdout)
             tee_dir = os.path.join(home, ".local", "share", "actx", "tee")
             files = os.listdir(tee_dir)
             self.assertEqual(len(files), 1)
             with open(os.path.join(tee_dir, files[0]), encoding="utf-8") as handle:
-                record = handle.read()
-            self.assertNotIn("API_KEY", record)
-            self.assertIn("plain line", record)
+                record = json.load(handle)
+            self.assertEqual(record["stdout"], "API_KEY=‹masked›\nplain line\n")
+            self.assertNotIn("sk-e2e-secret", json.dumps(record))
 
 
 class RecordStoreTextTests(unittest.TestCase):

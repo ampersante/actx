@@ -21,17 +21,21 @@ class CompactJsonTests(unittest.TestCase):
         out = json_compactor.compact_json('[1, 2, 3]')
         self.assertEqual(json.loads(out), [1, 2, 3])
 
-    def test_secret_keys_dropped_before_trimming(self):
+    def test_secret_values_masked_in_trimmed_dump(self):
+        # TK-61 C1: secret keys stay, values are masked in the dump (was:
+        # keys dropped before trimming); the dump stays valid JSON.
         text = (
             '[{"api_key": "x", "name": "y"}, {"api_key": "z", "name": "w"},'
             ' {"name": "v"}]'
         )
         out = json_compactor.compact_json(text, max_items=2)
-        self.assertNotIn("api_key", out)
         self.assertNotIn('"x"', out)
         self.assertNotIn('"z"', out)
         obj = json.loads(out)
-        self.assertEqual(obj, [{"name": "y"}, "... [1 items omitted]", {"name": "v"}])
+        self.assertEqual(
+            obj,
+            [{"api_key": "‹masked›", "name": "y"}, "... [1 items omitted]", {"name": "v"}],
+        )
 
     def test_nested_objects_and_lists(self):
         text = json.dumps({"outer": [{"inner": [{"deep": 1}]}], "n": 2})
@@ -94,7 +98,7 @@ class CompactJsonTests(unittest.TestCase):
 
     def test_internal_error_fails_open_to_none(self):
         with mock.patch.object(
-            json_compactor.redaction, "redact_json", side_effect=RuntimeError("boom")
+            json_compactor.redaction, "redact_text", side_effect=RuntimeError("boom")
         ):
             self.assertIsNone(json_compactor.compact_json('{"a": 1}'))
 

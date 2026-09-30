@@ -2,15 +2,10 @@ import json
 
 from actx_lib import cli_families, runner
 from actx_lib.filters import json_compactor
-from actx_lib.redaction import (
-    _SECRET_PATTERNS,
-    _drop_secret_json,
-    _drop_secret_lines,
-    _is_secret_key,
-)
+from actx_lib.redaction import redact_text
 
-# Mask widened in actx_lib.redaction (api_key, apikey, private_key, ...);
-# redacts more of aws/docker/kubectl/gh output — safe direction.
+# Secret values are masked by actx_lib.redaction (value masking, TK-61):
+# the key and the line stay, only the value span becomes ‹masked›.
 
 
 def _rle(text):
@@ -32,7 +27,7 @@ def _rle(text):
 
 
 def _dedup_compact(text):
-    return _rle(_drop_secret_lines(text))
+    return _rle(redact_text(text))
 
 
 def compact_aws(text):

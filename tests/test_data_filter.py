@@ -95,22 +95,24 @@ class SqlCompactTests(unittest.TestCase):
         self.assertEqual(lines[1], "1,***,keep this")
         self.assertNotIn("hunter2", out)
 
-    def test_unframed_output_falls_back_to_secret_line_redaction(self):
+    def test_unframed_output_falls_back_to_value_masking(self):
         text = " id | password \n----+----------\n  1 | hunter2\n(1 row)\n"
         out = data_filter._sql_compact(text)
-        # No frame -> no table compaction; the header line (pattern word)
-        # drops via redact_text; the raw value line has no pattern word and
-        # stays (documented approximation: value-level masking needs frames).
-        self.assertNotIn("password", out)
-        self.assertIn("(1 row)", out)
+        # No frame -> no table compaction; value masking (redact_text)
+        # finds no key/value form here: the header is a column name
+        # (content), and the bare value in its own cell carries no key -
+        # documented approximation: column-level masking needs frames.
+        # (TK-61 C1; was: the header line dropped by line redaction, the
+        # value line kept - the value survived before as well.)
+        self.assertEqual(out, text)
 
     def test_pipe_value_raw_fallback_documented_limitation(self):
         # A pipe inside the VALUE makes the row ragged: the column mask
-        # skips the row and compact_table refuses the whole table. The
-        # header line still drops via secret-line redaction; a secret VALUE
-        # with a pipe survives that line filter - documented approximation
-        # (value-level masking needs parseable frames), same class as the
-        # Q2 pattern-redaction gap.
+        # skips the row and compact_table refuses the whole table. Value
+        # masking finds no key/value form in a table cell, so the header
+        # (a column name, content) and a secret VALUE with a pipe survive -
+        # documented approximation (column-level masking needs parseable
+        # frames), same class as the Q2 pattern-redaction gap.
         text = (
             "+----+----------+\n"
             "| id | password |\n"
@@ -119,7 +121,7 @@ class SqlCompactTests(unittest.TestCase):
             "+----+----------+\n"
         )
         out = data_filter._sql_compact(text)
-        self.assertNotIn("password", out)  # header dropped by line redaction
+        self.assertEqual(out, text)  # TK-61 C1: header kept (was: dropped)
         self.assertIn("a|b", out)  # pinned limitation: ragged row survives
 
 

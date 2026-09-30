@@ -8,8 +8,8 @@ runner.compacted_result / run_lossless contracts; PRD.md 8):
   patterns) BEFORE ascii_table_filter.compact_table compaction - the
   redaction -> compression order of the TK-43 data-fidelity DoD; the mask
   keeps every cell width so pipe positions (the compaction contract) are
-  untouched; output without a framed table falls back to secret-line
-  redaction. Exit code preserved.
+  untouched; output without a framed table falls back to secret value
+  masking (redaction.redact_text). Exit code preserved.
 - terraform             -> plan/validate/show/version/graph dedup
                           compaction (infra_filter _run_compact pattern).
 - redis-cli             -> RO verb subset through the lossless runner path
@@ -67,8 +67,8 @@ def _secret_columns(header_cells):
 def _mask_block(block):
     """Mask data cells of one framed-table block; block unchanged when no
     header column matches a secret pattern or the rows are ragged (the
-    compactor then falls back to raw, and _sql_compact adds line
-    redaction)."""
+    compactor then falls back to raw, and _sql_compact adds value
+    masking)."""
     row_indexes = [k for k, line in enumerate(block) if line.startswith("|")]
     if len(row_indexes) < 2:
         return block
@@ -118,7 +118,7 @@ def _mask_secret_columns(text):
 
 def _sql_compact(text):
     """SQL CLI output compaction: masking -> ascii_table compaction -> on
-    any doubt (raw fallback) secret-line redaction only."""
+    any doubt (raw fallback) secret value masking only."""
     masked = _mask_secret_columns(text)
     compacted = ascii_table_filter.compact_table(masked)
     if compacted is not masked:

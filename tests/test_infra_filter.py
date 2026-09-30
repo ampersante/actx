@@ -6,7 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from actx_lib.filters import infra_filter
-from actx_lib.redaction import _drop_secret_json
+from actx_lib.redaction import MASK
 
 CONFIG = {
     "tee": {"enabled": False, "mode": "failures", "dir": "~/.local/share/actx/tee"},
@@ -203,29 +203,36 @@ class InfraParserTests(unittest.TestCase):
         self.assertIn("Fix bug", out)
         self.assertIn("Add feature", out)
 
-    def test_aws_json_drops_secret_keys(self):
+    def test_aws_json_masks_secret_values(self):
+        # TK-61 C1: secret keys stay, their values are masked (was: keys
+        # dropped).
         out = infra_filter.compact_aws(AWS_JSON)
         self.assertIn("Account", out)
         self.assertIn("Arn", out)
-        self.assertNotIn("AccessKeyId", out)
-        self.assertNotIn("SecretAccessKey", out)
+        self.assertEqual(json.loads(out)["AccessKeyId"], MASK)
+        self.assertEqual(json.loads(out)["SecretAccessKey"], MASK)
+        self.assertNotIn("AKIAEXAMPLE", out)
+        self.assertNotIn("shhh", out)
 
-    def test_aws_text_drops_secret_lines(self):
+    def test_aws_text_masks_secret_values(self):
+        # TK-61 C1: the line stays, the value is masked (was: line dropped).
         out = infra_filter.compact_aws(AWS_TEXT)
-        self.assertIn("normal line", out)
-        self.assertNotIn("password", out)
+        self.assertEqual(out, "line with password=%s\nnormal line\n" % MASK)
 
     def test_aws_json_matches_legacy_dump_byte_for_byte(self):
         # compact_aws delegates to json_compactor; valid JSON must stay
         # byte-identical to the pre-TK-38 dump: indent=2, sort_keys=True,
-        # no list trimming.
+        # no list trimming - except the secret value, masked in place
+        # (TK-61 C1; was: the secret key dropped).
         text = json.dumps(
             {"zeta": [5, 1, 3], "arn": "a", "SecretAccessKey": "shhh",
              "nested": {"b": 2, "a": 1}, "Rows": [{"y": 2, "x": 1}]}
         )
         self.assertEqual(
             infra_filter.compact_aws(text),
-            json.dumps(_drop_secret_json(json.loads(text)), indent=2, sort_keys=True),
+            json.dumps(json.loads(text), indent=2, sort_keys=True).replace(
+                '"shhh"', '"%s"' % MASK
+            ),
         )
 
     def test_docker_inspect_valid_json_compacts(self):

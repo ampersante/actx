@@ -1,9 +1,9 @@
 """Reusable JSON-output compactor for infra/data CLI filters.
 
-Valid JSON -> redact secret keys (redaction.redact_json) -> optionally trim
-long lists head/tail with a count marker -> json.dumps. Invalid JSON or any
-internal error -> None, so the caller keeps its line-based path (fail-open).
-Pure: no I/O.
+Valid JSON -> optionally trim long lists head/tail with a count marker ->
+json.dumps -> secret values masked in the dump (redaction.redact_text; the
+masked dump stays valid JSON). Invalid JSON or any internal error -> None,
+so the caller keeps its line-based path (fail-open). Pure: no I/O.
 """
 
 import json
@@ -29,9 +29,10 @@ def compact_json(text, *, indent=None, sort_keys=False, max_items=20):
     """Valid JSON -> compact dump with secrets masked; None when invalid."""
     try:
         obj = json.loads(text.strip())
-        obj = redaction.redact_json(obj)
         if max_items is not None:
             obj = _trim_lists(obj, max_items)
-        return json.dumps(obj, indent=indent, sort_keys=sort_keys)
+        return redaction.redact_text(
+            json.dumps(obj, indent=indent, sort_keys=sort_keys)
+        )
     except Exception:
         return None

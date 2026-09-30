@@ -443,8 +443,8 @@ def run(cmd, config):
     except Exception:
         pass
 
-    # Valid JSON output is compacted as a whole, on the raw stdout and before
-    # line-drop masking (a dropped secret line would break multi-line JSON).
+    # Valid JSON output is compacted as a whole from the raw stdout; the
+    # compactor masks secret values in its dump (valid JSON stays valid).
     # None / error -> normal line-based path below.
     json_path = False
     try:

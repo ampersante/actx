@@ -236,10 +236,11 @@ class SqlCliShimE2ETests(_ShimTestCase):
 
     def test_redaction_compression_truncate_order(self):
         # DoD (г): secret cells + a long table through `actx run` (the
-        # generic path, the only one with all three stages): line redaction
-        # first (pattern-word header and secret-bearing rows drop), then
-        # the lossless collapse, then the explicit truncation marker - and
-        # the tail values beyond the marker survive.
+        # generic path, the only one with all three stages): value masking
+        # first (TK-61 C1: `password=hunter2` -> `password=‹masked›`, the
+        # header column name is content and stays), then the lossless
+        # collapse, then the explicit truncation marker - and the tail
+        # values beyond the marker survive.
         rows = [["%d" % i, "value-%d" % i, "note"] for i in range(250)]
         rows[7][2] = "password=hunter2"
         rows[8][2] = "password=hunter2"
@@ -253,13 +254,14 @@ class SqlCliShimE2ETests(_ShimTestCase):
         self.assertIn("truncated:", p.stdout)  # marker preserved
         self.assertIn("value-249", p.stdout)  # tail value beyond the marker
         self.assertIn("value-0", p.stdout)  # head value
-        # Redaction ran BEFORE the cap: the pattern-word header and the
-        # secret-bearing lines are gone. (A patternless secret VALUE would
-        # survive this generic path - the documented Q2 gap; value-level
-        # masking is the compact data path, covered by
+        # Masking ran BEFORE the cap: the secret values are gone, their
+        # rows and the header stay. (A secret VALUE in a bare cell, with no
+        # key/value form, would survive this generic path - the documented
+        # Q2 gap; column-level masking is the compact data path, covered by
         # test_secret_columns_masked_otherwise_contained.)
         self.assertNotIn("hunter2", p.stdout)
-        self.assertNotIn("password", p.stdout)
+        self.assertIn("password=‹masked›", p.stdout)
+        self.assertIn("| password", p.stdout)  # header column name (content)
 
 
 class BqShimE2ETests(_ShimTestCase):

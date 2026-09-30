@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sqlite3
 import subprocess
@@ -27,21 +28,26 @@ class _BufferSink:
         self.buffer = io.BytesIO()
 
 
+M = redaction.MASK
+
+
 class PatternTests(unittest.TestCase):
     def test_widened_patterns_match(self):
-        for text in (
-            "api_key=abc123",
-            "apikey: abc123",
-            "API_KEY=sk-123",
-            "AWS_API_KEY=sk-123",
-            "private_key=-----BEGIN",
-            "client_secret=x",
-            "signing_key=x",
-            "passphrase=x",
-            "AccessKey=x",
+        # TK-61 C1: every literal stays secret-bearing; the value is masked
+        # and the key/line kept (was: the whole line dropped).
+        for text, expected in (
+            ("api_key=abc123", "api_key=" + M),
+            ("apikey: abc123", "apikey: " + M),
+            ("API_KEY=sk-123", "API_KEY=" + M),
+            ("AWS_API_KEY=sk-123", "AWS_API_KEY=" + M),
+            ("private_key=-----BEGIN", "private_key=" + M),
+            ("client_secret=x", "client_secret=" + M),
+            ("signing_key=x", "signing_key=" + M),
+            ("passphrase=x", "passphrase=" + M),
+            ("AccessKey=x", "AccessKey=" + M),
         ):
             self.assertTrue(redaction.secret_bearing(text), text)
-            self.assertEqual(redaction.redact_text(text), "")
+            self.assertEqual(redaction.redact_text(text), expected)
 
     def test_plain_words_do_not_match(self):
         for text in ("monkey business", "keyboard layout", "the keyring of life"):
@@ -50,9 +56,11 @@ class PatternTests(unittest.TestCase):
 
 
 class RedactTextTests(unittest.TestCase):
-    def test_drops_secret_line_keeps_normal_lines(self):
+    def test_masks_secret_value_keeps_every_line(self):
         text = "API_KEY=sk-123\nnormal line\nanother\n"
-        self.assertEqual(redaction.redact_text(text), "normal line\nanother\n")
+        self.assertEqual(
+            redaction.redact_text(text), "API_KEY=%s\nnormal line\nanother\n" % M
+        )
 
     def test_empty_and_none_pass_through(self):
         self.assertEqual(redaction.redact_text(""), "")
@@ -61,7 +69,7 @@ class RedactTextTests(unittest.TestCase):
     def test_fail_open_returns_input_on_error(self):
         text = "API_KEY=sk-123\nnormal\n"
         with mock.patch.object(
-            redaction, "_drop_secret_lines", side_effect=RuntimeError("boom")
+            redaction, "_mask", side_effect=RuntimeError("boom")
         ):
             self.assertEqual(redaction.redact_text(text), text)
 
@@ -74,21 +82,25 @@ class SecretBearingTests(unittest.TestCase):
         self.assertFalse(redaction.secret_bearing("hello world\nsecond line"))
 
     def test_fail_open_true_on_error(self):
-        with mock.patch.object(redaction, "_SECRET_PATTERNS", None):
+        with mock.patch.object(redaction, "_mask", side_effect=RuntimeError("boom")):
             self.assertTrue(redaction.secret_bearing("anything"))
 
 
-class RedactJsonTests(unittest.TestCase):
-    def test_drops_secret_keys_keeps_rest(self):
-        obj = {"api_key": "x", "name": "y", "nested": {"client_secret": "s", "keep": 1}}
+class JsonValueMaskingTests(unittest.TestCase):
+    # TK-61 C1: redact_json (key drop) is gone; JSON text is value-masked
+    # by redact_text and stays valid JSON with every key kept.
+    def test_masks_secret_values_keeps_keys(self):
+        text = '{"api_key": "x", "name": "y", "nested": {"client_secret": "s", "keep": 1}}'
         self.assertEqual(
-            redaction.redact_json(obj), {"name": "y", "nested": {"keep": 1}}
+            redaction.redact_text(text),
+            '{"api_key": "%s", "name": "y", "nested": {"client_secret": "%s", "keep": 1}}'
+            % (M, M),
         )
 
     def test_lists_are_walked(self):
-        # An emptied dict stays in the list; only secret keys are dropped.
         self.assertEqual(
-            redaction.redact_json([{"password": "p"}, {"a": 1}]), [{}, {"a": 1}]
+            redaction.redact_text('[{"password": "p"}, {"a": 1}]'),
+            '[{"password": "%s"}, {"a": 1}]' % M,
         )
 
 
@@ -124,14 +136,14 @@ class GenericRunRedactionTests(unittest.TestCase):
             with redirect_stdout(out), redirect_stderr(err):
                 rc = runner.run(["python3", "-c", "x"], TEE_ALWAYS_CONFIG)
         self.assertEqual(rc, 0)
-        self.assertNotIn("API_KEY", out.getvalue())
-        self.assertIn("normal line", out.getvalue())
+        # TK-61 C1: same masking on screen and in tee - value masked, key kept.
+        self.assertEqual(out.getvalue(), "API_KEY=%s\nnormal line\n" % M)
         tee_files = os.listdir(self._tee_dir())
         self.assertEqual(len(tee_files), 1)
         with open(os.path.join(self._tee_dir(), tee_files[0]), encoding="utf-8") as handle:
-            record = handle.read()
-        self.assertNotIn("API_KEY", record)
-        self.assertIn("normal line", record)
+            record = json.load(handle)
+        self.assertEqual(record["stdout"], "API_KEY=%s\nnormal line\n" % M)
+        self.assertNotIn("sk-abc123", json.dumps(record))
 
     def test_json_secret_output_masked(self):
         out = io.StringIO()
@@ -144,7 +156,8 @@ class GenericRunRedactionTests(unittest.TestCase):
             with redirect_stdout(out), redirect_stderr(err):
                 rc = runner.run(["python3", "-c", "x"], CONFIG)
         self.assertEqual(rc, 0)
-        self.assertNotIn("api_key", out.getvalue())
+        # TK-61 C1: the value is masked, the key stays.
+        self.assertIn('{"api_key": "%s"}' % M, out.getvalue())
         self.assertNotIn('"z"', out.getvalue())
         self.assertIn("keepme", out.getvalue())
 
