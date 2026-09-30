@@ -259,10 +259,8 @@ def run(args, config):
     if result is None:
         return 1
     if result.returncode != 0:
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-        if runner.tee_decision(config, "auto", result.returncode):
-            runner.write_tee(cmd, result, config)
+        # stdout survives a failing exit (TK-61), then stderr.
+        runner.print_lossless_stdout(cmd, result, config)
         return result.returncode
 
     try:
@@ -284,7 +282,10 @@ def run(args, config):
                     if not line.lstrip().startswith("//")
                 ]
             out = "\n".join(kept)
-        if out:
+        if not out.strip() and result.stdout.strip():
+            # Never empty (TK-61): nothing survived the stripping.
+            out = runner.print_lossless_stdout(cmd, result, config)
+        elif out:
             print(out, end="")
         runner.record_compacted(cmd, result, out, "read", newline=False)
         return 0

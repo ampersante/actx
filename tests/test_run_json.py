@@ -70,11 +70,13 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
 
     def test_multiline_json_compacted_with_secret_values_masked(self):
         # TK-61 C1: the secret key stays, its value is masked (was: key
-        # dropped by redact_json).
+        # dropped by redact_json). TK-61 C2: JSON is printed as its masked
+        # raw text (json.loads is only a predicate).
         rc, out, err = self._run(
             subprocess.CompletedProcess(["tool", "get"], 0, MULTILINE_JSON, "")
         )
         self.assertEqual(rc, 0)
+        self.assertEqual(out, redaction.redact_text(MULTILINE_JSON))
         self.assertIn(MASKED_SECRET, out)
         self.assertNotIn("shhh", out)
         obj = json.loads(out)
@@ -99,17 +101,15 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
         with self.assertRaises(json.JSONDecodeError):
             json.loads(out)
 
-    def test_long_json_array_trimmed_head_tail(self):
+    def test_long_json_array_printed_whole(self):
+        # TK-61 C2: JSON never loses members (was: head/tail with
+        # "... [80 items omitted]").
         text = json.dumps([{"id": i} for i in range(100)])
         rc, out, err = self._run(
             subprocess.CompletedProcess(["tool", "get"], 0, text, "")
         )
         self.assertEqual(rc, 0)
-        obj = json.loads(out)
-        self.assertEqual(len(obj), 21)
-        self.assertEqual(obj[0], {"id": 0})
-        self.assertEqual(obj[-1], {"id": 99})
-        self.assertEqual(obj[10], "... [80 items omitted]")
+        self.assertEqual(out, text + "\n")
 
     def test_invalid_json_stays_on_line_path(self):
         text = '{"a": 1,\nbroken\n[1, 2\n'
@@ -120,9 +120,10 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
         self.assertEqual(out, text)
         self.assertNotIn("omitted", out)
 
-    def test_oversized_stdout_stays_on_line_path(self):
-        # >2MB of many short lines: the line path prints, caps and
-        # line-truncates it — never the compacted JSON dump.
+    def test_oversized_json_printed_whole(self):
+        # TK-61 C2: no size limit on the JSON predicate — >2MB of valid JSON
+        # is printed whole, never line-capped (was: the line path capped it
+        # with "lines omitted").
         text = (
             "{\n"
             + ",\n".join(
@@ -135,8 +136,8 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
             subprocess.CompletedProcess(["tool", "get"], 0, text, "")
         )
         self.assertEqual(rc, 0)
-        self.assertIn("lines omitted", out)
-        self.assertNotIn("items omitted", out)
+        self.assertEqual(out, text + "\n")
+        self.assertNotIn("full output", err)
 
     def test_scalar_leading_brace_but_invalid_is_untouched(self):
         text = "{not json at all\n"
@@ -189,20 +190,8 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
         self.assertNotIn("prod", out)
         json.loads(out)
 
-    def test_json_path_error_fails_open_to_line_path(self):
-        result = subprocess.CompletedProcess(["tool", "get"], 0, MULTILINE_JSON, "")
-        rc, out, err = self._run_with_patch(
-            result, "actx_lib.runner._run_json_path", side_effect=RuntimeError("boom")
-        )
-        self.assertEqual(rc, 0)
-        # Line path output: value masking (TK-61) hides the secret value.
-        self.assertIn(MASKED_SECRET, out)
-        self.assertNotIn("shhh", out)
-        self.assertIn("prod", out)
-
     def test_json_path_single_auth_hint_on_failing_exit(self):
-        # G4b (single emission): run() must NOT print a hint of its own when
-        # it delegates to _run_json_path — only the json path does, once.
+        # G4b (single emission): one hint for JSON stdout on a failing exit.
         result = subprocess.CompletedProcess(
             ["tool", "get"], 1, '{"name": "ok"}',
             "ERROR: 401 Unauthorized — not logged in\n",
@@ -215,9 +204,7 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
 
     def test_session_hints_error_fails_open_on_all_paths(self):
         # G6: a raising _session_hints must not distort output/exit on the
-        # runner paths (run, errors, digest, compacted). The run sample uses
-        # non-JSON stdout so run() reaches its own linear hint point (the
-        # JSON sample would delegate to _run_json_path and skip it).
+        # runner paths (run, errors, digest, compacted).
         sample = subprocess.CompletedProcess(
             ["tool", "get"], 1, 'plain output\n',
             "ERROR: 401 Unauthorized — not logged in\n",
@@ -229,7 +216,8 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
         with mock.patch("actx_lib.runner._session_hints", side_effect=broken):
             rc, out, err = self._run(sample)
             self.assertEqual(rc, 1)
-            self.assertEqual(out, "")  # failing exit: stderr-only output
+            # TK-61 C2: stdout survives a failing exit (was: stderr only).
+            self.assertEqual(out, "plain output\n")
             self.assertNotIn("[actx] hint:", err)
             self.assertIn("[exit: 1]", err)
 
@@ -256,27 +244,6 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
                 self.assertEqual(rc_c, 1)
                 self.assertNotIn("[actx] hint:", err_c.getvalue())
                 self.assertIn("plain output", out_c.getvalue())
-
-    def test_compactor_failure_falls_back_to_line_path(self):
-        result = subprocess.CompletedProcess(["tool", "get"], 0, MULTILINE_JSON, "")
-        rc, out, err = self._run_with_patch(
-            result,
-            "actx_lib.filters.json_compactor.compact_json",
-            side_effect=RuntimeError("boom"),
-        )
-        self.assertEqual(rc, 0)
-        self.assertIn(MASKED_SECRET, out)
-        self.assertNotIn("shhh", out)
-        self.assertIn("prod", out)
-
-    def _run_with_patch(self, result, target, side_effect):
-        out = io.StringIO()
-        err = io.StringIO()
-        with mock.patch("actx_lib.runner.subprocess.run", return_value=result):
-            with mock.patch(target, side_effect=side_effect):
-                with redirect_stdout(out), redirect_stderr(err):
-                    rc = runner.run(["tool", "get"], CONFIG)
-        return rc, out.getvalue(), err.getvalue()
 
     def test_tracking_records_raw_and_emitted_bytes(self):
         clean = (

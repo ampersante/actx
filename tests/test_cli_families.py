@@ -932,9 +932,11 @@ class _ShimTestCase(unittest.TestCase):
 class CloudShimE2ETests(_ShimTestCase):
     """DoD observable runs on shim executables (tmp PATH injection)."""
 
-    # -- DoD: `actx railway status` (JSON shim) -> compact ----------------
+    # -- `actx railway status` (JSON shim) -> every member, raw bytes -----
+    # TK-61: JSON auto-compaction is gone; valid JSON is printed as its
+    # masked raw text (was: arrays cut to head/tail with "items omitted").
 
-    def test_railway_status_compacts_json_output(self):
+    def test_railway_status_json_output_whole(self):
         payload = json.dumps(
             {"service": "web", "env": "production",
              "items": [{"id": i} for i in range(60)]}
@@ -942,17 +944,14 @@ class CloudShimE2ETests(_ShimTestCase):
         self.install_shim("railway", "import sys\nprint(%r)\n" % payload)
         p = self.run_actx(["railway", "status"])
         self.assertEqual(p.returncode, 0, p.stderr)
-        obj = json.loads(p.stdout)
-        self.assertEqual(obj["service"], "web")
-        self.assertIn("items omitted", p.stdout)
+        self.assertEqual(p.stdout, payload + "\n")
 
-    def test_gcloud_projects_list_compacts(self):
+    def test_gcloud_projects_list_json_whole(self):
         payload = json.dumps([{"projectId": "p%02d" % i} for i in range(40)])
         self.install_shim("gcloud", "import sys\nprint(%r)\n" % payload)
         p = self.run_actx(["gcloud", "projects", "list"])
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("items omitted", p.stdout)
-        self.assertEqual(json.loads(p.stdout)[0], {"projectId": "p00"})
+        self.assertEqual(p.stdout, payload + "\n")
 
     # -- DoD: `actx railway logs -f` (sleeping shim) -> exit 125 fast -----
 
@@ -1154,8 +1153,10 @@ class CustomHeadsTests(_ShimTestCase):
         self.install_shim("mytool", JSON_ARRAY_SHIM)
         p = self.run_actx(["mytool", "get"])
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("items omitted", p.stdout)
-        self.assertEqual(json.loads(p.stdout)[0], {"id": 0})
+        # runner.run path: JSON printed whole as raw text (TK-61).
+        self.assertEqual(
+            p.stdout, json.dumps([{"id": i} for i in range(60)]) + "\n"
+        )
 
     def test_precedence_registry_over_custom_heads(self):
         # `ls` is a REGISTRY head: declaring it custom changes nothing. The

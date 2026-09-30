@@ -265,13 +265,13 @@ class SqlCliShimE2ETests(_ShimTestCase):
 
 
 class BqShimE2ETests(_ShimTestCase):
-    def test_json_ls_compacts(self):
+    def test_json_ls_printed_whole(self):
+        # TK-61 C2: every member, original bytes (was: "items omitted").
         payload = json.dumps([{"tableId": "t%02d" % i} for i in range(60)])
         self.install_shim("bq", output=payload)
         p = self.run_actx(["bq", "--format=json", "ls", "mydataset"])
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("items omitted", p.stdout)
-        self.assertEqual(json.loads(p.stdout)[0], {"tableId": "t00"})
+        self.assertEqual(p.stdout, payload + "\n")
 
     def test_query_dry_run_compacts_text(self):
         output = "Query successfully validated. Assuming the tables are not modified, running this query will process 123 bytes of data.\n"

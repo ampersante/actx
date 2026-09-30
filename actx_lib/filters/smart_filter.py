@@ -159,10 +159,8 @@ def run(args, config):
     if result is None:
         return 1
     if result.returncode != 0:
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-        if runner.tee_decision(config, "auto", result.returncode):
-            runner.write_tee(cmd, result, config)
+        # stdout survives a failing exit (TK-61), then stderr.
+        runner.print_lossless_stdout(cmd, result, config)
         return result.returncode
 
     try:

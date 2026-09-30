@@ -10,9 +10,7 @@ from actx_lib import hang_policy, redaction, tracking, user_filter
 
 _STREAM_LIMIT = 10 * 1024 * 1024
 
-# Auto-detect JSON output on the generic run() path only below this stdout
-# size; larger output stays on the line-based path (PRD.md 12 budget).
-JSON_AUTO_LIMIT = 2 * 1024 * 1024
+_TEE_DIR = "~/.local/share/actx/tee"
 
 # actx-internal refusal (streaming/interactive command).
 NEVER_WRAP_EXIT_CODE = 125
@@ -194,8 +192,11 @@ def _lossless_transform(text):
     return _collapse_lines(_strip_ansi(text))
 
 
-def _cap_lines_explicit(text, max_lines, max_line_chars):
-    """Head+tail with an explicit count marker when the cap is exceeded."""
+def _cap_lines_explicit(text, max_lines, max_line_chars, tee_path=None):
+    """Head+tail with an explicit count marker when the cap is exceeded.
+
+    tee_path (the forced tee of the uncut output) is named in the marker.
+    """
     if not text:
         return text
     lines = text.split("\n")
@@ -211,7 +212,12 @@ def _cap_lines_explicit(text, max_lines, max_line_chars):
     head = lines[:head_count]
     tail = lines[-tail_count:]
     omitted = len(lines) - max_lines
-    marker = "...[truncated: %d lines omitted — сузьте команду]" % omitted
+    if tee_path:
+        marker = "...[truncated: %d lines omitted — full output: %s]" % (
+            omitted, tee_path,
+        )
+    else:
+        marker = "...[truncated: %d lines omitted — сузьте команду]" % omitted
     return (
         "\n".join(head + [marker] + tail)
         + ("\n" if had_trailing_newline else "")
@@ -229,9 +235,73 @@ def _print_transformed(stdout, stderr):
             sys.stderr.write("\n")
 
 
+def _truncate_limits(config):
+    truncate = config.get("truncate", {})
+    return truncate.get("max_lines", 500), truncate.get("max_line_chars", 300)
+
+
+def _is_json(text):
+    """JSON predicate only (TK-61): valid JSON is printed as its masked raw
+    text — never re-serialised, never capped, so no member is lost."""
+    if not text or not text.strip():
+        return False
+    try:
+        json.loads(text)
+    except (ValueError, RecursionError):
+        return False
+    return True
+
+
+def _lossless_streams(cmd, result, config, streams, cap=True):
+    """The run_lossless form of each (raw, shown) stream pair.
+
+    shown is the masked text to print; raw decides the JSON predicate.
+    Non-JSON text gets ANSI strip + repeat collapse and, with cap, the
+    explicit line/char cap. Any cut (line count or per-line char clip)
+    forces a tee of the whole result regardless of tee.enabled/mode and
+    the marker names its path. Returns (texts, cut, tee_path).
+    """
+    max_lines, max_line_chars = _truncate_limits(config)
+    forms = []
+    for raw, shown in streams:
+        if _is_json(raw):
+            forms.append((shown, False))
+        else:
+            forms.append((_lossless_transform(shown), cap))
+    texts = [
+        _cap_lines_explicit(text, max_lines, max_line_chars) if capped else text
+        for text, capped in forms
+    ]
+    cut = any(text != form for text, (form, _) in zip(texts, forms))
+    path = _tee_file(cmd, result, config) if cut else None
+    if path:
+        texts = [
+            _cap_lines_explicit(form, max_lines, max_line_chars, path)
+            if capped else form
+            for form, capped in forms
+        ]
+    return texts, cut, path
+
+
+def _finish_tee(cmd, result, config, cut, path, tee_policy="auto"):
+    """Print the forced tee path of a cut; otherwise tee per tee_policy.
+
+    A synthetic result (exec failure, refusal, timeout) holds only actx's
+    own message: nothing to recover, no tee.
+    """
+    if getattr(result, "actx_synthetic", False):
+        return
+    if cut:
+        if path:
+            print("[full output: %s]" % path, file=sys.stderr)
+        return
+    if tee_decision(config, tee_policy, result.returncode):
+        write_tee(cmd, result, config)
+
+
 def _write_tee(cmd, stdout, stderr, exit_code, tee_dir):
-    # Second redaction layer: every caller's streams are already masked in
-    # most paths; this covers the rest (e.g. compacted write_tee callers).
+    # The tee's redaction layer: callers pass the raw streams, so the
+    # record's stdout is redact_text(raw stdout) exactly (PRD.md 9 format).
     # A redaction failure here means the raw output must not hit disk —
     # skip the file entirely.
     try:
@@ -376,31 +446,109 @@ def run_passthrough(cmd):
     return result.returncode
 
 
-def run_lossless(cmd, config, strategy="lossless"):
-    """Execute and apply lossless transforms; fail open on any error."""
-    result = execute(cmd)
+def _exec_failure(cmd, exc):
+    """Shell-style (exit code, message) for an exec failure (TK-61).
+
+    One mapping for run_content and run_lossless: a missing program is 127,
+    a program that cannot be executed is 126 — not execute()'s None -> 1.
+    """
+    head = cmd[0] if cmd else ""
+    if isinstance(exc, FileNotFoundError):
+        return 127, "%s: command not found" % head
+    if isinstance(exc, PermissionError):
+        return 126, "%s: Permission denied" % head
+    return 126, "%s: %s" % (head, exc.strerror or exc)
+
+
+def _mask_bytes(data):
+    """redact_text over bytes: surrogateescape keeps every undecodable byte,
+    so unmasked output round-trips byte-identical."""
+    if not data:
+        return data
+    text = data.decode("utf-8", "surrogateescape")
+    return redaction.redact_text(text).encode("utf-8", "surrogateescape")
+
+
+def run_content(cmd, config):
+    """Content class (TK-61): the command's own bytes, secret values masked.
+
+    Bytes mode like run_passthrough; no ANSI strip, collapse, cap,
+    re-serialisation or session hints, so the output is byte-identical to
+    the raw command unless a secret value was masked. Exit code preserved.
+    """
+    try:
+        timeout_class = hang_policy.classify(cmd)
+    except Exception:
+        timeout_class = "default"
+    if timeout_class == "never_wrap":
+        return _refused(cmd, NEVER_WRAP_EXIT_CODE, passthrough=True)
+
+    timeout = _timeout_seconds(config, timeout_class)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        return _timed_out(cmd, timeout, passthrough=True)
+    except OSError as exc:
+        code, message = _exec_failure(cmd, exc)
+        print(message, file=sys.stderr)
+        return code
+    try:
+        stdout = _mask_bytes(result.stdout)
+        stderr = _mask_bytes(result.stderr)
+    except Exception:
+        # Fail open: the agent needs the output (redact_text itself fails
+        # open the same way).
+        stdout, stderr = result.stdout, result.stderr
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if stdout:
+        sys.stdout.buffer.write(stdout)
+        sys.stdout.buffer.flush()
+    if stderr:
+        sys.stderr.buffer.write(stderr)
+        sys.stderr.buffer.flush()
+    tracking.record(
+        cmd, cmd[0],
+        len(result.stdout or b"") + len(result.stderr or b""),
+        len(stdout or b"") + len(stderr or b""),
+        result.returncode, strategy="content",
+        store_text=not _secret_bearing_result(result),
+    )
+    return result.returncode
+
+
+def run_lossless(cmd, config, strategy="lossless", cap=True, stderr=True):
+    """Execute and print the run_lossless form; fail open on any error.
+
+    Form: ANSI strip, repeat collapse with a `  [×N]` count, secret values
+    masked, and with cap=True the explicit line/char cap (a cut forces a
+    tee whose path the marker names); JSON is printed as its masked raw
+    text. cap=False, stderr=True is the log class; stderr=False leaves
+    stderr off the screen (the tee keeps it). An exec failure maps like a
+    shell (127/126).
+    """
+    result = execute(cmd, shell_codes=True)
     if result is None:
         return 1
     try:
-        truncate = config.get("truncate", {})
-        max_lines = truncate.get("max_lines", 500)
-        max_line_chars = truncate.get("max_line_chars", 300)
-        stdout = _cap_lines_explicit(
-            _lossless_transform(result.stdout), max_lines, max_line_chars
-        )
-        stderr = _cap_lines_explicit(
-            _lossless_transform(result.stderr), max_lines, max_line_chars
-        )
-        _print_transformed(stdout, stderr)
+        streams = [(result.stdout or "", redaction.redact_text(result.stdout or ""))]
+        if stderr:
+            raw_err = result.stderr or ""
+            streams.append((raw_err, redaction.redact_text(raw_err)))
+        texts, cut, path = _lossless_streams(cmd, result, config, streams, cap)
+        out_text = texts[0]
+        err_text = texts[1] if stderr else ""
+        _print_transformed(out_text, err_text)
         raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-        emitted = _text_bytes(stdout) + _text_bytes(stderr)
+        emitted = _text_bytes(out_text) + _text_bytes(err_text)
         tracking.record(
             cmd, cmd[0], raw_bytes, emitted, result.returncode,
             strategy=strategy,
             store_text=not _secret_bearing_result(result),
         )
-        if tee_decision(config, "auto", result.returncode):
-            write_tee(cmd, result, config)
+        _finish_tee(cmd, result, config, cut, path)
         try:
             for hint in _session_hints(result):
                 print(hint, file=sys.stderr)
@@ -443,36 +591,6 @@ def run(cmd, config):
     except Exception:
         pass
 
-    # Valid JSON output is compacted as a whole from the raw stdout; the
-    # compactor masks secret values in its dump (valid JSON stays valid).
-    # None / error -> normal line-based path below.
-    json_path = False
-    try:
-        stdout = result.stdout or ""
-        if (
-            stdout
-            and len(stdout) <= JSON_AUTO_LIMIT
-            and stdout.lstrip()[:1] in ("{", "[")
-        ):
-            from actx_lib.filters import json_compactor
-
-            json_out = json_compactor.compact_json(
-                stdout, indent=2, max_items=20
-            )
-            if json_out is not None:
-                json_path = True
-    except Exception:
-        json_path = False
-    if json_path:
-        try:
-            return _run_json_path(cmd, result, config, json_out)
-        except Exception:
-            pass
-
-    truncate = config.get("truncate", {})
-    max_lines = truncate.get("max_lines", 500)
-    max_line_chars = truncate.get("max_line_chars", 300)
-
     # Fail-open contract: if redaction fails, print RAW output (the agent
     # needs it), write no tee file and keep the command out of history.
     masked = _redact_result(result)
@@ -494,66 +612,35 @@ def run(cmd, config):
         except Exception:
             return raw_fallback(result)
 
-    stdout_compacted = _cap_lines_explicit(
-        _lossless_transform(raw_stdout), max_lines, max_line_chars
-    )
-    stderr_compacted = _cap_lines_explicit(
-        _lossless_transform(masked.stderr), max_lines, max_line_chars
-    )
+    # stdout survives any exit code in the run_lossless form (JSON: masked
+    # raw text); stderr is capped on success and whole on failure.
+    ok = result.returncode == 0
+    streams = [(result.stdout or "", raw_stdout or "")]
+    if ok:
+        streams.append((result.stderr or "", masked.stderr or ""))
+    texts, cut, path = _lossless_streams(cmd, result, config, streams)
+    stdout_out = texts[0]
+    stderr_out = texts[1] if ok else (masked.stderr or "")
 
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-    if result.returncode == 0:
-        if stdout_compacted:
-            print(stdout_compacted, end="")
-        if stderr_compacted:
-            print(stderr_compacted, end="", file=sys.stderr)
-        if stdout_compacted and not stdout_compacted.endswith("\n"):
-            print()
-        if stderr_compacted and not stderr_compacted.endswith("\n"):
-            print(file=sys.stderr)
-        emitted = _text_bytes(stdout_compacted) + _text_bytes(stderr_compacted)
-        emitted += (
-            1 if stdout_compacted and not stdout_compacted.endswith("\n") else 0
-        )
-        emitted += (
-            1 if stderr_compacted and not stderr_compacted.endswith("\n") else 0
-        )
-    else:
-        if masked.stderr:
-            print(masked.stderr, end="", file=sys.stderr)
-            if not masked.stderr.endswith("\n"):
-                print(file=sys.stderr)
+    emitted = 0
+    for text, stream in ((stdout_out, sys.stdout), (stderr_out, sys.stderr)):
+        if text:
+            print(text, end="", file=stream)
+            emitted += _text_bytes(text)
+            if not text.endswith("\n"):
+                print(file=stream)
+                emitted += 1
+    if not ok:
         print("[exit: %d]" % result.returncode, file=sys.stderr)
-        emitted = _text_bytes(masked.stderr)
-        emitted += 1 if masked.stderr and not masked.stderr.endswith("\n") else 0
         emitted += _text_bytes("[exit: %d]\n" % result.returncode)
 
     tracking.record(
         cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="generic",
         store_text=not _secret_bearing_result(result),
     )
+    _finish_tee(cmd, result, config, cut, path)
 
-    tee_config = config.get("tee", {})
-    should_tee = bool(tee_config.get("enabled")) and (
-        tee_config.get("mode") == "always"
-        or (tee_config.get("mode") == "failures" and result.returncode != 0)
-    )
-    if should_tee and raw_bytes < _tee_min_bytes(config):
-        should_tee = False
-
-    if should_tee:
-        path = _write_tee(
-            cmd,
-            masked.stdout,
-            masked.stderr,
-            result.returncode,
-            tee_config.get("dir", "~/.local/share/actx/tee"),
-        )
-        if path:
-            print("[full output: %s]" % path, file=sys.stderr)
-
-    # TK-47 single-emission rule: linear tail only — the json_path branch
-    # above prints its own hint inside _run_json_path.
     try:
         for hint in _session_hints(result):
             print(hint, file=sys.stderr)
@@ -562,72 +649,12 @@ def run(cmd, config):
     return result.returncode
 
 
-def _run_json_path(cmd, result, config, json_out):
-    """Compact-JSON replacement for run()'s line-based stdout pipeline.
+def execute(cmd, shell_codes=False):
+    """Execute an exec-array, returning CompletedProcess or None on OSError.
 
-    json_out is the compacted dump (already secret-masked). stderr and exit
-    code handling mirror the line path; user_filter applies to the dump as it
-    does to raw stdout. Raises propagate: run() fails open to the line path.
+    shell_codes=True maps an exec failure like a shell instead
+    (_exec_failure: 127/126) and returns it as a synthetic result.
     """
-    rules = user_filter.load()
-    if rules is None:
-        rules = []
-    if rules and result.returncode == 0:
-        json_out = user_filter.apply(rules, cmd[0], json_out)
-    if json_out:
-        print(json_out, end="")
-        if not json_out.endswith("\n"):
-            print()
-
-    stderr = ""
-    if result.stderr:
-        stderr = redaction.redact_text(result.stderr)
-        if stderr:
-            print(stderr, end="", file=sys.stderr)
-            if not stderr.endswith("\n"):
-                print(file=sys.stderr)
-    if result.returncode != 0:
-        print("[exit: %d]" % result.returncode, file=sys.stderr)
-
-    emitted = _text_bytes(json_out)
-    emitted += 1 if json_out and not json_out.endswith("\n") else 0
-    emitted += _text_bytes(stderr)
-    emitted += 1 if stderr and not stderr.endswith("\n") else 0
-    if result.returncode != 0:
-        emitted += _text_bytes("[exit: %d]\n" % result.returncode)
-    raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-    tracking.record(
-        cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="generic",
-        store_text=not _secret_bearing_result(result),
-    )
-
-    tee_config = config.get("tee", {})
-    should_tee = bool(tee_config.get("enabled")) and (
-        tee_config.get("mode") == "always"
-        or (tee_config.get("mode") == "failures" and result.returncode != 0)
-    )
-    if should_tee and raw_bytes < _tee_min_bytes(config):
-        should_tee = False
-    if should_tee:
-        path = _write_tee(
-            cmd,
-            json_out,
-            stderr,
-            result.returncode,
-            tee_config.get("dir", "~/.local/share/actx/tee"),
-        )
-        if path:
-            print("[full output: %s]" % path, file=sys.stderr)
-    try:
-        for hint in _session_hints(result):
-            print(hint, file=sys.stderr)
-    except Exception:
-        pass
-    return result.returncode
-
-
-def execute(cmd):
-    """Execute an exec-array, returning CompletedProcess or None on OSError."""
     try:
         timeout_class = hang_policy.classify(cmd)
     except Exception:
@@ -649,6 +676,9 @@ def execute(cmd):
     except subprocess.TimeoutExpired:
         return _synthetic_result(cmd, TIMEOUT_EXIT_CODE, _timed_out_message(cmd, timeout))
     except OSError as exc:
+        if shell_codes:
+            code, message = _exec_failure(cmd, exc)
+            return _synthetic_result(cmd, code, message)
         print(str(exc), file=sys.stderr)
         return None
 
@@ -681,29 +711,97 @@ def tee_decision(config, tee_policy, returncode, grep_no_match=False):
     return False
 
 
+def _tee_file(cmd, result, config):
+    """Write the tee record of the raw result; the path, or None.
+
+    No policy check here (forced tees call it directly). A write failure
+    prints one stderr warning and never raises, so no caller falls back to
+    printing its output a second time.
+    """
+    tee = config.get("tee", {})
+    try:
+        return _write_tee(
+            cmd,
+            result.stdout or "",
+            result.stderr or "",
+            result.returncode,
+            tee.get("dir", _TEE_DIR),
+        )
+    except Exception as exc:
+        print("[actx] tee write failed: %s" % exc, file=sys.stderr)
+        return None
+
+
 def write_tee(cmd, result, config):
     if _text_bytes(result.stdout) + _text_bytes(result.stderr) < _tee_min_bytes(config):
         return None
-    tee = config.get("tee", {})
-    path = _write_tee(
-        cmd,
-        result.stdout,
-        result.stderr,
-        result.returncode,
-        tee.get("dir", "~/.local/share/actx/tee"),
-    )
-    print("[full output: %s]" % path, file=sys.stderr)
+    path = _tee_file(cmd, result, config)
+    if path:
+        print("[full output: %s]" % path, file=sys.stderr)
     return path
 
 
-def compacted_result(cmd, result, config, compact_fn, tee_policy="auto", strategy="compact"):
-    """Compact stdout for any exit code; fall back to raw output on error."""
+def tee_listing(cmd, raw, shown, config):
+    """Print a listing summary that omits entries, then the path of a
+    forced tee holding the full raw result (TK-61), regardless of
+    tee.enabled/mode/min_bytes. Returns the path, or None."""
+    print(shown)
+    path = _tee_file(cmd, raw, config)
+    if path:
+        print("[full output: %s]" % path, file=sys.stderr)
+    return path
+
+
+def print_lossless_stdout(cmd, result, config, tee_policy="auto"):
+    """stdout in the run_lossless form (a cap cut forces a tee and names
+    its path), then the masked stderr; without a cut, tee per tee_policy.
+
+    Summary paths use it where their compactor would print nothing: a
+    non-zero exit (stdout survives, TK-61) or an empty compactor result.
+    Returns the stdout text printed.
+    """
+    raw = result.stdout or ""
+    try:
+        texts, cut, path = _lossless_streams(
+            cmd, result, config, [(raw, redaction.redact_text(raw))]
+        )
+        stdout = texts[0]
+        stderr = redaction.redact_text(result.stderr or "")
+    except Exception:
+        raw_fallback(result)
+        return raw
+    if stdout:
+        print(stdout, end="")
+        if not stdout.endswith("\n"):
+            print()
+    if stderr:
+        print(stderr, end="", file=sys.stderr)
+    _finish_tee(cmd, result, config, cut, path, tee_policy)
+    return stdout
+
+
+def compacted_result(cmd, result, config, compact_fn, tee_policy="auto",
+                     strategy="compact", never_empty=True):
+    """Compact stdout for any exit code; fall back to raw output on error.
+
+    Never empty (TK-61): when the compactor yields only whitespace while raw
+    stdout is not empty, the run_lossless form of stdout is printed instead.
+    never_empty=False is the user-chosen `actx run --failures` mode, where
+    an empty result is the answer (green run -> silent).
+    """
     if result is None:
         return 1
     try:
         out = compact_fn(result)
         if out is None:
             return raw_fallback(result)
+        cut, path = False, None
+        if never_empty and not out.strip() and (result.stdout or "").strip():
+            raw = result.stdout
+            texts, cut, path = _lossless_streams(
+                cmd, result, config, [(raw, redaction.redact_text(raw))]
+            )
+            out = texts[0]
         rules = user_filter.load()
         if rules is None:
             rules = []
@@ -719,8 +817,7 @@ def compacted_result(cmd, result, config, compact_fn, tee_policy="auto", strateg
             cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy=strategy,
             store_text=not _secret_bearing_result(result),
         )
-        if tee_decision(config, tee_policy, result.returncode):
-            write_tee(cmd, result, config)
+        _finish_tee(cmd, result, config, cut, path, tee_policy)
         try:
             for hint in _session_hints(result):
                 print(hint, file=sys.stderr)

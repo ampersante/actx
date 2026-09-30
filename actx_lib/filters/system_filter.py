@@ -1,5 +1,4 @@
 import os
-import sys
 
 from actx_lib import runner
 
@@ -67,6 +66,7 @@ def run_ls(args, config):
         files.sort()
 
         display = path.rstrip("/")
+        remaining = 0
         if config.get("ultra_compact"):
             if len(entries) <= 30:
                 shown = dirs + files
@@ -87,8 +87,15 @@ def run_ls(args, config):
                 out.extend("  " + entry for entry in shown_dirs + shown_files)
                 remaining = len(entries) - len(shown_dirs) - len(shown_files)
                 out.append("  ... (%d more)" % remaining)
-        print("\n".join(out))
-        runner.record_compacted(cmd, result, "\n".join(out), "ls")
+        text = "\n".join(out)
+        extra = 0
+        if remaining:
+            # Entries omitted: the full listing stays recoverable (TK-61).
+            tee_path = runner.tee_listing(cmd, result, text, config)
+            extra = len("[full output: %s]\n" % tee_path) if tee_path else 0
+        else:
+            print(text)
+        runner.record_compacted(cmd, result, text, "ls", extra_bytes=extra)
         return 0
     except Exception:
         return runner.raw_fallback(result)
@@ -158,10 +165,8 @@ def run_find(args, config):
     if result is None:
         return 1
     if result.returncode != 0:
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-        if runner.tee_decision(config, "auto", result.returncode):
-            runner.write_tee(cmd, result, config)
+        # Partial results survive a failing exit (TK-61).
+        runner.print_lossless_stdout(cmd, result, config)
         return result.returncode
     if len(result.stdout) <= 200:
         runner.print_raw(result)
@@ -178,17 +183,25 @@ def run_find(args, config):
 
         total_dirs = len(dirs)
         out = []
+        omitted = total_dirs > 200
         for dirname, names in list(dirs.items())[:200]:
             names = sorted(set(names))
             out.append("%s (%d):" % (dirname, len(names)))
             out.extend("  " + name for name in names[:10])
             if len(names) > 10:
                 out.append("  ... (%d more)" % (len(names) - 10))
+                omitted = True
         if total_dirs > 200:
             out.append("... (%d more dirs)" % (total_dirs - 200))
-        if out:
-            print("\n".join(out))
-        runner.record_compacted(cmd, result, "\n".join(out), "find")
+        text = "\n".join(out)
+        extra = 0
+        if omitted:
+            # Entries omitted: the full listing stays recoverable (TK-61).
+            tee_path = runner.tee_listing(cmd, result, text, config)
+            extra = len("[full output: %s]\n" % tee_path) if tee_path else 0
+        elif out:
+            print(text)
+        runner.record_compacted(cmd, result, text, "find", extra_bytes=extra)
         return 0
     except Exception:
         return runner.raw_fallback(result)

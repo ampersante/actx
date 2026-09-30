@@ -1,5 +1,3 @@
-import sys
-
 from actx_lib import runner
 from actx_lib.rewriter import BRANCH_READ_ONLY
 
@@ -21,10 +19,8 @@ def _clip(text, limit):
 
 
 def _failure(cmd, result, config, tee_policy="auto"):
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
-    if runner.tee_decision(config, tee_policy, result.returncode):
-        runner.write_tee(cmd, result, config)
+    # stdout survives a failing exit (TK-61), then stderr.
+    runner.print_lossless_stdout(cmd, result, config, tee_policy)
     return result.returncode
 
 
@@ -84,9 +80,15 @@ def _status(rest, config):
                 out.extend("  " + path for path in paths[:200])
                 if len(paths) > 200:
                     out.append("  ... (%d more)" % (len(paths) - 200))
-        if out:
-            print("\n".join(out))
-        runner.record_compacted(cmd, result, "\n".join(out), "git.status")
+        text = "\n".join(out)
+        extra = 0
+        if any(len(paths) > 200 for _, paths in groups):
+            # Paths omitted: the full porcelain stays recoverable (TK-61).
+            tee_path = runner.tee_listing(cmd, result, text, config)
+            extra = len("[full output: %s]\n" % tee_path) if tee_path else 0
+        elif out:
+            print(text)
+        runner.record_compacted(cmd, result, text, "git.status", extra_bytes=extra)
         return 0
     except Exception:
         return runner.raw_fallback(result)

@@ -159,7 +159,12 @@ def _run_tool(tool, cmd, config, failures_only=False):
         parts.append(_counter(data["failed"], data["passed"]))
         return "\n".join(parts)
 
-    return runner.compacted_result(cmd, result, config, compact_fn, strategy="test")
+    # --failures: an empty result is the mode's answer (green run -> silent),
+    # the one exception to compacted_result's never-empty guard (TK-61).
+    return runner.compacted_result(
+        cmd, result, config, compact_fn, strategy="test",
+        never_empty=not failures_only,
+    )
 
 
 def run_pytest(args, config):
