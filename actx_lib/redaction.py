@@ -11,7 +11,11 @@ Value forms (spans):
 1. Quoted key, JSON-style (`"k": v`, `'k': v`, escaped `\\"k\\":\\"v\\"`):
    a string -> its content; a number/true/false/null -> `"‹masked›"`; an
    object/array -> the whole container (bracket scan) -> `"‹masked›"`;
-   any other unquoted value -> the run up to whitespace or `, ) ] }`.
+   any other unquoted value -> the run up to whitespace, `, ) ] }` or a
+   quote (the enclosing string's end). `"‹masked›"` is quoted at the key's
+   level: `\\"‹masked›\\"` for an escaped key, `'‹masked›'` for a '...' key
+   inside an open "..." string, so a valid JSON document stays valid.
+   Unquoted runs keep a backslash pair as one unit.
 2. Unquoted key, quoted value (`k = "v"`, `k: 'v'`, `--k "v"`) -> content.
 3. Unquoted key, `=`, unquoted value -> the run up to whitespace or
    `; , & ) ] } " '`; a value starting with `{`/`[` takes the bracket scan
@@ -205,7 +209,7 @@ _QUOTED_KEY_MAX = 128
 _HSPACE = " \t"
 _TRAILING_SPACE = " \t\r"
 _FORM3_STOP = frozenset(" \t\r\n\f\v;,&)]}\"'")
-_FORM1_STOP = frozenset(" \t\r\n\f\v,)]}")
+_FORM1_STOP = frozenset(" \t\r\n\f\v,)]}\"'")
 _FLAG_STOP = frozenset(" \t\r\n\f\v\"'")
 
 
@@ -334,15 +338,22 @@ def _bracket_end(text, i, escaped):
 
 
 def _run_end(text, i, stop, stop_escaped_quote):
+    """End of an unquoted value run. With stop_escaped_quote a backslash
+    pair is one unit (`\\\\` stays inside the value, so the string's own
+    closing quote is never turned into an escaped one); `\\"`, `\\'`, a
+    trailing backslash and a backslash before a line break end the run."""
     n = len(text)
     while i < n:
         ch = text[i]
         if ch in stop:
             break
-        if stop_escaped_quote and ch == "\\" and text[i + 1:i + 2] in ("\"", "'"):
-            break
+        if stop_escaped_quote and ch == "\\":
+            if text[i + 1:i + 2] in ("", "\"", "'", "\r", "\n"):
+                break
+            i += 2
+            continue
         i += 1
-    return i
+    return min(i, n)
 
 
 def _in_open_string(text, line_start, pos):
@@ -374,19 +385,28 @@ def _quoted_value(text, v):
         close = _string_end(text, start, text[v], True)
     else:
         return None
-    end = close if close is not None else _rstrip_end(text, start, _eol(text, start))
+    if close is not None:
+        end = close
+    else:
+        end = _eol(text, start)
+        # unclosed '...' inside an open "..." string: stop at that string's end
+        if text[v] == "'" and _in_open_string(text, text.rfind("\n", 0, v) + 1, v):
+            outer = _string_end(text, start, '"', True)
+            if outer is not None and outer < end:
+                end = outer
+        end = _rstrip_end(text, start, end)
     return (start, end, MASK) if end > start else ()
 
 
-def _form1_value(text, v, escaped):
-    """Value after a quoted key (JSON-style)."""
+def _form1_value(text, v, qmask, escaped):
+    """Value after a quoted key (JSON-style); qmask replaces literals and
+    containers, quoted at the key's level."""
     quoted = _quoted_value(text, v)
     if quoted is not None:
         return quoted or None
-    qmask = '\\"%s\\"' % MASK if escaped else '"%s"' % MASK
     if text[v] in "{[":
         return (v, _bracket_end(text, v, escaped), qmask)
-    end = _run_end(text, v, _FORM1_STOP, False)
+    end = _run_end(text, v, _FORM1_STOP, True)
     if end == v:
         return None
     literal = _JSON_LITERAL_RE.fullmatch(text, v, end) is not None
@@ -460,7 +480,13 @@ def _quoted_key_span(text, hs, he):
     v = _skip_hspace(text, sep_end)
     if v >= len(text) or text[v] in "\r\n":
         return None
-    return _form1_value(text, v, escaped)
+    if escaped:
+        qmask = '\\"%s\\"' % MASK
+    elif quote == "'" and _in_open_string(text, text.rfind("\n", 0, i) + 1, i - 1):
+        qmask = "'%s'" % MASK  # a raw `"` would end the enclosing string
+    else:
+        qmask = '"%s"' % MASK
+    return _form1_value(text, v, qmask, escaped)
 
 
 def _unquoted_key_span(text, s, e):

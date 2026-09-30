@@ -169,6 +169,18 @@ POSITIVE_ROWS = (
     ("passwd=x", "passwd=%s" % M),
     # a key inside a JSON string value keeps the document valid
     ('{"msg": "password: x y", "a": 1}', '{"msg": "password: %s", "a": 1}' % M),
+    # an unquoted value that ends the enclosing JSON string: the span stops
+    # at the string's closing quote; literals follow the key's quoting level
+    ('{"a":"x \\"password\\": y"}', '{"a":"x \\"password\\": %s"}' % M),
+    ('{"a":"x \\"password\\": 12"}', '{"a":"x \\"password\\": %s"}' % EQM),
+    ('{"a":"x \\"password\\": y z"}', '{"a":"x \\"password\\": %s z"}' % M),
+    (json.dumps({"a": 'x "password": y\\'}), '{"a": "x \\"password\\": %s"}' % M),
+    ('{"a": "x \'password\': y"}', '{"a": "x \'password\': %s"}' % M),
+    ('{"a": "x \'password\': 12"}', "{\"a\": \"x 'password': '%s'\"}" % M),
+    ('{"a": "x \'password\': {\'u\': 1}"}', "{\"a\": \"x 'password': '%s'\"}" % M),
+    ('{"a": "--password y\\\\"}', '{"a": "--password %s"}' % M),
+    ('{"a": "password=\'abc"}', '{"a": "password=\'%s"}' % M),
+    ('{"a": "password=y\\\\"}', '{"a": "password=%s"}' % M),
     # known token formats
     ("using ghp_" + "a1B2c3D4e5" * 3 + "a1B2c3 now", "using %s now" % M),
     ("key sk-ant-api03-abcdefghij0123456789 end", "key %s end" % M),
@@ -458,6 +470,43 @@ class GeneratedDifferentialTests(unittest.TestCase):
                     if line.startswith("{"):
                         self.assertTrue(_parses(line))
                         self.assertTrue(_parses(out))
+
+
+# Unquoted values under quoted keys, placed last before a closing quote.
+EMBED_EXTRA_FORMS = (
+    '"{k}": %s' % V,
+    '"{k}": 123',
+    '"{k}": true',
+    "'{k}': %s" % V,
+    "'{k}': 123",
+    "'{k}': {{'n': '%s'}}" % V,
+)
+
+
+class JsonStringEmbeddingSweepTests(unittest.TestCase):
+    """Every differential form (and unquoted values under quoted keys),
+    embedded in a JSON string value via json.dumps as the last token
+    before the string's closing quote: the result parses, V is gone."""
+
+    def test_embedded_forms_keep_json_valid(self):
+        keys = [k for k in generated_keys() if plan_is_secret(k)]
+        templates = [t for t, _oracle in DIFF_FORMS] + list(EMBED_EXTRA_FORMS)
+        checked = 0
+        for key in keys:
+            for template in templates:
+                line = template.format(k=key)
+                for doc in (
+                    json.dumps({"s": line}),
+                    json.dumps({"s": "pre " + line, "t": [1]}),
+                    json.dumps([line + "\\"]),
+                ):
+                    out = redaction.redact_text(doc)
+                    checked += 1
+                    with self.subTest(doc=doc):
+                        self.assertTrue(_parses(out), out)
+                        for value in (V, V2):
+                            self.assertNotIn(value, out)
+        self.assertGreater(checked, 10000)
 
 
 class ExclusionRuleTests(unittest.TestCase):
