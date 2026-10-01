@@ -276,6 +276,28 @@ class InitTests(unittest.TestCase):
             self.assertIn("Prefer compact flags", content)
             self.assertIn("Package manager discipline:", content)
 
+    def test_raw_sentence_says_values_are_masked(self):
+        # TK-61 review finding 8 (PRD 6.3 text): --raw masks secret values;
+        # an installed section with the old sentence is replaced in place.
+        new = (
+            "For full output, run without `actx`; `actx --raw <command>` "
+            "prints the raw output with secret values masked."
+        )
+        old = "For full output, run without `actx` or use `actx --raw <command>`."
+        self.assertIn(new, INSTRUCTION_SECTION)
+        self.assertNotIn(old, INSTRUCTION_SECTION)
+        previous = INSTRUCTION_SECTION.replace(new, old)
+        with tempfile.TemporaryDirectory() as home:
+            rules = os.path.join(home, ".grok", "rules", "actx.md")
+            os.makedirs(os.path.dirname(rules), exist_ok=True)
+            with open(rules, "w", encoding="utf-8") as handle:
+                handle.write("Other rules\n\n" + previous)
+            p = self.run_actx(["init", "--agent", "grok"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            with open(rules, encoding="utf-8") as handle:
+                content = handle.read()
+        self.assertEqual(content, "Other rules\n\n" + INSTRUCTION_SECTION + "\n")
+
     def test_tier2_section_matches_conventions_render(self):
         # REQ-01: the section renders from the single conventions source.
         from actx_lib import conventions

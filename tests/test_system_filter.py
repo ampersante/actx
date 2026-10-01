@@ -1,10 +1,13 @@
 import os
+import re
 import subprocess
 import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACTX = os.path.join(ROOT, "actx")
+# ECMA-48 CSI sequences (SGR colour and the rest).
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class SystemFilterTests(unittest.TestCase):
@@ -16,8 +19,8 @@ class SystemFilterTests(unittest.TestCase):
         self.home.cleanup()
         self.work.cleanup()
 
-    def run_actx(self, *args):
-        env = os.environ.copy()
+    def run_actx(self, *args, env=None):
+        env = dict(os.environ if env is None else env)
         env["HOME"] = self.home.name
         return subprocess.run(
             [ACTX] + list(args),
@@ -27,12 +30,13 @@ class SystemFilterTests(unittest.TestCase):
             env=env,
         )
 
-    def run_raw(self, *args):
+    def run_raw(self, *args, env=None):
         return subprocess.run(
             list(args),
             capture_output=True,
             text=True,
             cwd=self.work.name,
+            env=env,
         )
 
     def _write(self, name, content):
@@ -57,11 +61,18 @@ class SystemFilterTests(unittest.TestCase):
         self.assertEqual(p.stdout, "a.txt\n")
 
     def test_ls_flags_passthrough(self):
+        # Listing is the summary class: ANSI colour is stripped, every other
+        # byte kept. The oracle is the ANSI-stripped raw output, checked both
+        # in the inherited environment and with BSD ls colour forced (the
+        # environment-dependent failure of the old byte-equal assertion).
         self._write("a.txt", "a")
-        raw = self.run_raw("ls", "-la")
-        p = self.run_actx("ls", "-la")
-        self.assertEqual(p.returncode, raw.returncode)
-        self.assertEqual(p.stdout, raw.stdout)
+        forced = dict(os.environ, CLICOLOR="1", CLICOLOR_FORCE="1")
+        for env in (None, forced):
+            with self.subTest(forced=env is not None):
+                raw = self.run_raw("ls", "-la", env=env)
+                p = self.run_actx("ls", "-la", env=env)
+                self.assertEqual(p.returncode, raw.returncode)
+                self.assertEqual(p.stdout, _ANSI_RE.sub("", raw.stdout))
 
     def test_find_ls_passthrough_verbatim(self):
         self._write("a.txt", "a")

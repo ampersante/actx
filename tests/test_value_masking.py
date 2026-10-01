@@ -412,6 +412,13 @@ DIFF_FORMS = (
     ('{{"{k}": ["%s","%s"]}}' % (V, V2), '{{"{k}": %s}}' % QM),
     ("--{k} %s" % V, "--{k} %s" % M),
     ("export {k}=%s" % V, "export {k}=%s" % M),
+    # review fixes: JSON whitespace (LF, CR, CRLF) around `:` after a quoted
+    # key; string-prefixed literals after `=` and flags
+    ('{{"{k}":\n  "%s"}}' % V, '{{"{k}":\n  "%s"}}' % M),
+    ('{{\r\n"{k}"\r\n:\r\n123}}', '{{\r\n"{k}"\r\n:\r\n%s}}' % QM),
+    ('{{\n "{k}":\n {{"n": "%s"}}\n}}' % V, '{{\n "{k}":\n %s\n}}' % QM),
+    ("{k}=b'%s'" % V, "{k}=b'%s'" % M),
+    ('--{k}=rb"%s"' % V, '--{k}=rb"%s"' % M),
 )
 
 
@@ -480,6 +487,10 @@ EMBED_EXTRA_FORMS = (
     "'{k}': %s" % V,
     "'{k}': 123",
     "'{k}': {{'n': '%s'}}" % V,
+    # review fixes: a line break between `:` and the value
+    '"{k}":\n %s' % V,
+    "'{k}':\n '%s'" % V,
+    "'{k}':\r\n{{'n': '%s'}}" % V,
 )
 
 
@@ -507,6 +518,220 @@ class JsonStringEmbeddingSweepTests(unittest.TestCase):
                         for value in (V, V2):
                             self.assertNotIn(value, out)
         self.assertGreater(checked, 10000)
+
+
+# --- TK-61 review fixes: red on 475301f, green after ------------------------
+
+S = "Hq9xR4"
+LONG_KEY = "password_" + "x" * 128
+LONG_KEY_BACK = "x" * 200 + "_token"
+U_KEY_DOC = '{"\\u0070assword": "%s"}' % S
+SLACK_POSITIVE = (
+    "xoxa-2-1234567890-abcdefghij",
+    "xoxb-1234567890-abcdefghij",
+    "xoxc-1234567890-abcdefghij",
+    "xoxe-1-1234567890-abcdefghij",
+    "xoxp-1234567890-abcdefghij",
+    "xoxr-1234567890-abcdefghij",
+    "xoxs-1234567890-abcdefghij",
+    "xoxe.xoxp-1-1234567890-abcdefghij",
+    "xoxe.xoxb-1-1234567890-abcdefghij",
+)
+SLACK_NEGATIVE = (
+    "xoxo-hugs-and-kisses",
+    "xoxz-1234567890-abcdefghij",
+    "xoxc-short",
+    "xoxe.xoxo-1234567890-abcdefghij",
+    "fooxoxb-1234567890-abcdefghij",
+)
+
+# (input, exact expected output)
+REVIEW_FIX_ROWS = (
+    # 1. JSON whitespace (LF, CR, CRLF) on both sides of `:` after a quoted key
+    ('{"password":\n  "%s"}' % S, '{"password":\n  "%s"}' % M),
+    ('{"password":\r\n"%s"}' % S, '{"password":\r\n"%s"}' % M),
+    ('{"password":\r"%s"}' % S, '{"password":\r"%s"}' % M),
+    ('{\n  "password"\n  : "%s"}' % S, '{\n  "password"\n  : "%s"}' % M),
+    ('{"password"\r\n:\r\n12}', '{"password"\r\n:\r\n%s}' % QM),
+    ('{"password":\n\ttrue}', '{"password":\n\t%s}' % QM),
+    ('{\n  "credentials":\n  {"u": "%s"}\n}' % S, '{\n  "credentials":\n  %s\n}' % QM),
+    ('{\n "tokens":\n [\n  "%s"\n ]\n}' % S, '{\n "tokens":\n %s\n}' % QM),
+    ("{'password':\n '%s'}" % S, "{'password':\n '%s'}" % M),
+    (
+        json.dumps({"s": '{"password":\n "%s"}' % S}),
+        '{"s": "{\\"password\\":\\n \\"%s\\"}"}' % M,
+    ),
+    (
+        json.dumps({"s": '{"password"\r\n: 12}'}),
+        '{"s": "{\\"password\\"\\r\\n: %s}"}' % EQM,
+    ),
+    (
+        json.dumps({"s": "{'password':\n '%s'}" % S}),
+        "{\"s\": \"{'password':\\n '%s'}\"}" % M,
+    ),
+    # the same document printed as a repr (pytest diffs): `\n` escapes
+    (repr('{"password":\n  "%s"}' % S), "'{\"password\":\\n  \"%s\"}'" % M),
+    # 2. no quoted-key length window
+    (json.dumps({LONG_KEY: S}), json.dumps({LONG_KEY: M}, ensure_ascii=False)),
+    (json.dumps({LONG_KEY_BACK: 7}), json.dumps({LONG_KEY_BACK: M}, ensure_ascii=False)),
+    (
+        json.dumps({"s": json.dumps({LONG_KEY: S})}),
+        json.dumps({"s": json.dumps({LONG_KEY: M}, ensure_ascii=False)},
+                   ensure_ascii=False),
+    ),
+    ("{'%s': '%s'}" % (LONG_KEY, S), "{'%s': '%s'}" % (LONG_KEY, M)),
+    # 4. string-prefixed literals: the prefix stays, the quoted content is masked
+    ("password=b'%s'" % S, "password=b'%s'" % M),
+    ("password=u'%s'" % S, "password=u'%s'" % M),
+    ("password=f'%s'" % S, "password=f'%s'" % M),
+    ("password=r'%s'" % S, "password=r'%s'" % M),
+    ('password=b"%s"' % S, 'password=b"%s"' % M),
+    ("password=rb'%s'" % S, "password=rb'%s'" % M),
+    ('password=Rb"%s" user=bob' % S, 'password=Rb"%s" user=bob' % M),
+    ("password = f'%s %s'" % (S, S), "password = f'%s'" % M),
+    ("--password=b'%s' -v" % S, "--password=b'%s' -v" % M),
+    ("--password b'%s'" % S, "--password b'%s'" % M),
+    ("{'password': b'%s'}" % S, "{'password': b'%s'}" % M),
+    ('{"password": rb"%s"}' % S, '{"password": rb"%s"}' % M),
+    # 5. \\uXXXX-escaped key spelling is decoded before the secret-name test
+    (U_KEY_DOC, '{"\\u0070assword": "%s"}' % M),
+    ('{"pass\\u0077ord": 12}', '{"pass\\u0077ord": %s}' % QM),
+    ('{"\\u0050ASSWORD": "%s"}' % S, '{"\\u0050ASSWORD": "%s"}' % M),
+    ('{"password\\u005fx": "%s"}' % S, '{"password\\u005fx": "%s"}' % M),
+    ('{"\\u0074oken": {"a": "%s"}}' % S, '{"\\u0074oken": %s}' % QM),
+    ("{'\\u0070wd': '%s'}" % S, "{'\\u0070wd': '%s'}" % M),
+    (json.dumps({"s": U_KEY_DOC}), '{"s": "{\\"\\\\u0070assword\\": \\"%s\\"}"}' % M),
+    # 6. Slack prefixes; Authorization `token` scheme (GitHub), any case
+    ("t=%s end" % SLACK_POSITIVE[2], "t=%s end" % M),
+    ("Authorization: token %s" % S, "Authorization: token %s" % M),
+    ("AUTHORIZATION: TOKEN %s" % S, "AUTHORIZATION: TOKEN %s" % M),
+    ("-H 'Authorization: Token %s'" % S, "-H 'Authorization: Token %s'" % M),
+    ('{"Authorization": "token %s"}' % S, '{"Authorization": "token %s"}' % M),
+)
+
+# Byte-identical: cross-line `:` is for quoted keys only; form 4 never
+# takes the next line; decoded keys outside the inventory stay.
+REVIEW_FIX_NEGATIVE_ROWS = (
+    "password:\nuser: bob\n",
+    "password:\r\nuser: bob\r\n",
+    "password =\nuser=bob\n",
+    'print("password")\nnext: 1\n',
+    'x = "password"\ny = 1\n',
+    '{"\\u0070ath": "/usr/bin"}',
+    '{"\\u0074okenizer": "gpt2"}',
+    "Authorization: required",
+    # a key ending its enclosing JSON string has no value: the document
+    # stays byte-identical (and valid)
+    json.dumps({"a": 'x "password": ', "b": "y"}),
+    json.dumps({"a": "x 'password': ", "b": "y"}),
+    json.dumps({"a": 'x "password":\n', "b": "y"}),
+) + SLACK_NEGATIVE
+
+
+class ReviewFixRowTests(unittest.TestCase):
+    def test_rows_exact_output(self):
+        for raw, expected in REVIEW_FIX_ROWS:
+            with self.subTest(raw=raw):
+                out = redaction.redact_text(raw)
+                self.assertEqual(out, expected)
+                self.assertNotIn(S, out)
+                self.assertEqual(redaction.redact_text(out), out)
+                if _parses(raw):
+                    self.assertTrue(_parses(out), out)
+
+    def test_json_rows_counted(self):
+        self.assertGreaterEqual(sum(_parses(raw) for raw, _e in REVIEW_FIX_ROWS), 18)
+
+    def test_negative_rows_byte_identical(self):
+        for raw in REVIEW_FIX_NEGATIVE_ROWS:
+            with self.subTest(raw=raw):
+                self.assertEqual(redaction.redact_text(raw), raw)
+
+    def test_slack_prefixes_masked_whole(self):
+        for token in SLACK_POSITIVE:
+            with self.subTest(token=token):
+                self.assertEqual(redaction.redact_text("a %s b" % token), "a %s b" % M)
+
+    def test_each_key_evaluated_once_whatever_its_length(self):
+        # No length window (finding 2) without a quadratic cost: hits inside
+        # one quoted key or one unquoted key run share one evaluation
+        # (counted calls, not wall-clock).
+        from unittest import mock
+
+        cases = (
+            ('{"' + "token " * 2000 + '": 1}', "_quoted_key_span",
+             '{"' + "token " * 2000 + '": %s}' % QM),
+            ("token" * 2000 + "=v", "_unquoted_key_span", "token" * 2000 + "=" + M),
+        )
+        for text, name, expected in cases:
+            real = getattr(redaction, name)
+            with self.subTest(name=name), mock.patch.object(
+                redaction, name, side_effect=real
+            ) as spy:
+                self.assertEqual(redaction.redact_text(text), expected)
+                self.assertEqual(spy.call_count, 1)
+
+    def test_escaped_key_decoder(self):
+        for key, secret in (
+            ("\\u0070assword", True), ("\\\\u0070assword", True),
+            ("\\u0070ath", False), ("pass\\u0057ORD", True),
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(redaction._is_secret_key(redaction._decode_key(key)), secret)
+
+
+class MaskingFailureFallbackTests(unittest.TestCase):
+    """Parent decision (review finding 3): a masking exception never emits
+    raw text - lines carrying an inventory word or a token-format needle are
+    withheld and one marker line is appended."""
+
+    TEXT = (
+        "ok line\n"
+        "password=%s\n"
+        "ACCESS-KEY: x\n"
+        "using ghp_abc now\n"
+        "Authorization: Bearer x\n"
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEow\n"
+        "-----END RSA PRIVATE KEY-----\n"
+        "tail\n" % S
+    )
+
+    def _boom(self, *_a, **_k):
+        raise RuntimeError("boom")
+
+    def test_redact_text_falls_back_to_line_drop(self):
+        from unittest import mock
+
+        with mock.patch.object(redaction, "_mask", self._boom):
+            out = redaction.redact_text(self.TEXT)
+        self.assertEqual(
+            out, "ok line\ntail\n[actx] masking failed; 7 lines withheld\n"
+        )
+
+    def test_no_trailing_newline_and_nothing_withheld(self):
+        from unittest import mock
+
+        with mock.patch.object(redaction, "_mask", self._boom):
+            self.assertEqual(
+                redaction.redact_text("a\nb"),
+                "a\nb\n[actx] masking failed; 0 lines withheld\n",
+            )
+            self.assertEqual(
+                redaction.redact_text("x token=1"),
+                "[actx] masking failed; 1 lines withheld\n",
+            )
+
+    def test_fallback_failure_withholds_everything(self):
+        from unittest import mock
+
+        with mock.patch.object(redaction, "_mask", self._boom), mock.patch.object(
+            redaction, "_withheld_line", self._boom
+        ):
+            self.assertEqual(
+                redaction.redact_text("plain\n"),
+                "[actx] masking failed; all lines withheld\n",
+            )
 
 
 class ExclusionRuleTests(unittest.TestCase):

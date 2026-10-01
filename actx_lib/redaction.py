@@ -5,7 +5,8 @@ A secret is found by data rows: known token formats (`_FORMAT_ROWS`) and
 values that follow a secret-named key (`_SECRET_PATTERNS` + the closed
 exclusions (a)-(d)). Only the value span is replaced by `MASK`; the line,
 the key, quotes and delimiters outside the span stay byte-identical.
-Idempotent: masking masked text changes nothing.
+Idempotent: masking masked text changes nothing. A masking exception
+never yields raw text (withhold_text: line-drop plus a marker line).
 
 Value forms (spans):
 1. Quoted key, JSON-style (`"k": v`, `'k': v`, escaped `\\"k\\":\\"v\\"`):
@@ -15,11 +16,15 @@ Value forms (spans):
    quote (the enclosing string's end). `"‹masked›"` is quoted at the key's
    level: `\\"‹masked›\\"` for an escaped key, `'‹masked›'` for a '...' key
    inside an open "..." string, so a valid JSON document stays valid.
-   Unquoted runs keep a backslash pair as one unit.
+   Unquoted runs keep a backslash pair as one unit. JSON whitespace (LF,
+   CR included) may surround the `:`; the key of any length is tested
+   with its \\uXXXX escapes decoded.
 2. Unquoted key, quoted value (`k = "v"`, `k: 'v'`, `--k "v"`) -> content.
 3. Unquoted key, `=`, unquoted value -> the run up to whitespace or
    `; , & ) ] } " '`; a value starting with `{`/`[` takes the bracket scan
-   first, then continues with that run.
+   first, then continues with that run. A string-prefixed literal
+   (`b'v'`, `rb"v"`; also in forms 1 and 5) -> its quoted content, the
+   prefix stays.
 4. Unquoted key, `:`, unquoted value -> the rest of the line up to
    whitespace + `#`, trailing whitespace excluded (inside an open "..."
    string on the line, up to its closing quote).
@@ -30,6 +35,7 @@ and other multi-line values (only the PEM body is covered).
 """
 
 import functools
+import heapq
 import re
 
 MASK = "‹masked›"
@@ -113,11 +119,12 @@ _FORMAT_ROWS = (
     ),
     (
         "slack",
-        r"\bxox[abprs]-[A-Za-z0-9-]{10,}",
+        r"\bxox(?:[abprsce]|e\.xox[abprsce])-[A-Za-z0-9-]{10,}",
         ("xox",),
         "xoxb-1234567890-abcdefghij",
         "xoxo-hugs-and-kisses",
-        "Slack bot/user/app tokens",
+        "Slack tokens: xoxa/xoxb/xoxp/xoxr/xoxs, client xoxc, refresh xoxe, "
+        "rotating xoxe.xox?-",
     ),
     (
         "stripe",
@@ -170,12 +177,12 @@ _FORMAT_ROWS = (
     ),
     (
         "authorization-header",
-        r"(?i)\bauthorization[\"']?[ \t]*[:=][ \t]*[\"']?(?:bearer|basic)[ \t]+"
+        r"(?i)\bauthorization[\"']?[ \t]*[:=][ \t]*[\"']?(?:bearer|basic|token)[ \t]+"
         r"(?P<v>[^\s\"',;\\]+)",
         ("authorization",),
         "Authorization: Bearer abc.def-123",
         "Authorization: required",
-        "HTTP Authorization header (RFC 9110 11.6.2)",
+        "HTTP Authorization header (RFC 9110 11.6.2); GitHub `token` scheme",
     ),
 )
 
@@ -205,8 +212,18 @@ _JSON_LITERAL_RE = re.compile(
     r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null"
 )
 _COMMENT_RE = re.compile(r"[ \t]#")
-_QUOTED_KEY_MAX = 128
+# A 1-2 letter string prefix (b'', u'', f'', r'', rb'', ...) before a quote.
+_STR_PREFIX_RE = re.compile(r"[bBuUfFrR]{1,2}(?=[\"']|\\\")")
+# \uXXXX at any escape level (`\u`, `\\u`): decoded in quoted key text.
+_U_ESCAPE_RE = re.compile(r"\\+u([0-9a-fA-F]{4})")
+# A \uXXXX that can spell part of a key name: an ASCII letter, `_ - .`, or
+# KELVIN SIGN (lowercases to `k`). Other escapes (e.g. ensure_ascii text)
+# cannot turn a key into an inventory word, so they start no evaluation.
+_U_KEY_LETTER_RE = re.compile(
+    r"\\u(?:00(?:4[1-9A-Fa-f]|5[0-9AaFf]|6[1-9A-Fa-f]|7[0-9Aa]|2[DdEe])|212[Aa])"
+)
 _HSPACE = " \t"
+_JSON_WS = " \t\r\n"
 _TRAILING_SPACE = " \t\r"
 _FORM3_STOP = frozenset(" \t\r\n\f\v;,&)]}\"'")
 _FORM1_STOP = frozenset(" \t\r\n\f\v,)]}\"'")
@@ -264,21 +281,22 @@ def _rstrip_end(text, start, end):
     return end
 
 
+# String bodies: any character but the quote and a backslash (and a line
+# break with stop_eol); a backslash escapes the next character.
+_STRING_BODY_RES = {
+    (quote, stop_eol): re.compile(
+        r"(?:[^%s\\%s]|\\.)*" % (quote, "\n" if stop_eol else ""), re.S
+    )
+    for quote in "\"'"
+    for stop_eol in (False, True)
+}
+
+
 def _string_end(text, i, quote, stop_eol):
     """Index of the unescaped closing `quote` for a string whose content
     starts at i; None when absent (on this line when stop_eol)."""
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if ch == "\\":
-            i += 2
-            continue
-        if ch == quote:
-            return i
-        if stop_eol and ch == "\n":
-            return None
-        i += 1
-    return None
+    end = _STRING_BODY_RES[quote, stop_eol].match(text, i).end()
+    return end if text[end:end + 1] == quote else None
 
 
 def _escaped_string_end(text, i):
@@ -398,10 +416,22 @@ def _quoted_value(text, v):
     return (start, end, MASK) if end > start else ()
 
 
+def _prefixed_value(text, v):
+    """A string-prefixed literal (`b'v'`, `rb"v"`, `f\\"v\\"`): the span of
+    its quoted content (the prefix stays); None when v starts no such
+    literal."""
+    prefix = _STR_PREFIX_RE.match(text, v)
+    if prefix is None:
+        return None
+    return _quoted_value(text, prefix.end())
+
+
 def _form1_value(text, v, qmask, escaped):
     """Value after a quoted key (JSON-style); qmask replaces literals and
     containers, quoted at the key's level."""
     quoted = _quoted_value(text, v)
+    if quoted is None:
+        quoted = _prefixed_value(text, v)
     if quoted is not None:
         return quoted or None
     if text[v] in "{[":
@@ -437,6 +467,21 @@ def _skip_hspace(text, i):
     return i
 
 
+def _skip_json_ws(text, i):
+    """Skip JSON whitespace (space, tab, LF, CR) and its `\\n`, `\\r`, `\\t`
+    escapes (the same document embedded in a string or printed as a repr)."""
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in _JSON_WS:
+            i += 1
+        elif ch == "\\" and text[i + 1:i + 2] in ("n", "r", "t"):
+            i += 2
+        else:
+            break
+    return i
+
+
 def _separator(text, i, allow_colon=True):
     """(kind, end) of a `=`/`==`/`=>`/`:` separator after optional blanks."""
     j = _skip_hspace(text, i)
@@ -448,44 +493,52 @@ def _separator(text, i, allow_colon=True):
     return None, j
 
 
-def _quoted_key_span(text, hs, he):
-    """Value span for a quoted key around the hit [hs, he); False when the
-    hit is not inside a quoted key; None when it is but nothing to mask."""
-    i = hs
-    limit = max(0, hs - _QUOTED_KEY_MAX)
-    while i > limit and text[i - 1] not in "\"'\n":
-        i -= 1
-    if i == 0 or text[i - 1] not in "\"'":
-        return False
-    quote = text[i - 1]
-    escaped = quote == '"' and i >= 2 and text[i - 2] == "\\"
-    j = he
-    limit = min(len(text), he + _QUOTED_KEY_MAX)
-    while j < limit and text[j] not in "\"'\n\\":
-        j += 1
+def _decode_key(key):
+    """Quoted key text with its \\uXXXX escapes decoded (any escape level),
+    so an escaped spelling meets the same secret-name test."""
+    if "u" not in key or "\\" not in key:
+        return key
+    return _U_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), key)
+
+
+def _quoted_key_span(text, start, he):
+    """Value span for a quoted key whose text starts at `start` (after the
+    nearest quote before the hit) and must contain the hit end `he`; False
+    when there is no such quoted key; None when there is but nothing to
+    mask. JSON whitespace (LF, CR included) may surround the `:`."""
+    quote = text[start - 1]
+    escaped = quote == '"' and start >= 2 and text[start - 2] == "\\"
     if escaped:
-        if text[j:j + 2] != '\\"':
-            return False
-        close_end = j + 2
+        close = _escaped_string_end(text, start)
+        close_end = None if close is None else close + 2
     else:
-        if text[j:j + 1] != quote:
-            return False
-        close_end = j + 1
+        close = _string_end(text, start, quote, True)
+        close_end = None if close is None else close + 1
+    if close is None or close < he:
+        return False
     kind, sep_end = _separator(text, close_end)
     if kind is None:
-        return False
-    key = text[i:j]
-    if not _is_secret_key(key):
+        if text[sep_end:sep_end + 1] not in ("\r", "\n", "\\"):
+            return False  # no line break before a `:` (also: end of text)
+        j = _skip_json_ws(text, sep_end)
+        if text[j:j + 1] != ":" or text[j + 1:j + 2] == ":":
+            return False
+        sep_end = j + 1
+    if not _is_secret_key(_decode_key(text[start:close])):
         return None
-    v = _skip_hspace(text, sep_end)
-    if v >= len(text) or text[v] in "\r\n":
+    v = _skip_json_ws(text, sep_end)
+    if v >= len(text):
         return None
     if escaped:
         qmask = '\\"%s\\"' % MASK
-    elif quote == "'" and _in_open_string(text, text.rfind("\n", 0, i) + 1, i - 1):
+    elif quote == "'" and _in_open_string(
+        text, text.rfind("\n", 0, start) + 1, start - 1
+    ):
         qmask = "'%s'" % MASK  # a raw `"` would end the enclosing string
     else:
         qmask = '"%s"' % MASK
+    if qmask[0] != '"' and text[v] == '"':
+        return None  # the enclosing "..." string ends: no value
     return _form1_value(text, v, qmask, escaped)
 
 
@@ -506,6 +559,8 @@ def _unquoted_key_span(text, s, e):
     if v >= n or text[v] in "\r\n":
         return None
     quoted = _quoted_value(text, v)
+    if quoted is None and kind != ":":
+        quoted = _prefixed_value(text, v)  # forms 3/5: b'v', rb"v", ...
     if quoted is not None:  # form 2
         return quoted or None
     if flag:  # form 5
@@ -520,32 +575,62 @@ def _unquoted_key_span(text, s, e):
     return (v, end, MASK) if end > v else None
 
 
+def _hits(text, lowered):
+    """(start, end, escape_only) in text order: inventory candidates, plus
+    every key-letter `\\uXXXX` (a quoted key may spell an inventory word
+    with escapes)."""
+    if len(lowered) == len(text):
+        candidates = _CANDIDATE_RE.finditer(lowered)
+    else:
+        candidates = _CANDIDATE_RE_I.finditer(text)
+    hits = (m.span() + (False,) for m in candidates)
+    if "\\u" not in text:
+        return hits
+    escapes = ((m.start(), m.end(), True) for m in _U_KEY_LETTER_RE.finditer(text))
+    return heapq.merge(hits, escapes)
+
+
 def _key_spans(text, lowered):
+    """Hits arrive in text order, so the nearest quote/newline before a hit
+    is found incrementally (each byte scanned once) and each quoted key and
+    each unquoted key run is evaluated once: linear in the text, whatever
+    the key length."""
     spans = []
     seen_quoted = set()
-    seen_runs = set()
+    quoted_by_start = {}
+    delim = -1  # nearest `"`, `'` or newline before `scanned`
+    scanned = 0
+    run_end = 0  # end of the last unquoted key run evaluated
     n = len(text)
-    if len(lowered) == n:
-        hits = _CANDIDATE_RE.finditer(lowered)
-    else:
-        hits = _CANDIDATE_RE_I.finditer(text)
-    for hit in hits:
-        hs, he = hit.span()
-        quoted = _quoted_key_span(text, hs, he)
+    for hs, he, escape_only in _hits(text, lowered):
+        if hs > scanned:
+            delim = max(
+                delim,
+                text.rfind('"', scanned, hs),
+                text.rfind("'", scanned, hs),
+                text.rfind("\n", scanned, hs),
+            )
+            scanned = hs
+        quoted = False
+        if delim >= 0 and text[delim] != "\n":
+            start = delim + 1
+            if start not in quoted_by_start:
+                quoted_by_start[start] = _quoted_key_span(text, start, he)
+            quoted = quoted_by_start[start]
         if quoted is not False:
             if quoted and quoted[0] not in seen_quoted:
                 seen_quoted.add(quoted[0])
                 spans.append(quoted)
             continue
+        if escape_only or hs < run_end:
+            continue  # not an unquoted key / the same run as the last hit
         s = hs
         while s > 0 and text[s - 1] in _KEY_CHARS:
             s -= 1
         e = he
         while e < n and text[e] in _KEY_CHARS:
             e += 1
-        if s in seen_runs:
-            continue
-        seen_runs.add(s)
+        run_end = e
         if s > 0 and text[s - 1] == "/":
             continue  # a path component, not a key
         span = _unquoted_key_span(text, s, e)
@@ -603,15 +688,63 @@ def _mask(text):
     return "".join(out)
 
 
+# Masking-failure fallback (never raw text): a line is withheld when its
+# lowercased text contains a token-format needle, or, with `_ - .` removed,
+# an inventory word.
+_WITHHOLD_NEEDLES = (
+    "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "akia",
+    "asia", "xox", "sk_live_", "rk_live_", "aiza", "npm_", "eyj",
+    "-----begin", "authorization",
+)
+_WITHHOLD_MARKER = "[actx] masking failed; %s lines withheld\n"
+
+
+def _withheld_line(line):
+    lowered = line.lower()
+    if any(needle in lowered for needle in _WITHHOLD_NEEDLES):
+        return True
+    norm = lowered.replace("_", "").replace("-", "").replace(".", "")
+    return any(word in norm for word in _INVENTORY)
+
+
+def withhold_text(text):
+    """Fallback when masking raised: drop every line that may carry a
+    secret (_withheld_line; also every line of a `-----BEGIN` ...
+    `-----END` block), keep the rest, append one marker line. Plain `in`
+    checks only; if even this fails, everything is withheld. Known gap: a
+    value on a line without a key or needle (the line after `"k":`, a
+    multi-line container) is kept."""
+    try:
+        lines = text.split("\n")
+        if lines[-1] == "":
+            lines.pop()
+        kept = []
+        dropped = 0
+        in_block = False
+        for line in lines:
+            if in_block or _withheld_line(line):
+                dropped += 1
+                lowered = line.lower()
+                if "-----begin" in lowered:
+                    in_block = True
+                if "-----end" in lowered:
+                    in_block = False
+                continue
+            kept.append(line + "\n")
+        return "".join(kept) + _WITHHOLD_MARKER % dropped
+    except Exception:
+        return _WITHHOLD_MARKER % "all"
+
+
 def redact_text(text):
-    """Mask secret values (spans only). Fail-open: on internal error return
-    the input unchanged (callers also own a fail-open path around it)."""
+    """Mask secret values (spans only). Never returns raw text on failure:
+    if masking raises, withhold_text's line-drop fallback is returned."""
     if not text:
         return text
     try:
         return _mask(text)
     except Exception:
-        return text
+        return withhold_text(text)
 
 
 def secret_bearing(text):

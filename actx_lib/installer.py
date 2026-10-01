@@ -48,7 +48,7 @@ To reduce context noise, prefix supported shell commands with `actx`:
 - `pytest` / `ruff` / `docker ps` / `gh pr list` → `actx <cmd>`
 - `vercel whoami` / `railway status` / `wrangler deployments list` / `gcloud projects list` → `actx <cmd>`
 
-Hook/plugin agents rewrite automatically when installed. For full output, run without `actx` or use `actx --raw <command>`.
+Hook/plugin agents rewrite automatically when installed. For full output, run without `actx`; `actx --raw <command>` prints the raw output with secret values masked.
 
 Package manager discipline:
 - Package installations always require human confirmation (ask) — never attempt to bypass it.

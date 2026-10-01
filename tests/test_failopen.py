@@ -31,12 +31,7 @@ class ExistingFilterFailOpenTests(unittest.TestCase):
         self.assertEqual(out, result.stdout)
         self.assertEqual(err, result.stderr)
 
-    def test_grep_fails_open(self):
-        # TK-61 C3: grep is the content class (runner.run_content; was
-        # system_filter.run_grep). A masking error prints the raw bytes
-        # with the original exit code.
-        stdout = b"raw stdout\n" * 100
-        stderr = b"raw stderr\n"
+    def _grep_with_failure(self, patch_target, stdout, stderr):
         result = subprocess.CompletedProcess(
             ["grep", "match", "f"], 1, stdout, stderr
         )
@@ -45,14 +40,27 @@ class ExistingFilterFailOpenTests(unittest.TestCase):
         with mock.patch(
             "actx_lib.runner.subprocess.run", return_value=result
         ), mock.patch(
-            "actx_lib.runner._mask_bytes", side_effect=RuntimeError("boom")
+            patch_target, side_effect=RuntimeError("boom")
         ), mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
             rc = runner.run_content(["grep", "match", "f"], CONFIG)
         out.flush()
         err.flush()
-        self.assertEqual(rc, 1)
-        self.assertEqual(out.buffer.getvalue(), stdout)
-        self.assertEqual(err.buffer.getvalue(), stderr)
+        return rc, out.buffer.getvalue(), err.buffer.getvalue()
+
+    def test_grep_fails_open(self):
+        # TK-61 C3: grep is the content class (runner.run_content; was
+        # system_filter.run_grep). Review fix (finding 3): a masking error
+        # never prints raw text - secret-bearing lines are withheld, the
+        # rest is kept, one marker line is appended; exit code preserved.
+        marker = b"[actx] masking failed; %d lines withheld\n"
+        stdout = b"raw stdout \xff\n" * 100 + b"password=hunter2\n"
+        stderr = b"raw stderr\ntoken: abc\n"
+        for target in ("actx_lib.runner._mask_bytes", "actx_lib.redaction._mask"):
+            with self.subTest(target=target):
+                rc, out, err = self._grep_with_failure(target, stdout, stderr)
+                self.assertEqual(rc, 1)
+                self.assertEqual(out, b"raw stdout \xff\n" * 100 + marker % 1)
+                self.assertEqual(err, b"raw stderr\n" + marker % 1)
 
     def test_ls_fails_open(self):
         result = subprocess.CompletedProcess(

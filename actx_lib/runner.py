@@ -301,9 +301,9 @@ def _finish_tee(cmd, result, config, cut, path, tee_policy="auto"):
 
 def _write_tee(cmd, stdout, stderr, exit_code, tee_dir):
     # The tee's redaction layer: callers pass the raw streams, so the
-    # record's stdout is redact_text(raw stdout) exactly (PRD.md 9 format).
-    # A redaction failure here means the raw output must not hit disk —
-    # skip the file entirely.
+    # record's stdout is redact_text(raw stdout) exactly (PRD.md 9 format);
+    # a masking error inside it yields the line-drop fallback, never raw
+    # text. Should redact_text raise anyway, skip the file entirely.
     try:
         stdout = redaction.redact_text(stdout)
         stderr = redaction.redact_text(stderr)
@@ -468,17 +468,27 @@ def _mask_bytes(data):
     return redaction.redact_text(text).encode("utf-8", "surrogateescape")
 
 
+def _withheld_bytes(data):
+    """redaction.withhold_text over bytes (the masking-failure fallback)."""
+    if not data:
+        return data
+    text = redaction.withhold_text(data.decode("utf-8", "surrogateescape"))
+    return text.encode("utf-8", "surrogateescape")
+
+
 def _write_masked_bytes(result):
     """Write a bytes-mode result to stdout/stderr with secret values masked
-    (byte-identical when nothing is masked); fail open to the raw bytes.
-    Returns the (stdout, stderr) bytes written."""
+    (byte-identical when nothing is masked); on a masking error, the
+    line-drop fallback (never the raw bytes). Returns the (stdout, stderr)
+    bytes written."""
     try:
         stdout = _mask_bytes(result.stdout)
         stderr = _mask_bytes(result.stderr)
     except Exception:
-        # Fail open: the agent needs the output (redact_text itself fails
-        # open the same way).
-        stdout, stderr = result.stdout, result.stderr
+        # Owner rule: no secret value on any path - redact_text falls back
+        # the same way.
+        stdout = _withheld_bytes(result.stdout)
+        stderr = _withheld_bytes(result.stderr)
     # Text written earlier goes out first; a stream object without a text
     # layer flush (a bare .buffer holder) is fine.
     for stream in (sys.stdout, sys.stderr):
@@ -602,8 +612,9 @@ def run(cmd, config):
     except Exception:
         pass
 
-    # Fail-open contract: if redaction fails, print RAW output (the agent
-    # needs it), write no tee file and keep the command out of history.
+    # If redaction raises anyway, print_raw's masking (with the line-drop
+    # fallback, never raw text) goes out, no tee file is written and the
+    # command stays out of history.
     masked = _redact_result(result)
     if masked is None:
         print_raw(result)
@@ -695,14 +706,15 @@ def execute(cmd, shell_codes=False):
 
 
 def mask_text(text):
-    """redact_text(text); the text itself when masking fails (fail open).
+    """redact_text(text); the line-drop fallback (withhold_text) when
+    masking fails - never the raw text.
 
     Every print path of command output goes through it (or _mask_bytes):
     secret values are always masked (TK-61); masking is idempotent."""
     try:
         return redaction.redact_text(text)
     except Exception:
-        return text
+        return redaction.withhold_text(text)
 
 
 def print_raw(result):

@@ -66,12 +66,16 @@ class RedactTextTests(unittest.TestCase):
         self.assertEqual(redaction.redact_text(""), "")
         self.assertIsNone(redaction.redact_text(None))
 
-    def test_fail_open_returns_input_on_error(self):
+    def test_error_withholds_secret_lines(self):
+        # Review fix (finding 3): a masking error never returns raw text.
         text = "API_KEY=sk-123\nnormal\n"
         with mock.patch.object(
             redaction, "_mask", side_effect=RuntimeError("boom")
         ):
-            self.assertEqual(redaction.redact_text(text), text)
+            self.assertEqual(
+                redaction.redact_text(text),
+                "normal\n[actx] masking failed; 1 lines withheld\n",
+            )
 
 
 class SecretBearingTests(unittest.TestCase):
@@ -185,7 +189,8 @@ class GenericRunRedactionTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(self._command_text(), ["python3 -c x"])
 
-    def test_redaction_failure_prints_raw_no_tee_no_command_text(self):
+    def test_redaction_failure_withholds_no_tee_no_command_text(self):
+        # Review fix (finding 3): the secret line is withheld, not printed.
         out = io.StringIO()
         err = io.StringIO()
         result = subprocess.CompletedProcess(
@@ -199,7 +204,7 @@ class GenericRunRedactionTests(unittest.TestCase):
                 with redirect_stdout(out), redirect_stderr(err):
                     rc = runner.run(["python3", "-c", "x"], TEE_ALWAYS_CONFIG)
         self.assertEqual(rc, 0)
-        self.assertIn("API_KEY=sk-abc123", out.getvalue())
+        self.assertEqual(out.getvalue(), "[actx] masking failed; 1 lines withheld\n")
         self.assertFalse(os.path.exists(self._tee_dir()))
         self.assertEqual(self._command_text(), [""])
 

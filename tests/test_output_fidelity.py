@@ -625,13 +625,33 @@ class PrintRawMaskingTests(unittest.TestCase):
         self.assertEqual(out, "ok\napi_key: ‹masked›\n")
         self.assertEqual(err, "")
 
-    def test_masking_error_fails_open_to_raw(self):
-        result = subprocess.CompletedProcess(["x"], 0, "password=s3cret\n", "")
-        with mock.patch(
-            "actx_lib.redaction.redact_text", side_effect=RuntimeError("x")
+    def test_masking_error_withholds_secret_lines(self):
+        # Review fix (finding 3): a masking error never prints raw text.
+        result = subprocess.CompletedProcess(["x"], 0, "ok\npassword=s3cret\n", "")
+        for target in ("actx_lib.redaction.redact_text", "actx_lib.redaction._mask"):
+            with self.subTest(target=target):
+                with mock.patch(target, side_effect=RuntimeError("x")):
+                    _, out, _ = self._capture(runner.print_raw, result)
+                self.assertEqual(out, "ok\n[actx] masking failed; 1 lines withheld\n")
+
+    def test_masking_error_tee_never_raw(self):
+        # Review fix (finding 3): the tee gets the same line-drop fallback.
+        with tempfile.TemporaryDirectory() as tee_dir, mock.patch(
+            "actx_lib.redaction._mask", side_effect=RuntimeError("x")
         ):
-            _, out, _ = self._capture(runner.print_raw, result)
-        self.assertEqual(out, "password=s3cret\n")
+            path = runner._write_tee(
+                ["x"], "ok\npassword=s3cret\n", "token: abc\n", 3, tee_dir
+            )
+            with open(path, encoding="utf-8") as handle:
+                raw = handle.read()
+        record = json.loads(raw)
+        self.assertNotIn("s3cret", raw)
+        self.assertNotIn("abc", raw)
+        self.assertEqual(
+            record["stdout"], "ok\n[actx] masking failed; 1 lines withheld\n"
+        )
+        self.assertEqual(record["stderr"], "[actx] masking failed; 1 lines withheld\n")
+        self.assertEqual(record["exit_code"], 3)
 
 
 # ---------------------------------------------------------------------
@@ -723,7 +743,8 @@ class SecretsAlwaysMaskedTests(_Harness):
         self.assertEqual(out, _mask(SECRET_DATA))
         self.assertNotIn(b"abc123def", err)
 
-    def test_passthrough_masking_error_fails_open(self):
+    def test_passthrough_masking_error_withholds_secret_lines(self):
+        # Review fix (finding 3): never the raw bytes on a masking error.
         with mock.patch(
             "actx_lib.redaction.redact_text", side_effect=RuntimeError("x")
         ):
@@ -731,7 +752,9 @@ class SecretsAlwaysMaskedTests(_Harness):
                 ["ls", "a", "b"], 0, data=SECRET_DATA, err_data=b""
             )
         self.assertEqual(code, 0)
-        self.assertEqual(out, SECRET_DATA)
+        self.assertEqual(
+            out, b"ok \xff line\n[actx] masking failed; 1 lines withheld\n"
+        )
 
     def _summary(self, argv, text, rc=0, err_text=""):
         code, out, err, calls = self.dispatch(
