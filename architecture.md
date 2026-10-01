@@ -49,7 +49,7 @@ Rewriter (post-wave-2): observational CLI + narrow mutator allow-list (`PRD.md` 
 | `actx_lib/rewrite_cmd.py` | stdlib | `actx rewrite "<cmd>"` |
 | `actx_lib/installer.py` | stdlib | `actx init/--show/--uninstall` |
 | `actx_lib/config.py` | stdlib | JSON config load/save |
-| `actx_lib/filters/` | stdlib | git_filter, system_filter (ls/grep/find), read_filter; compact_profiles (declarative test-runner/linter compaction profiles + engine, golden-dump byte contract), ascii_table_filter (framed-table → CSV-like, raw fallback), json_compactor; infra_filter (docker/kubectl/helm/gh/aws), mobile_filter (flutter/dart/swift/swiftlint/swiftformat/xcodebuild/xcrun/pod/gradlew), data_filter (psql/sqlite3/duckdb SQL tables w/ column masking, terraform, redis, dbt) |
+| `actx_lib/filters/` | stdlib | Summary-class filters only (TK-61: content/log heads never reach this package). `__init__.py` (`REGISTRY`; `_cloud_entry` → `runner.run` for cloud-family summary verbs), git_filter (status/log/branch/rev-parse + mutating `ok` verbs; diff/show/blame/stash list are content), system_filter (ls/gls, find), tree_filter (bare/single-path walk summary; flags or 2+ paths → real `tree` via `run_lossless`), read_filter (`actx read`), smart_filter (`actx smart`), test_runner_filter (pytest/jest/vitest/cargo test/go test, `run --failures`), linter_filter (ruff/tsc/eslint/golangci-lint/next, cargo build/clippy), package_filter (pip/uv/npm/pnpm summary verbs), compact_profiles (declarative test-runner/linter compaction profiles + engine, golden-dump byte contract), ascii_table_filter (framed-table → CSV-like, raw fallback); infra_filter (docker/kubectl/helm/gh/aws summary verbs), mobile_filter (flutter/dart/swift/swiftlint/swiftformat/xcodebuild/xcrun/pod/gradlew), data_filter (psql/sqlite3/duckdb SQL tables w/ column masking, terraform validate/version, dbt). `json_compactor` deleted (TK-61); `redis-cli` is wholly content, no filter |
 | `adapters/opencode.ts.template` | TS (OpenCode Bun runtime) | thin transport; delegates to `actx rewrite` |
 
 ## Key Flows
@@ -63,7 +63,13 @@ Rewriter (post-wave-2): observational CLI + narrow mutator allow-list (`PRD.md` 
      - on allow+rewrite, `additionalContext` carries the compact-flag hint for known verbose forms (`conventions.hint_for`, fail-open; deny/ask and the Antigravity schema stay hint-free).
 2. **Tier 1 rewrite (OpenCode)**: TS plugin `tool.execute.before` mutates `output.args.command` via `execFileSync(ACTX, ["rewrite", cmd])`.
 3. **Tier 2 (Grok/Cursor/Cline/Windsurf/Aider)**: instruction section in agent rules (`PRD.md` §6.3; replace-in-place on reinit when body differs); agent prefixes supported commands manually; adoption ~70–85% (estimate).
-4. **CLI**: `actx <cmd>` executes, filters, prints compact output, tee on failure/always (git diff), preserves exit code.
+4. **CLI** (`cli.main`, TK-61 class dispatch; `PRD.md` §8 "Классы вывода"): `--raw` / bypass → `runner.run_passthrough` (bytes, secret values masked). Otherwise `cli_families.head_key(argv[0])` (literal `./gradlew`, else basename — lookup only, the executed `argv[0]` stays the original token) and `rewriter.output_class(argv)` (nearest explicit `output=` on the spec walk; deepest matched verb on the strict walk or on a lenient walk that skips global options before a verb; run-prefixes unwrapped to the inner command's class; `_REGISTRY_ONLY_CLASSES` for aws/read/smart/uv/xcrun) pick the path:
+   - `content` → `runner.run_content(argv)`: the command's bytes 1:1 except masked secret values; no strip/collapse/cap/hints, no tee; exec failure → 127/126.
+   - `log` → `runner.run_lossless(argv, cap=False, stderr=True)`: ANSI strip, `  [×N]` repeat collapse, masking, no cap.
+   - `summary` → the `REGISTRY` filter when the head token is bare and registered; a summary head written as a path, or one without a `REGISTRY` entry → `runner.run_lossless(argv)` (cap + forced tee whose path the marker names).
+   - Exception inside class resolution → `runner.run_content(argv)` (fail open to the raw, masked output, never a compacting path).
+   - No class → `custom_heads` (`runner.run`) → `unknown command`, rc 1.
+   Every output path masks secret values (`redaction.redact_text`); every cut and every listing that omits entries writes a forced tee regardless of `tee.enabled`/`mode`/`min_bytes`; otherwise tee follows `tee.mode`. `head_key` is also used by `hang_policy.classify`, so path-written heads (`/usr/bin/docker logs -f`) classify like the bare head. Exit code preserved.
 
 ## Data Model
 
