@@ -1,6 +1,6 @@
 # Architecture — actx
 
-Living snapshot (v2.11.0: TK-57, TK-59, TK-60). Product source of truth: `PRD.md`.
+Living snapshot (v2.12.0: TK-61). Product source of truth: `PRD.md`.
 
 ## System Overview
 
