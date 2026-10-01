@@ -734,6 +734,280 @@ class MaskingFailureFallbackTests(unittest.TestCase):
             )
 
 
+# --- TK-61 review fixes 2: nested escape levels (red on 7e3e2ac) ------------
+# A document embedded n times (json.dumps n times) puts its keys at escape
+# depth n: `"` at depth 0, `\"` at 1, `\\\"` at 2, 2^n-1 backslashes at n.
+
+
+def _nest(text, depth):
+    for _ in range(depth):
+        text = json.dumps(text, ensure_ascii=False)
+    return text
+
+
+def _unnest(test, text, depth):
+    """json.loads `depth` times; each level must parse to a string."""
+    for level in range(depth):
+        try:
+            text = json.loads(text)
+        except ValueError as exc:
+            test.fail("level %d does not parse: %s" % (level, exc))
+        test.assertIsInstance(text, str)
+    return text
+
+
+def _masked_dump(obj, **kw):
+    return json.dumps(obj, ensure_ascii=False, **kw)
+
+
+# (depth-0 document, masked at depth 0, masked at depth >= 1 or None = same)
+NESTED_ROWS = (
+    (json.dumps({"password": S}), _masked_dump({"password": M}), None),
+    (json.dumps({"password": 12, "a": 1}), _masked_dump({"password": M, "a": 1}), None),
+    (json.dumps({"token": None}), _masked_dump({"token": M}), None),
+    (
+        json.dumps({"password": {"u": S, "l": [1, {"p": S}]}, "z": 2}),
+        _masked_dump({"password": M, "z": 2}),
+        None,
+    ),
+    (
+        json.dumps({"password": {"u": 'a}"]b\\', "v": "[c"}, "k": 1}),
+        _masked_dump({"password": M, "k": 1}),
+        None,
+    ),
+    (
+        json.dumps({"password": 'a\\"b\\\\' + S, "k": "x\\"}),
+        _masked_dump({"password": M, "k": "x\\"}),
+        None,
+    ),
+    (
+        json.dumps({"a": 1, "password": S, "n": [1, 2]}, indent=2),
+        _masked_dump({"a": 1, "password": M, "n": [1, 2]}, indent=2),
+        None,
+    ),
+    (
+        json.dumps({"credentials": {"u": S}, "tokens": [S]}, indent=2),
+        _masked_dump({"credentials": M, "tokens": M}, indent=2),
+        None,
+    ),
+    (
+        json.dumps({"s": json.dumps({"password": S})}),
+        _masked_dump({"s": _masked_dump({"password": M})}),
+        None,
+    ),
+    (
+        json.dumps({"msg": "x password: %s y" % S, "k": 1}),
+        _masked_dump({"msg": "x password: %s" % M, "k": 1}),
+        None,
+    ),
+    (
+        json.dumps({"msg": "password=%s user=bob" % S}),
+        _masked_dump({"msg": "password=%s user=bob" % M}),
+        None,
+    ),
+    # '...' keys inside: a literal/container is `"‹masked›"` at depth 0 and
+    # `'‹masked›'` inside an enclosing string
+    ("{'password': '%s', 'n': 1}" % S, "{'password': '%s', 'n': 1}" % M, None),
+    ("{'password': 12}", "{'password': %s}" % QM, "{'password': '%s'}" % M),
+    (
+        "{'password': {'u': '%s'}, 'n': 1}" % S,
+        "{'password': %s, 'n': 1}" % QM,
+        "{'password': '%s', 'n': 1}" % M,
+    ),
+    (
+        json.dumps({"s": "{'password': '%s'}" % S}),
+        _masked_dump({"s": "{'password': '%s'}" % M}),
+        None,
+    ),
+)
+
+
+class NestedEscapeLevelTests(unittest.TestCase):
+    def test_rows_every_depth_round_trips(self):
+        for doc, masked0, masked_deep in NESTED_ROWS:
+            for depth in range(5):
+                raw = _nest(doc, depth)
+                expected = masked0 if depth == 0 or masked_deep is None else masked_deep
+                with self.subTest(doc=doc, depth=depth):
+                    out = redaction.redact_text(raw)
+                    self.assertNotIn(S, out)
+                    self.assertEqual(out, _nest(expected, depth))
+                    inner = _unnest(self, out, depth)
+                    self.assertEqual(inner, expected)
+                    if _parses(doc):
+                        self.assertTrue(_parses(inner), inner)
+                    self.assertEqual(redaction.redact_text(out), out)
+
+    def test_parent_rows(self):
+        # json.dumps^3 / ^4 of {"password": V}, and indent=2 at every level
+        # (the newlines become `\n`, `\\n`, `\\\\n` escapes)
+        for depth in (3, 4):
+            for indent in (None, 2):
+                raw = json.dumps({"password": S, "a": 1}, indent=indent)
+                for _ in range(depth - 1):
+                    raw = json.dumps(raw, indent=indent)
+                with self.subTest(depth=depth, indent=indent):
+                    out = redaction.redact_text(raw)
+                    self.assertNotIn(S, out)
+                    inner = _unnest(self, out, depth - 1)
+                    self.assertEqual(json.loads(inner), {"password": M, "a": 1})
+
+    def test_generated_depth_sweep(self):
+        keys = ("password", "PGPASSWORD", "api-key", "awsSecretAccessKey", "id_token",
+                "tokenizer", "max_tokens", "secret_name", "username")
+        checked = 0
+        for key in keys:
+            secret = plan_is_secret(key)
+            for template, oracle in DIFF_FORMS:
+                line = template.format(k=key)
+                expected = oracle.format(k=key) if secret else line
+                for depth in range(5):
+                    raw = _nest(line, depth)
+                    out = redaction.redact_text(raw)
+                    checked += 1
+                    with self.subTest(line=line, depth=depth):
+                        if not secret:
+                            self.assertEqual(out, raw)
+                        self.assertEqual(_unnest(self, out, depth), expected)
+                        for value in (V, V2) if secret else ():
+                            self.assertNotIn(value, out)
+            for template in EMBED_EXTRA_FORMS:
+                line = template.format(k=key)
+                decoded = []
+                for depth in range(5):
+                    out = redaction.redact_text(_nest(line, depth))
+                    checked += 1
+                    with self.subTest(line=line, depth=depth):
+                        if secret:
+                            self.assertNotIn(V, out)
+                        decoded.append(_unnest(self, out, depth))
+                with self.subTest(line=line):
+                    # depth >= 1 agree ('...' literals are quoted as '...'
+                    # inside an enclosing string, as "..." at depth 0)
+                    self.assertEqual(decoded[2:], [decoded[1]] * 3)
+                    if not secret:
+                        self.assertEqual(decoded, [line] * 5)
+        self.assertGreater(checked, 900)
+
+
+class _FreshScan(redaction._Scan):
+    """Every scanner call rescans (no reuse): the reference for the memos."""
+
+    def eol(self, i):
+        return redaction._eol(self.text, i)
+
+    def comment(self, i, eol):
+        match = redaction._COMMENT_RE.search(self.text, i, eol)
+        return None if match is None else match.start()
+
+    def deep_end(self, i, quote, depth):
+        return redaction._deep_string_end(self.text, i, quote, depth)
+
+    def run_end(self, i, stop):
+        return redaction._run_end(self.text, i, stop)
+
+    def resolve(self, spans):
+        out = []
+        for span in spans:
+            if span[1] is None:
+                v, depth, mask, tail = self._containers[span[3]]
+                end = redaction._bracket_end(self.text, v, depth)
+                if tail is not None:
+                    end = redaction._run_end(self.text, end, tail)
+                span = (v, end, mask)
+            out.append(span)
+        return out
+
+
+class _CountingPattern:
+    def __init__(self, pattern):
+        self.pattern = pattern
+        self.calls = 0
+
+    def search(self, *args):
+        self.calls += 1
+        return self.pattern.search(*args)
+
+
+class SharedRegionLinearTests(unittest.TestCase):
+    """Many hits inside one unbounded value region (one long line, an
+    unclosed string, run or container) reuse one scan: scanner calls grow
+    with the hits, not hits x region (counted calls, not wall-clock), and
+    the output equals a fresh scan per hit."""
+
+    N = 300
+    BS = "\\"
+
+    def cases(self):
+        n, bs = self.N, self.BS
+        return (
+            ("password: v x " * n, "password: %s " % M, ("_eol", "_COMMENT_RE")),
+            ('"' + "password: v x " * n, '"password: %s ' % M, ("_deep_string_end",)),
+            ((bs * 3 + '"password: v x' + bs * 3 + '" ' + bs + '"token: y' + bs + '" ') * n,
+             None, ("_eol", "_COMMENT_RE")),
+            ("password=" * n, "password=" + M, ("_run_end",)),
+            ("--token=" * n, "--token=" + M, ("_run_end",)),
+            ('password={"x" ' * n, "password=" + M, ("_string_end",)),
+            ('"password": [ "x" ' * n, '"password": ' + QM, ("_string_end",)),
+            ("password={" * n + "}" * n, "password=" + M, ("_string_end",)),
+        )
+
+    def test_scanner_calls_linear_in_hits(self):
+        from unittest import mock
+
+        for text, expected, names in self.cases():
+            for name in names:
+                with self.subTest(text=text[:40], name=name):
+                    if name == "_COMMENT_RE":
+                        spy = _CountingPattern(redaction._COMMENT_RE)
+                        with mock.patch.object(redaction, name, spy):
+                            out = redaction.redact_text(text)
+                        calls = spy.calls
+                    else:
+                        real = getattr(redaction, name)
+                        with mock.patch.object(redaction, name, side_effect=real) as spy:
+                            out = redaction.redact_text(text)
+                        calls = spy.call_count
+                    if expected is not None:
+                        self.assertEqual(out, expected)
+                    # A fresh scan per hit: N region-long _eol / comment /
+                    # _deep_string_end / _run_end calls, and one _string_end
+                    # per string per container scan (~N^2/2). Reused: a
+                    # few region scans; _string_end once per string (plus
+                    # once per quoted-key candidate).
+                    limit = 3 * self.N if name == "_string_end" else 4
+                    self.assertLessEqual(calls, limit, name)
+
+    def test_memo_output_equals_fresh_scans(self):
+        import random
+        from unittest import mock
+
+        bs = self.BS
+        tokens = (
+            "password", "token", "--token", "secret", "x", "1", "null", "=", ": ",
+            ":", '":', " ", "\t", ",", '"', "'", bs, bs * 2, bs + '"',
+            bs * 3 + '"', bs * 7 + '"', bs + "'", bs + "n", "{", "[", "}", "]",
+            " #", "\n", "b'", "=>",
+        )
+        rng = random.Random(7)
+        texts = [unit * 40 for unit in (case[0][:40] for case in self.cases())]
+        for _ in range(3000):
+            text = "".join(rng.choice(tokens) for _ in range(rng.randint(3, 60)))
+            k = rng.random()
+            if k < 0.15:
+                text = json.dumps(text)
+            elif k < 0.25:
+                text = json.dumps(json.dumps(text))
+            elif k < 0.3:
+                text *= rng.randint(2, 6)
+            texts.append(text)
+        for text in texts:
+            memo = redaction.redact_text(text)
+            with mock.patch.object(redaction, "_Scan", _FreshScan):
+                fresh = redaction.redact_text(text)
+            self.assertEqual(memo, fresh, repr(text))
+
+
 class ExclusionRuleTests(unittest.TestCase):
     ROWS = (
         # (key, rule freeing it or None when secret)

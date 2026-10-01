@@ -16,7 +16,7 @@ $ git status        →   $ actx git status
 
 ## Why
 
-AI agents run `git status`, `git diff`, `grep`, `find`, `ls`, tests, and installers, then read their full output. Most of that output is noise: progress bars, repeated lines, boilerplate. `actx` sits between the agent and the shell, rewrites supported commands through itself, and returns a compact, structured summary — while keeping the original exit code and a recoverable raw copy.
+AI agents run `git status`, `git diff`, `grep`, `find`, `ls`, tests, and installers, then read their full output. Most of that output is noise: progress bars, repeated lines, boilerplate. `actx` sits between the agent and the shell, rewrites supported commands through itself, and returns a compact, structured summary of status and listing output (content such as `git diff`, `grep` or `cat` stays byte-for-byte) — while keeping the original exit code and a recoverable copy. Secret values are masked on every output path.
 
 ## Demo
 
@@ -44,15 +44,11 @@ M (3):
   src/models/user.py
 ```
 
-Raw `git diff` becomes a per-file summary with real change counters:
+`actx git diff`, `actx grep` and other content commands print the command's output byte-for-byte except masked secret values:
 
 ```text
-src/main.py
-+12 -3
-  +def compress(...)
-  +    ...
-  -    ...
-  ... (truncated, full in tee)
++API_TOKEN=‹masked›
++DATABASE_URL=postgres://app:‹masked›@db:5432/app
 ```
 
 ## Features
@@ -61,9 +57,9 @@ src/main.py
 - **Auto-rewrite (observational + narrow mutators)** — observational CLI (`git` RO, `ls`/`grep`/`find`/`wc`/…, test runners, linters without write flags, `docker`/`kubectl`/`gh` RO, …) plus a narrow mutator allow-list (`git add|commit|push|pull|fetch`, `npm|pnpm install|ci`, `pip install`, `uv pip install`). Safety is metachar/exec/fail-open/write-flag rejects (`--fix`, `ruff format`, …), not “read-only only”. No lexer; no `python3`/`aws` auto-rewrite.
 - **Exact exit codes** — the original command's exit code is preserved, including `git status` returning `128` outside a repo and `grep` returning `1` for no matches.
 - **Lossless filenames** — `git status`, `ls`, and `find` compress the format, not the names.
-- **Tee for raw recovery** — truncated or failed output is saved to `~/.local/share/actx/tee` as JSON; `git diff` always saves, because its compression is lossy.
-- **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent; on any error they pass the command or output through unchanged.
-- **Escape hatch** — `ACTX_BYPASS=1` or a `bypass_commands` entry runs the matching command unfiltered (raw), preserving the exit code.
+- **Tee for recovery** — truncated or failed output is saved to `~/.local/share/actx/tee` as JSON (secret values masked); a truncated result is always saved and its tee path printed.
+- **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent; on any error they pass the command through unchanged and the output through with secret values masked (if masking itself fails, lines that may carry a secret are withheld and a marker line says how many).
+- **Escape hatch** — `ACTX_BYPASS=1` or a `bypass_commands` entry runs the matching command unfiltered (byte-for-byte except masked secret values), preserving the exit code.
 - **Stdlib only** — Python 3.14 standard library. No pip, no brew, no network, no telemetry.
 - **Multi-agent** — deterministic hooks for Claude Code, Codex, and OpenCode; rule-based instructions for Grok, Cline, Windsurf, Aider, and Cursor.
 
@@ -167,14 +163,14 @@ actx --help
 | Command | Behavior |
 |---|---|
 | `actx git status` | Compact grouped status: `* branch`, `M (n):`, `?? (n):` |
-| `actx git diff [args]` | Per-file `+A -B` counters and first changed lines; tee always |
+| `actx git diff [args]` | Output byte-for-byte except masked secret values |
 | `actx git log [args]` | `git log --oneline` output |
 | `actx ls [path]` | Directories first, then files, grouped by path |
-| `actx grep [args] <pattern> [path...]` | Groups matches by file, truncates long lines |
+| `actx grep [args] <pattern> [path...]` | Output byte-for-byte except masked secret values |
 | `actx find [args]` | Groups paths by directory |
-| `actx wc/head/tail/sort/uniq [args]` | Read-only passthrough with lossless repeated-line collapse |
+| `actx wc/head/tail/sort/uniq [args]` | Read-only; output byte-for-byte except masked secret values |
 | `actx read <file> [--level minimal]` | Strips full-line comments for known extensions |
-| `actx run <cmd...>` | Generic wrapper: lossless collapse, explicit truncation marker, tee on failure |
+| `actx run <cmd...>` | Generic wrapper: lossless collapse, explicit truncation marker (a truncation always tees and prints the tee path), tee on failure |
 | `actx run --digest <cmd...>` | Head+tail with skipped-line count; use for large `python3` output |
 | `actx gain` | Savings summary: calls, bytes/≈tokens, %, top categories and strategies |
 | `actx gain --breakdown` | Savings composition by compression strategy |
@@ -184,8 +180,8 @@ actx --help
 | `actx tracking on\|off\|status\|clear` | Enable/disable/inspect/clear local analytics |
 | `actx git add/commit/push/pull/fetch` | Narrow mutators (auto-rewritable); success prints a tiny confirmation |
 | `actx git branch [RO flags]` | Branch list / show-current (RO flags only) |
-| `actx --raw <command>` | Bypass filtering, print output verbatim |
-| `ACTX_BYPASS=1 actx <command>` | Run the command raw (no filter, no tee) |
+| `actx --raw <command>` | Bypass filtering; output byte-for-byte except masked secret values |
+| `ACTX_BYPASS=1 actx <command>` | Run the command unfiltered (no filter, no tee; secret values masked) |
 
 `ACTX_BYPASS=1` disables filtering for that call; adding a command's first token to `bypass_commands` in the config does the same for every call of that command. Everywhere, `-v`/`-vv`/`-vvv` (before the subcommand) control debug output to stderr.
 
@@ -193,7 +189,7 @@ actx --help
 
 ```bash
 actx git status
-actx git diff --stat       # passthrough: --stat already compacts
+actx git diff --stat       # byte-for-byte; --stat is git's own compact form
 actx ls src
 actx grep "TODO" src/
 actx find . -name "*.py"
@@ -202,7 +198,7 @@ actx run pytest tests/
 actx run --digest python3 parse_data.py   # large parsing output: head+tail
 actx insights --json        # orchestration analytics as JSON
 actx insights --verbose-commands   # top verbose passthrough heads + suggested compact flags
-actx --raw git status      # full original output
+actx --raw git status      # unfiltered: byte-for-byte except masked secret values
 ```
 
 `python3` is never auto-rewritten (arbitrary code, not provably read-only). For large `python3` parsing output, use `actx run --digest python3 ...`; the script itself should print compact structured output where possible.
@@ -284,7 +280,7 @@ Created automatically on first run at `~/.config/actx/config.json`:
 
 - `tee.mode`: `failures` (default), `always`, or `never`.
 - `bypass_commands`: list of command names (first token) that run unfiltered, e.g. `["git"]`. Environment variable `ACTX_BYPASS=1` bypasses filtering for the current call only.
-- `git diff` always tees regardless of `mode`, because its compression is lossy.
+- A truncated result (line cap or long-line clip) always tees regardless of `enabled`/`mode`, and the tee path is printed.
 - Tee files are `~/.local/share/actx/tee/<unix_ts>_<sha1(command)[:8]>.log`, kept to 100 files.
 
 ## Analytics

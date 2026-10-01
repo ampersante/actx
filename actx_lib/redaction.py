@@ -9,13 +9,16 @@ Idempotent: masking masked text changes nothing. A masking exception
 never yields raw text (withhold_text: line-drop plus a marker line).
 
 Value forms (spans):
-1. Quoted key, JSON-style (`"k": v`, `'k': v`, escaped `\\"k\\":\\"v\\"`):
-   a string -> its content; a number/true/false/null -> `"‹masked›"`; an
-   object/array -> the whole container (bracket scan) -> `"‹masked›"`;
-   any other unquoted value -> the run up to whitespace, `, ) ] }` or a
-   quote (the enclosing string's end). `"‹masked›"` is quoted at the key's
-   level: `\\"‹masked›\\"` for an escaped key, `'‹masked›'` for a '...' key
-   inside an open "..." string, so a valid JSON document stays valid.
+1. Quoted key, JSON-style (`"k": v`, `'k': v`, escaped at any level:
+   `\\"k\\":\\"v\\"`, `\\\\\\"k\\\\\\": ...` - a document embedded n times in
+   JSON strings writes its `"` as 2^n-1 backslashes + `"`): a string ->
+   its content; a number/true/false/null -> `"‹masked›"`; an object/array
+   -> the whole container (bracket scan) -> `"‹masked›"`; any other
+   unquoted value -> the run up to whitespace, `, ) ] }` or a quote (the
+   enclosing string's end). A value never crosses a delimiter of an
+   enclosing level. `"‹masked›"` is quoted at the key's level
+   (`\\"‹masked›\\"` at level 1, ...), `'‹masked›'` for a '...' key inside
+   an open "..." string, so every enclosing JSON level stays valid.
    Unquoted runs keep a backslash pair as one unit. JSON whitespace (LF,
    CR included) may surround the `:`; the key of any length is tested
    with its \\uXXXX escapes decoded.
@@ -213,7 +216,7 @@ _JSON_LITERAL_RE = re.compile(
 )
 _COMMENT_RE = re.compile(r"[ \t]#")
 # A 1-2 letter string prefix (b'', u'', f'', r'', rb'', ...) before a quote.
-_STR_PREFIX_RE = re.compile(r"[bBuUfFrR]{1,2}(?=[\"']|\\\")")
+_STR_PREFIX_RE = re.compile(r"[bBuUfFrR]{1,2}(?=\\*[\"'])")
 # \uXXXX at any escape level (`\u`, `\\u`): decoded in quoted key text.
 _U_ESCAPE_RE = re.compile(r"\\+u([0-9a-fA-F]{4})")
 # A \uXXXX that can spell part of a key name: an ASCII letter, `_ - .`, or
@@ -299,163 +302,355 @@ def _string_end(text, i, quote, stop_eol):
     return end if text[end:end + 1] == quote else None
 
 
-def _escaped_string_end(text, i):
-    """Escaped form (a JSON string inside a JSON string): content starts at
-    i, the string ends at the inner-unescaped `\\"`. Returns the index of
-    that backslash; None when absent (a raw `"` or newline ends the search:
-    the enclosing string is over)."""
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if ch == "\\":
-            inner = text[i + 1:i + 2]
-            if inner == '"':
-                return i
-            i += 2
-            if inner == "\\":  # inner backslash escapes the next inner char
-                i += 2 if text[i:i + 1] == "\\" else 1
-            continue
-        if ch in '"\n':
-            return None
-        i += 1
-    return None
+# --- escape levels ---------------------------------------------------------
+# A document embedded n times in JSON strings has its `"` written as 2^n-1
+# backslashes + `"`, a literal backslash as 2^n backslashes. So the level of
+# a `"` after a run of r backslashes is the number of trailing 1 bits of r
+# (0: `"`, 1: `\"`, 2: `\\\"`, 5 = 0b101: `\"` after one literal `\\`); a
+# position inside d enclosing strings is at depth d.
+
+# A quote or raw line break with the whole backslash run before it (the
+# lookbehind keeps a match from starting inside a run: linear scan).
+_TOKEN_RE = re.compile(r"(?<!\\)(\\*+)([\"'\n])")
+_DQ_TOKEN_RE = re.compile(r'(?<!\\)(\\*+)"')
+_BACKSLASHES_RE = re.compile(r"\\*")
+_ESCAPED_BREAKS_RE = re.compile(r"(?:\\+[nrt])+")
 
 
-def _bracket_end(text, i, escaped):
-    """End (exclusive) of the container opening at text[i]: one depth
-    counter for `{[` / `]}` regardless of kind; "..." and '...' strings are
-    skipped, a backslash escapes the next character (in the escaped form
-    `\\"` delimits strings); crosses lines; fail closed to end of text."""
+def _level(run):
+    """Escape level of a `"` after `run` backslashes (trailing 1 bits)."""
+    return ((run + 1) & ~run).bit_length() - 1
+
+
+def _delimiter_start(quote_pos, level):
+    """First byte of a level-`level` `"` delimiter ending at quote_pos."""
+    return quote_pos - ((1 << level) - 1)
+
+
+def _run_before(text, p):
+    i = p
+    while i > 0 and text[i - 1] == "\\":
+        i -= 1
+    return p - i
+
+
+def _deep_string_end(text, i, quote, depth):
+    """End of a string whose content starts at i: a `"` string of level
+    `depth` closes at the next `"` of that level (deeper ones are content);
+    a `'` string at depth `depth` closes at the next `'` not escaped at that
+    depth; quote None: no own closing quote. A `"` of a shallower level (an
+    enclosing string ends), a raw line break (depth >= 1) or the end of text
+    is the boundary. Returns (end, closed): end is the first byte of the
+    closing or boundary delimiter, so a span [i, end) never cuts one."""
+    for m in _TOKEN_RE.finditer(text, i):
+        run = len(m.group(1))
+        p = m.end() - 1
+        ch = m.group(2)
+        if ch == '"':
+            level = _level(run)
+            if quote == '"' and level == depth:
+                return _delimiter_start(p, level), True
+            if level < depth:
+                return _delimiter_start(p, level), False
+        elif ch == "'":
+            if quote == "'" and not (run >> depth) & 1:
+                return p, True
+        elif depth:
+            return m.start(), False
+    return len(text), False
+
+
+class _Depth:
+    """Depth (open "..." strings, at any escape level) at a position, from
+    its line start: a `"` of level L opens a string when L equals the
+    depth and closes the strings down to L when L is lower. Queries at
+    non-decreasing positions scan each byte once."""
+
+    def __init__(self, text):
+        self.text = text
+        self.pos = 0
+        self.depth = 0
+
+    def at(self, pos):
+        text = self.text
+        if pos < self.pos:
+            start, depth = text.rfind("\n", 0, pos) + 1, 0
+        else:
+            start, depth = self.pos, self.depth
+            line = text.rfind("\n", start, pos)
+            if line >= 0:
+                start, depth = line + 1, 0
+        for m in _DQ_TOKEN_RE.finditer(text, start, pos):
+            level = _level(len(m.group(1)))
+            if level == depth:
+                depth += 1
+            elif level < depth:
+                depth = level
+        self.pos, self.depth = pos, depth
+        return depth
+
+
+class _Scan:
+    """Per-text scan state for _key_spans. Hits arrive in text order and
+    many can share one unbounded region (a long line, an unclosed string,
+    run or container), so a forward scan's result is reused for a later
+    start inside the scanned range at the same parse state: a start not
+    just after a backslash (which could escape it or sit inside a quote's
+    run). Every result equals a fresh scan; each region is scanned once.
+    Containers are resolved after the hit loop, when every container start
+    is known (_bracket_end records only those)."""
+
+    def __init__(self, text):
+        self.text = text
+        self.depth_at = _Depth(text).at
+        self._eol = (0, -1)
+        self._comment = (0, -1, None)  # (from, eol, match start or None)
+        self._deep = {}  # (quote, depth) -> (from, end, closed)
+        self._run = {}  # stop set -> (from, end)
+        self._containers = []  # (span index, v, depth, mask, tail stop)
+
+    def _reusable(self, lo, i, hi):
+        return lo <= i <= hi and (i == lo or self.text[i - 1] != "\\")
+
+    def eol(self, i):
+        lo, hi = self._eol
+        if not lo <= i <= hi:
+            hi = _eol(self.text, i)
+            self._eol = (i, hi)
+        return hi
+
+    def comment(self, i, eol):
+        """Start of the first ` #`/`\\t#` in [i, eol), or None."""
+        lo, last_eol, found = self._comment
+        if last_eol == eol and lo <= i and (found is None or i <= found):
+            return found
+        match = _COMMENT_RE.search(self.text, i, eol)
+        found = None if match is None else match.start()
+        self._comment = (i, eol, found)
+        return found
+
+    def deep_end(self, i, quote, depth):
+        lo, end, closed = self._deep.get((quote, depth), (0, -1, False))
+        if not self._reusable(lo, i, end):
+            end, closed = _deep_string_end(self.text, i, quote, depth)
+            self._deep[quote, depth] = (i, end, closed)
+        return end, closed
+
+    def run_end(self, i, stop):
+        lo, end = self._run.get(stop, (0, -1))
+        if not self._reusable(lo, i, end):
+            end = _run_end(self.text, i, stop)
+            self._run[stop] = (i, end)
+        return end
+
+    def container(self, v, depth, mask, tail=None):
+        """Placeholder span for the container opening at v (its end is
+        set by resolve); tail: a run stop set continuing after it."""
+        self._containers.append((v, depth, mask, tail))
+        return (v, None, mask, len(self._containers) - 1)
+
+    def resolve(self, spans):
+        if not self._containers:
+            return spans
+        wanted = {}
+        for v, depth, _, _ in self._containers:
+            wanted.setdefault(depth, set()).add(v)
+        memo = {}
+        ends = []
+        for v, depth, _, tail in self._containers:
+            end = _bracket_end(self.text, v, depth, memo, wanted[depth])
+            if tail is not None:
+                end = self.run_end(end, tail)
+            ends.append(end)
+        return [
+            span if span[1] is not None else (span[0], ends[span[3]], span[2])
+            for span in spans
+        ]
+
+
+def _bracket_end(text, i, depth, memo=None, wanted=()):
+    """End (exclusive) of the container opening at text[i], at escape depth
+    `depth`: one nesting counter for `{[` / `]}` regardless of kind; strings
+    of this depth ("..." at its level, '...') are skipped, a backslash
+    escapes the next character; crosses lines at depth 0 (fail closed to
+    end of text); at depth >= 1 an enclosing delimiter or a raw line break
+    ends it (fail closed to that boundary, outer levels intact).
+
+    memo {(depth, opener): (end, closed)}: an opener in `wanted` that this
+    scan reaches outside a string has the same end from there (its
+    matching closer, or this scan's end when it stays open), so it is
+    recorded; a known opener reached outside a string is jumped over
+    (closed: balanced) or ends this scan (open: this scan never closes
+    either)."""
+    if memo is not None and (depth, i) in memo:
+        return memo[depth, i][0]
     n = len(text)
-    depth = 0
+    nest = 0
+    pending = []  # (wanted opener, its nest) still open
+    end = n
     while i < n:
         ch = text[i]
-        if ch == "\\":
-            if escaped and text[i + 1:i + 2] == '"':
-                close = _escaped_string_end(text, i + 2)
-                if close is None:
-                    return n
-                i = close + 2
+        if ch == "\\" or ch == '"':
+            j = _BACKSLASHES_RE.match(text, i).end()
+            run = j - i
+            if text[j:j + 1] == '"':
+                level = _level(run)
+                if level < depth:
+                    end = _delimiter_start(j, level)
+                    break
+                if level > depth:
+                    i = j + 1  # deeper quote: content
+                    continue
+                if level == 0:
+                    close = _string_end(text, j + 1, '"', False)
+                    if close is None:
+                        break
+                    i = close + 1
+                    continue
+                end, closed = _deep_string_end(text, j + 1, '"', level)
+                if not closed:
+                    break
+                i = end + (1 << level)
+                end = n
                 continue
-            i += 2
+            i = j + 1 if run % 2 else j  # an odd run escapes the next char
             continue
-        if ch in "\"'":
-            close = _string_end(text, i + 1, ch, False)
-            if close is None:
-                return n
-            i = close + 1
+        if ch == "'":
+            if depth == 0:
+                close = _string_end(text, i + 1, "'", False)
+                if close is None:
+                    break
+                i = close + 1
+                continue
+            end, closed = _deep_string_end(text, i + 1, "'", depth)
+            if not closed:
+                break
+            i = end + 1
+            end = n
             continue
+        if ch == "\n" and depth:
+            end = i
+            break
         if ch in "{[":
-            depth += 1
+            if nest and memo is not None and (depth, i) in memo:
+                known, closed = memo[depth, i]
+                if closed:
+                    i = known
+                    continue
+                end = known
+                break
+            nest += 1
+            if i in wanted:
+                pending.append((i, nest))
         elif ch in "}]":
-            depth -= 1
-            if depth <= 0:
+            if pending and pending[-1][1] == nest:
+                memo[depth, pending.pop()[0]] = (i + 1, True)
+            nest -= 1
+            if nest <= 0:
                 return i + 1
         i += 1
-    return n
+    if memo is not None:
+        for opener, _ in pending:
+            memo[depth, opener] = (end, False)
+    return end
 
 
-def _run_end(text, i, stop, stop_escaped_quote):
-    """End of an unquoted value run. With stop_escaped_quote a backslash
-    pair is one unit (`\\\\` stays inside the value, so the string's own
-    closing quote is never turned into an escaped one); `\\"`, `\\'`, a
-    trailing backslash and a backslash before a line break end the run."""
+def _run_end(text, i, stop):
+    """End of an unquoted value run. A backslash run is one unit: an odd run
+    escapes the next character; before a quote, a line break or the end of
+    text the run ends the value, minus the backslashes that belong to that
+    quote's delimiter at its escape level (so `\\\\` of a value stays inside
+    it and no delimiter of any level is cut)."""
     n = len(text)
     while i < n:
         ch = text[i]
         if ch in stop:
             break
-        if stop_escaped_quote and ch == "\\":
-            if text[i + 1:i + 2] in ("", "\"", "'", "\r", "\n"):
-                break
-            i += 2
-            continue
-        i += 1
-    return min(i, n)
-
-
-def _in_open_string(text, line_start, pos):
-    """True when pos sits inside an unclosed "..." string of its line."""
-    inside = False
-    i = line_start
-    while i < pos:
-        ch = text[i]
         if ch == "\\":
-            i += 2
+            j = _BACKSLASHES_RE.match(text, i).end()
+            if text[j:j + 1] in ("", "\"", "'", "\r", "\n"):
+                return _delimiter_start(j, _level(j - i))
+            i = j + 1 if (j - i) % 2 else j
             continue
-        if ch == '"':
-            inside = not inside
         i += 1
-    return inside
+    return i
 
 
 # --- value spans -----------------------------------------------------------
 
 
-def _quoted_value(text, v):
-    """Span of a quoted value starting at v (`"`, `'` or escaped `\\"`);
-    unclosed on its line -> to end of line. None when not quoted/empty."""
-    if text.startswith('\\"', v):
-        start = v + 2
-        close = _escaped_string_end(text, start)
-    elif text[v] in "\"'":
+def _quoted_value(text, v, depth):
+    """Span of a quoted value starting at v (`"` of any escape level, `'`)
+    for a key at escape depth `depth`; unclosed -> to the end of its line or
+    enclosing string. None when v starts no quoted value; () when it is
+    empty or v is an enclosing string's closing delimiter (no value)."""
+    run = _BACKSLASHES_RE.match(text, v).end() - v
+    ch = text[v + run:v + run + 1]
+    if ch == '"':
+        level = _level(run)
+        if run != (1 << level) - 1:
+            return None  # literal backslashes first: not a quoted value
+        if level < depth:
+            return ()
+        start = v + run + 1
+        if level == 0:
+            close = _string_end(text, start, '"', True)
+            end = _eol(text, start) if close is None else close
+            closed = close is not None
+        else:
+            end, closed = _deep_string_end(text, start, '"', level)
+    elif ch == "'" and run == 0:
         start = v + 1
-        close = _string_end(text, start, text[v], True)
+        if depth == 0:
+            close = _string_end(text, start, "'", True)
+            end = _eol(text, start) if close is None else close
+            closed = close is not None
+        else:
+            end, closed = _deep_string_end(text, start, "'", depth)
     else:
         return None
-    if close is not None:
-        end = close
-    else:
-        end = _eol(text, start)
-        # unclosed '...' inside an open "..." string: stop at that string's end
-        if text[v] == "'" and _in_open_string(text, text.rfind("\n", 0, v) + 1, v):
-            outer = _string_end(text, start, '"', True)
-            if outer is not None and outer < end:
-                end = outer
+    if not closed:
         end = _rstrip_end(text, start, end)
     return (start, end, MASK) if end > start else ()
 
 
-def _prefixed_value(text, v):
+def _prefixed_value(text, v, depth):
     """A string-prefixed literal (`b'v'`, `rb"v"`, `f\\"v\\"`): the span of
     its quoted content (the prefix stays); None when v starts no such
     literal."""
     prefix = _STR_PREFIX_RE.match(text, v)
     if prefix is None:
         return None
-    return _quoted_value(text, prefix.end())
+    return _quoted_value(text, prefix.end(), depth)
 
 
-def _form1_value(text, v, qmask, escaped):
-    """Value after a quoted key (JSON-style); qmask replaces literals and
-    containers, quoted at the key's level."""
-    quoted = _quoted_value(text, v)
+def _form1_value(text, v, qmask, depth, scan):
+    """Value after a quoted key (JSON-style) at escape depth `depth`; qmask
+    replaces literals and containers, quoted at the key's level."""
+    quoted = _quoted_value(text, v, depth)
     if quoted is None:
-        quoted = _prefixed_value(text, v)
+        quoted = _prefixed_value(text, v, depth)
     if quoted is not None:
         return quoted or None
     if text[v] in "{[":
-        return (v, _bracket_end(text, v, escaped), qmask)
-    end = _run_end(text, v, _FORM1_STOP, True)
+        return scan.container(v, depth, qmask)
+    end = scan.run_end(v, _FORM1_STOP)
     if end == v:
         return None
     literal = _JSON_LITERAL_RE.fullmatch(text, v, end) is not None
     return (v, end, qmask if literal else MASK)
 
 
-def _form4_value(text, v, sep_end, key_start):
-    line_start = text.rfind("\n", 0, key_start) + 1
-    eol = _eol(text, v)
+def _form4_value(text, v, sep_end, depth, scan):
+    eol = scan.eol(v)
     if text[v] == "#" and v > sep_end:
         return None  # `k: #...` is a comment
     end = eol
-    comment = _COMMENT_RE.search(text, v, eol)
+    comment = scan.comment(v, eol)
     if comment is not None:
-        end = comment.start()
-    if _in_open_string(text, line_start, key_start):
-        close = _string_end(text, v, '"', True)
-        if close is not None and close < end:
-            end = close
+        end = comment
+    if depth:  # inside an enclosing string: up to its end
+        end = min(end, scan.deep_end(v, None, depth)[0])
     end = _rstrip_end(text, v, end)
     return (v, end, MASK) if end > v else None
 
@@ -469,16 +664,20 @@ def _skip_hspace(text, i):
 
 def _skip_json_ws(text, i):
     """Skip JSON whitespace (space, tab, LF, CR) and its `\\n`, `\\r`, `\\t`
-    escapes (the same document embedded in a string or printed as a repr)."""
+    escapes at any escape level (the same document embedded in strings or
+    printed as a repr)."""
     n = len(text)
     while i < n:
         ch = text[i]
         if ch in _JSON_WS:
             i += 1
-        elif ch == "\\" and text[i + 1:i + 2] in ("n", "r", "t"):
-            i += 2
-        else:
-            break
+            continue
+        if ch == "\\":
+            escapes = _ESCAPED_BREAKS_RE.match(text, i)
+            if escapes is not None:
+                i = escapes.end()
+                continue
+        break
     return i
 
 
@@ -501,21 +700,27 @@ def _decode_key(key):
     return _U_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), key)
 
 
-def _quoted_key_span(text, start, he):
+def _quoted_key_span(text, start, he, scan):
     """Value span for a quoted key whose text starts at `start` (after the
     nearest quote before the hit) and must contain the hit end `he`; False
     when there is no such quoted key; None when there is but nothing to
-    mask. JSON whitespace (LF, CR included) may surround the `:`."""
+    mask. A "..." key of escape level k sits at depth k; a '...' key at
+    the depth of its position (scan.depth_at). JSON whitespace (LF, CR and
+    their escapes included) may surround the `:`."""
     quote = text[start - 1]
-    escaped = quote == '"' and start >= 2 and text[start - 2] == "\\"
-    if escaped:
-        close = _escaped_string_end(text, start)
-        close_end = None if close is None else close + 2
+    if quote == '"':
+        depth = _level(_run_before(text, start - 1))
     else:
+        depth = scan.depth_at(start - 1)
+    if depth == 0:
         close = _string_end(text, start, quote, True)
-        close_end = None if close is None else close + 1
+    else:
+        close, closed = _deep_string_end(text, start, quote, depth)
+        if not closed:
+            close = None
     if close is None or close < he:
         return False
+    close_end = close + (1 << depth if quote == '"' else 1)
     kind, sep_end = _separator(text, close_end)
     if kind is None:
         if text[sep_end:sep_end + 1] not in ("\r", "\n", "\\"):
@@ -529,20 +734,17 @@ def _quoted_key_span(text, start, he):
     v = _skip_json_ws(text, sep_end)
     if v >= len(text):
         return None
-    if escaped:
-        qmask = '\\"%s\\"' % MASK
-    elif quote == "'" and _in_open_string(
-        text, text.rfind("\n", 0, start) + 1, start - 1
-    ):
-        qmask = "'%s'" % MASK  # a raw `"` would end the enclosing string
+    if quote == '"':
+        delimiter = "\\" * ((1 << depth) - 1) + '"'  # the key's own level
+        qmask = delimiter + MASK + delimiter
+    elif depth:
+        qmask = "'%s'" % MASK  # a `"` would end an enclosing string
     else:
         qmask = '"%s"' % MASK
-    if qmask[0] != '"' and text[v] == '"':
-        return None  # the enclosing "..." string ends: no value
-    return _form1_value(text, v, qmask, escaped)
+    return _form1_value(text, v, qmask, depth, scan)
 
 
-def _unquoted_key_span(text, s, e):
+def _unquoted_key_span(text, s, e, scan):
     raw = text[s:e]
     key = raw.lstrip("-")
     dashes = len(raw) - len(key)
@@ -558,20 +760,20 @@ def _unquoted_key_span(text, s, e):
     n = len(text)
     if v >= n or text[v] in "\r\n":
         return None
-    quoted = _quoted_value(text, v)
+    depth = scan.depth_at(s)
+    quoted = _quoted_value(text, v, depth)
     if quoted is None and kind != ":":
-        quoted = _prefixed_value(text, v)  # forms 3/5: b'v', rb"v", ...
+        quoted = _prefixed_value(text, v, depth)  # forms 3/5: b'v', rb"v"
     if quoted is not None:  # form 2
         return quoted or None
     if flag:  # form 5
-        end = _run_end(text, v, _FLAG_STOP, True)
+        end = scan.run_end(v, _FLAG_STOP)
     elif kind == ":":  # form 4
-        return _form4_value(text, v, sep_end, s)
+        return _form4_value(text, v, sep_end, depth, scan)
+    elif text[v] in "{[":  # form 3 container (and the run after it)
+        return scan.container(v, depth, MASK, _FORM3_STOP)
     else:  # form 3
-        end = v
-        if text[v] in "{[":
-            end = _bracket_end(text, v, False)
-        end = _run_end(text, end, _FORM3_STOP, True)
+        end = scan.run_end(v, _FORM3_STOP)
     return (v, end, MASK) if end > v else None
 
 
@@ -601,6 +803,7 @@ def _key_spans(text, lowered):
     delim = -1  # nearest `"`, `'` or newline before `scanned`
     scanned = 0
     run_end = 0  # end of the last unquoted key run evaluated
+    scan = _Scan(text)
     n = len(text)
     for hs, he, escape_only in _hits(text, lowered):
         if hs > scanned:
@@ -615,7 +818,7 @@ def _key_spans(text, lowered):
         if delim >= 0 and text[delim] != "\n":
             start = delim + 1
             if start not in quoted_by_start:
-                quoted_by_start[start] = _quoted_key_span(text, start, he)
+                quoted_by_start[start] = _quoted_key_span(text, start, he, scan)
             quoted = quoted_by_start[start]
         if quoted is not False:
             if quoted and quoted[0] not in seen_quoted:
@@ -633,10 +836,10 @@ def _key_spans(text, lowered):
         run_end = e
         if s > 0 and text[s - 1] == "/":
             continue  # a path component, not a key
-        span = _unquoted_key_span(text, s, e)
+        span = _unquoted_key_span(text, s, e, scan)
         if span:
             spans.append(span)
-    return spans
+    return scan.resolve(spans)
 
 
 def _format_spans(text, lowered):
@@ -647,15 +850,20 @@ def _format_spans(text, lowered):
         for match in regex.finditer(text):
             if "v" in regex.groupindex:
                 start, end = match.span("v")
-                # PEM body: keep the surrounding line breaks (real or \n-escaped).
+                # PEM body: keep the surrounding line breaks (real or
+                # escaped at any level), so no escape sequence is cut.
                 while start < end and text[start] in " \t\r\n":
                     start += 1
                 while end > start and text[end - 1] in " \t\r\n":
                     end -= 1
-                if text.startswith("\\n", start) and end - start > 2:
-                    start += 2
-                if text.endswith("\\n", start, end) and end - start > 2:
-                    end -= 2
+                head = _ESCAPED_BREAKS_RE.match(text, start, end)
+                if head is not None and head.end() < end:
+                    start = head.end()
+                while end - start > 2 and text[end - 1] in "nr":
+                    run = _run_before(text, end - 1)
+                    if not run or end - 1 - run <= start:
+                        break
+                    end -= run + 1
             else:
                 start, end = match.span()
             if end > start:
