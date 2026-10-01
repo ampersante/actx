@@ -10,7 +10,7 @@ $ git status        →   $ actx git status
 
 ![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB)
 ![Stdlib only](https://img.shields.io/badge/dependencies-none-brightgreen)
-![Tests](https://img.shields.io/badge/tests-335%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1168%20passed-brightgreen)
 
 ---
 
