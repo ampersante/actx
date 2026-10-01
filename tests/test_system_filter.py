@@ -102,21 +102,24 @@ class SystemFilterTests(unittest.TestCase):
         self.assertEqual(p.returncode, raw.returncode)
         self.assertEqual(p.stdout, raw.stdout)
 
-    def test_grep_no_matches_prints_no_matches(self):
+    # TK-61 C3: grep is the content class - its own bytes and exit code
+    # (was: "no matches" on rc 1 and "(no path): N matches" grouping).
+
+    def test_grep_no_matches_prints_nothing(self):
         self._write("f.txt", "content\n")
         p = self.run_actx("grep", "zzz", "f.txt")
         self.assertEqual(p.returncode, 1)
-        self.assertEqual(p.stdout, "no matches\n")
+        self.assertEqual(p.stdout, "")
 
-    def test_grep_single_file_groups_under_no_path(self):
+    def test_grep_single_file_prints_bytes_unchanged(self):
         self._write(
             "f.txt",
             "\n".join("match line %03d" % i for i in range(100)) + "\n",
         )
+        raw = self.run_raw("grep", "match", "f.txt")
         p = self.run_actx("grep", "match", "f.txt")
         self.assertEqual(p.returncode, 0)
-        self.assertIn("(no path): 100 matches", p.stdout)
-        self.assertIn("match line 000", p.stdout)
+        self.assertEqual(p.stdout, raw.stdout)
 
 
     def test_wc_counts_lines(self):

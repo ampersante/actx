@@ -1,7 +1,11 @@
-import json
+"""docker/kubectl/helm/gh/aws summary verbs. Views and inspections
+(docker inspect, kubectl get/describe, helm template/get metadata/show,
+gh views and `pr diff`) are the content class and logs (docker logs,
+docker compose logs, kubectl logs) the log class (TK-61): cli.main runs
+them through runner.run_content / runner.run_lossless and they never
+reach this module."""
 
 from actx_lib import cli_families, runner
-from actx_lib.filters import json_compactor
 from actx_lib.redaction import redact_text
 
 # Secret values are masked by actx_lib.redaction (value masking, TK-61):
@@ -28,26 +32,6 @@ def _rle(text):
 
 def _dedup_compact(text):
     return _rle(redact_text(text))
-
-
-def compact_aws(text):
-    compacted = json_compactor.compact_json(
-        text, indent=2, sort_keys=True, max_items=None
-    )
-    if compacted is not None:
-        return compacted
-    return _dedup_compact(text)
-
-
-def _compact_json_output(text):
-    """compact_aws pattern (TK-38/TK-40): valid JSON -> secret-masked
-    compact dump; anything else -> the dedup path (fail-open)."""
-    compacted = json_compactor.compact_json(
-        text, indent=2, sort_keys=True, max_items=None
-    )
-    if compacted is not None:
-        return compacted
-    return _dedup_compact(text)
 
 
 def _run_compact(args, config, parser):
@@ -97,11 +81,7 @@ def run_docker(args, config):
     if verbs is None:
         return runner.run_passthrough(["docker"] + args)
     sub = verbs[0]
-    if sub == "inspect":
-        # JSON array output: compact_aws pattern (json_compactor + text
-        # fallback via _dedup_compact).
-        return _run_compact(["docker"] + args, config, compact_aws)
-    if sub in ("ps", "images", "logs"):
+    if sub in ("ps", "images"):
         return _run_compact(["docker"] + args, config, _dedup_compact)
     if sub == "stats" and "--no-stream" in verbs[1:]:
         # Bare `docker stats` streams: it never reaches the parser — the
@@ -111,28 +91,14 @@ def run_docker(args, config):
         return _run_compact(["docker"] + args, config, _dedup_compact)
     if sub == "compose":
         tail = _first_verb(verbs[1:], _COMPOSE_VALUE_FLAGS)
-        if tail is not None and tail[0] in ("ps", "logs"):
+        if tail is not None and tail[0] == "ps":
             return _run_compact(["docker"] + args, config, _dedup_compact)
     return runner.run_passthrough(["docker"] + args)
 
 
-def _has_json_output_flag(args):
-    """True when the argv asks kubectl for machine-readable JSON output
-    (`-o json`, `-o jsonpath...`). The jsonpath form is usually not valid
-    JSON - _compact_json_output then fails open to the dedup path."""
-    for i, tok in enumerate(args):
-        if tok == "-o" and i + 1 < len(args):
-            nxt = args[i + 1]
-            if nxt == "json" or nxt.startswith("jsonpath"):
-                return True
-    return False
-
-
 # TK-40: dispatch by EFFECTIVE verbs (cli_families.effective_verbs), not by
-# args[0] - `kubectl -n prod get pods` must compact, not passthrough (H-F4).
-_KUBECTL_COMPACT_SUBS = frozenset(
-    {"get", "describe", "top", "events", "logs"}
-)
+# args[0] - `kubectl -n prod top pods` must compact, not passthrough (H-F4).
+_KUBECTL_COMPACT_SUBS = frozenset({"top", "events"})
 
 
 def run_kubectl(args, config):
@@ -141,20 +107,13 @@ def run_kubectl(args, config):
     verbs = cli_families.effective_verbs(["kubectl"] + args)
     sub = verbs[0] if verbs else None
     if sub in _KUBECTL_COMPACT_SUBS:
-        parser = _dedup_compact
-        if _has_json_output_flag(args):
-            parser = _compact_json_output
-        return _run_compact(["kubectl"] + args, config, parser)
+        return _run_compact(["kubectl"] + args, config, _dedup_compact)
     return runner.run_passthrough(["kubectl"] + args)
 
 
-# TK-40: helm compaction subset (plan §4 E2). String dedup only - helm
-# template/values output is YAML and no parser is allowed here; `helm get
-# values` never reaches this list (stream_specs -> never-wrap, exit 125)
-# and `helm show values/chart` stay raw passthrough by spec.
+# TK-40: helm compaction subset (plan §4 E2). String dedup only; `helm get
+# values` never reaches it (stream_specs -> never-wrap, exit 125).
 _HELM_COMPACT_SUBS = (
-    ("template",),
-    ("get", "metadata"),
     ("list",),
     ("status",),
     ("history",),
@@ -181,6 +140,7 @@ def run_gh(args, config):
 
 
 def run_aws(args, config):
+    # Generic runner path: JSON is printed as its masked raw text (TK-61).
     if not args:
         return runner.run_passthrough(["aws"])
-    return _run_compact(["aws"] + args, config, compact_aws)
+    return runner.run(["aws"] + args, config)

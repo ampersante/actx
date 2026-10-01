@@ -1,5 +1,4 @@
 import io
-import json
 import subprocess
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -57,16 +56,6 @@ default/web-abc.17a Pod spec sync succeeded
 default/web-abc.17b Scheduled successfully on node-1
 """
 
-KUBECTL_GET_JSON = json.dumps({
-    "apiVersion": "v1",
-    "kind": "PodList",
-    "metadata": {"resourceVersion": "12345"},
-    "items": [
-        {"metadata": {"name": "web-abc"}, "status": {"phase": "Running"}},
-        {"metadata": {"name": "web-def"}, "status": {"phase": "Running"}},
-    ],
-})
-
 HELM_TEMPLATE = """\
 ---
 # Source: mychart/templates/service.yaml
@@ -106,21 +95,6 @@ AWS_JSON = """\
 AWS_TEXT = """\
 line with password=secret
 normal line
-"""
-
-DOCKER_INSPECT_JSON = """\
-[
-  {"Id": "abc123def456", "Image": "nginx:1",
-   "State": {"Status": "running", "Running": true}},
-  {"Id": "def456abc123", "Image": "redis:7",
-   "State": {"Status": "running", "Running": true}}
-]
-"""
-
-# docker inspect on a missing container prints a plain error (no JSON).
-DOCKER_INSPECT_INVALID = """\
-Error response from daemon: No such container: nope
-Error response from daemon: No such container: nope
 """
 
 DOCKER_SYSTEM_DF = """\
@@ -177,16 +151,8 @@ class InfraParserTests(unittest.TestCase):
         self.assertIn("(x2)", out)
         self.assertIn("node-1", out)
 
-    def test_kubectl_json_output_compacts(self):
-        out = infra_filter._compact_json_output(KUBECTL_GET_JSON)
-        self.assertIsNotNone(out)
-        parsed = json.loads(out)
-        self.assertEqual(parsed["kind"], "PodList")
-        self.assertEqual(parsed["items"][0]["metadata"]["name"], "web-abc")
-
-    def test_kubectl_json_parser_falls_back_to_dedup(self):
-        out = infra_filter._compact_json_output(KUBECTL_GET)
-        self.assertIn("web-abc", out)  # not JSON -> dedup path, no crash
+    # TK-61 C3: kubectl -o json re-dump tests (_compact_json_output) removed
+    # with the function - `kubectl get` is the content class, bytes 1:1.
 
     def test_helm_template_dedups_repeated_lines(self):
         out = infra_filter._dedup_compact(HELM_TEMPLATE)
@@ -203,54 +169,10 @@ class InfraParserTests(unittest.TestCase):
         self.assertIn("Fix bug", out)
         self.assertIn("Add feature", out)
 
-    def test_aws_json_masks_secret_values(self):
-        # TK-61 C1: secret keys stay, their values are masked (was: keys
-        # dropped).
-        out = infra_filter.compact_aws(AWS_JSON)
-        self.assertIn("Account", out)
-        self.assertIn("Arn", out)
-        self.assertEqual(json.loads(out)["AccessKeyId"], MASK)
-        self.assertEqual(json.loads(out)["SecretAccessKey"], MASK)
-        self.assertNotIn("AKIAEXAMPLE", out)
-        self.assertNotIn("shhh", out)
-
-    def test_aws_text_masks_secret_values(self):
-        # TK-61 C1: the line stays, the value is masked (was: line dropped).
-        out = infra_filter.compact_aws(AWS_TEXT)
-        self.assertEqual(out, "line with password=%s\nnormal line\n" % MASK)
-
-    def test_aws_json_matches_legacy_dump_byte_for_byte(self):
-        # compact_aws delegates to json_compactor; valid JSON must stay
-        # byte-identical to the pre-TK-38 dump: indent=2, sort_keys=True,
-        # no list trimming - except the secret value, masked in place
-        # (TK-61 C1; was: the secret key dropped).
-        text = json.dumps(
-            {"zeta": [5, 1, 3], "arn": "a", "SecretAccessKey": "shhh",
-             "nested": {"b": 2, "a": 1}, "Rows": [{"y": 2, "x": 1}]}
-        )
-        self.assertEqual(
-            infra_filter.compact_aws(text),
-            json.dumps(json.loads(text), indent=2, sort_keys=True).replace(
-                '"shhh"', '"%s"' % MASK
-            ),
-        )
-
-    def test_docker_inspect_valid_json_compacts(self):
-        # TK-41: inspect goes through the compact_aws pattern — valid JSON
-        # must survive as parseable JSON with values intact.
-        out = infra_filter.compact_aws(DOCKER_INSPECT_JSON)
-        parsed = json.loads(out)
-        self.assertEqual(len(parsed), 2)
-        self.assertEqual(parsed[0]["Id"], "abc123def456")
-        self.assertEqual(parsed[0]["State"]["Status"], "running")
-        self.assertEqual(parsed[1]["Image"], "redis:7")
-
-    def test_docker_inspect_invalid_json_text_fallback(self):
-        # `docker inspect nope` prints a plain daemon error: no JSON to
-        # parse, so the compact_aws pattern falls back to _dedup_compact.
-        out = infra_filter.compact_aws(DOCKER_INSPECT_INVALID)
-        self.assertIn("No such container: nope", out)
-        self.assertIn("(x2)", out)
+    # TK-61 C3: compact_aws is removed. aws runs through the generic
+    # runner.run path: the JSON keeps its raw text (no re-dump, no key
+    # sorting) with secret values masked in place - see AwsRawTextTests.
+    # docker inspect is the content class (runner.run_content).
 
     def test_docker_system_df_keeps_rows(self):
         out = infra_filter._dedup_compact(DOCKER_SYSTEM_DF)
@@ -327,11 +249,19 @@ class DockerEffectiveVerbTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("abc123def456", out)
 
-    def test_inspect_dispatches_to_json_parser(self):
-        rc, out = self._run(["--context", "prod", "inspect", "web"],
-                            DOCKER_INSPECT_JSON)
-        self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(out)[0]["Id"], "abc123def456")
+    def test_inspect_and_logs_are_not_filter_verbs(self):
+        # TK-61 C3: docker inspect is the content class and docker logs /
+        # docker compose logs the log class; cli.main never sends them
+        # here. Reached directly they pass through raw, never compacted.
+        for args in (
+            ["--context", "prod", "inspect", "web"],
+            ["inspect", "web"],
+            ["logs", "web"],
+            ["compose", "logs"],
+            ["compose", "-f", "x.yml", "logs"],
+        ):
+            with self.subTest(args=args):
+                self._assert_passthrough(args)
 
     def test_system_df_compacts(self):
         rc, out = self._run(["system", "df"], DOCKER_SYSTEM_DF)
@@ -342,11 +272,6 @@ class DockerEffectiveVerbTests(unittest.TestCase):
         rc, out = self._run(["stats", "--no-stream"], DOCKER_STATS)
         self.assertEqual(rc, 0)
         self.assertIn("abc123def456", out)
-
-    def test_compose_logs_compacts(self):
-        rc, out = self._run(["compose", "logs"], DOCKER_COMPOSE_LOGS)
-        self.assertEqual(rc, 0)
-        self.assertIn("GET /health 200 (x3)", out)
 
     def test_bare_stats_and_mutating_verbs_stay_passthrough(self):
         for args in (
@@ -390,14 +315,13 @@ class InfraExitCodeTests(unittest.TestCase):
         self.assertIn("abc123def456", out.getvalue())
 
     def test_docker_new_paths_preserve_exit_code(self):
-        # TK-41 paths: inspect (JSON parser + text fallback), system df,
-        # stats --no-stream, compose logs — exit code passthrough each.
+        # TK-41 paths: system df, stats --no-stream, compose ps - exit code
+        # passthrough each. inspect and compose logs left this filter in
+        # TK-61 C3 (content / log class).
         for args, stdout in (
-            (["inspect", "web"], DOCKER_INSPECT_JSON),
-            (["inspect", "nope"], DOCKER_INSPECT_INVALID),
             (["system", "df"], DOCKER_SYSTEM_DF),
             (["stats", "--no-stream"], DOCKER_STATS),
-            (["compose", "logs"], DOCKER_COMPOSE_LOGS),
+            (["compose", "ps"], DOCKER_PS),
         ):
             with self.subTest(args=args):
                 result = subprocess.CompletedProcess(
@@ -414,11 +338,15 @@ class InfraExitCodeTests(unittest.TestCase):
 
 
 class KubectlDispatchTests(unittest.TestCase):
-    """TK-40 / H-F4: dispatch by EFFECTIVE verbs, not args[0]."""
+    """TK-40 / H-F4: dispatch by EFFECTIVE verbs, not args[0].
+
+    TK-61 C3: get/describe are the content class and logs the log class,
+    whatever the -o flag (no flag-dependent classes); only top/events stay
+    in this filter. The effective-verb skip is pinned on `top`."""
 
     def test_verb_behind_value_flag_compacts_not_passthrough(self):
         rc, out, err = _run_filter(
-            infra_filter.run_kubectl, ["-n", "prod", "get", "pods"], KUBECTL_GET
+            infra_filter.run_kubectl, ["-n", "prod", "top", "pods"], KUBECTL_TOP
         )
         self.assertEqual(rc, 0)
         self.assertIn("web-abc", out)
@@ -427,26 +355,24 @@ class KubectlDispatchTests(unittest.TestCase):
     def test_equals_form_value_flag_compacts(self):
         rc, out, _ = _run_filter(
             infra_filter.run_kubectl,
-            ["--namespace=prod", "get", "pods"],
-            KUBECTL_GET,
+            ["--namespace=prod", "top", "pods"],
+            KUBECTL_TOP,
         )
         self.assertEqual(rc, 0)
         self.assertIn("web-abc", out)
 
     def test_boolean_global_flag_compacts(self):
         rc, out, _ = _run_filter(
-            infra_filter.run_kubectl, ["-A", "get", "pods"], KUBECTL_GET
+            infra_filter.run_kubectl, ["-A", "events"], KUBECTL_EVENTS
         )
         self.assertEqual(rc, 0)
-        self.assertIn("web-abc", out)
+        self.assertIn("(x2)", out)
 
-    def test_describe_top_events_logs_compact(self):
+    def test_top_events_compact(self):
         for args, fixture in (
-            (["describe", "pod", "web-abc"], KUBECTL_DESCRIBE),
             (["top", "pods"], KUBECTL_TOP),
             (["events"], KUBECTL_EVENTS),
-            (["logs", "pod/web-abc"], DOCKER_LOGS),
-            (["--context", "ctx", "get", "pods"], KUBECTL_GET),
+            (["--context", "ctx", "top", "pods"], KUBECTL_TOP),
         ):
             with self.subTest(args=args):
                 rc, out, _ = _run_filter(
@@ -455,35 +381,22 @@ class KubectlDispatchTests(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 self.assertTrue(out.strip(), args)
 
-    def test_dash_o_json_uses_json_parser(self):
-        rc, out, _ = _run_filter(
-            infra_filter.run_kubectl, ["get", "pods", "-o", "json"],
-            KUBECTL_GET_JSON,
-        )
-        self.assertEqual(rc, 0)
-        parsed = json.loads(out)
-        self.assertEqual(parsed["kind"], "PodList")
-
-    def test_dash_o_jsonpath_falls_back_to_dedup(self):
-        # jsonpath output is not valid JSON -> compact_json returns None ->
-        # the dedup fallback still compacts (fail-open).
-        rc, out, _ = _run_filter(
-            infra_filter.run_kubectl,
+    def test_get_describe_logs_are_not_filter_verbs(self):
+        # Content/log class: cli.main never routes them here; reached
+        # directly they pass through raw (no json.loads, no dedup).
+        for args in (
+            ["get", "pods"],
+            ["-n", "prod", "get", "pods", "-o", "json"],
             ["get", "pods", "-o", "jsonpath={.items[*].metadata.name}"],
-            "web-abc\nweb-def\n",
-        )
-        self.assertEqual(rc, 0)
-        self.assertIn("web-abc", out)
-
-    def test_plain_table_output_is_not_json_parsed(self):
-        # The parser choice is flag-driven: table output takes the dedup
-        # path even though it is not JSON (same visible result, but the
-        # flag scan must not send tables through json.loads).
-        rc, out, _ = _run_filter(
-            infra_filter.run_kubectl, ["get", "pods"], KUBECTL_GET
-        )
-        self.assertEqual(rc, 0)
-        self.assertIn("READY", out)
+            ["describe", "pod", "web-abc"],
+            ["logs", "pod/web-abc"],
+        ):
+            with self.subTest(args=args), mock.patch(
+                "actx_lib.runner.run_passthrough", return_value=0
+            ) as passthrough:
+                rc = infra_filter.run_kubectl(args, CONFIG)
+                self.assertEqual(rc, 0)
+                passthrough.assert_called_once_with(["kubectl"] + args)
 
     def test_unknown_subcommand_passthrough(self):
         result = subprocess.CompletedProcess(
@@ -502,24 +415,24 @@ class KubectlDispatchTests(unittest.TestCase):
 
     def test_non_zero_exit_code_preserved(self):
         result = subprocess.CompletedProcess(
-            ["kubectl", "get", "pods"], 1, "", "error: boom\n"
+            ["kubectl", "top", "pods"], 1, "", "error: boom\n"
         )
         out = io.StringIO()
         err = io.StringIO()
         with mock.patch("actx_lib.runner.execute", return_value=result):
             with redirect_stdout(out), redirect_stderr(err):
-                rc = infra_filter.run_kubectl(["get", "pods"], CONFIG)
+                rc = infra_filter.run_kubectl(["top", "pods"], CONFIG)
         self.assertEqual(rc, 1)
 
 
 class HelmFilterTests(unittest.TestCase):
     def test_ro_subcommands_compact(self):
+        # TK-61 C3: template and get metadata are the content class
+        # (runner.run_content) and left this list.
         for args, fixture in (
-            (["template", "mychart"], HELM_TEMPLATE),
             (["list"], HELM_LIST),
             (["status", "my-release"], HELM_LIST),
             (["history", "my-release"], HELM_LIST),
-            (["get", "metadata", "my-release"], HELM_LIST),
         ):
             with self.subTest(args=args):
                 rc, out, _ = _run_filter(
@@ -583,15 +496,6 @@ class InfraFailOpenTests(unittest.TestCase):
         )
         self._assert_raw(rc, out, err)
 
-    def test_docker_inspect_fails_open(self):
-        # TK-41: the JSON parser path fails open to raw output too.
-        rc, out, err = _fail_open(
-            infra_filter.run_docker,
-            ["inspect", "c"],
-            "actx_lib.filters.infra_filter.compact_aws",
-        )
-        self._assert_raw(rc, out, err)
-
     def test_docker_system_df_fails_open(self):
         rc, out, err = _fail_open(
             infra_filter.run_docker,
@@ -608,34 +512,29 @@ class InfraFailOpenTests(unittest.TestCase):
         )
         self._assert_raw(rc, out, err)
 
-    def test_docker_compose_logs_fails_open(self):
+    def test_docker_compose_ps_fails_open(self):
+        # TK-61 C3: was compose logs (now the log class, no compactor).
         rc, out, err = _fail_open(
             infra_filter.run_docker,
-            ["compose", "logs"],
+            ["compose", "ps"],
             "actx_lib.filters.infra_filter._dedup_compact",
         )
         self._assert_raw(rc, out, err)
 
     def test_kubectl_fails_open(self):
+        # TK-61 C3: was `get` (now the content class, no compactor).
         rc, out, err = _fail_open(
             infra_filter.run_kubectl,
-            ["get"],
+            ["top", "pods"],
             "actx_lib.filters.infra_filter._dedup_compact",
         )
         self._assert_raw(rc, out, err)
 
-    def test_kubectl_json_path_fails_open(self):
-        rc, out, err = _fail_open(
-            infra_filter.run_kubectl,
-            ["get", "pods", "-o", "json"],
-            "actx_lib.filters.infra_filter._compact_json_output",
-        )
-        self._assert_raw(rc, out, err)
-
     def test_helm_fails_open(self):
+        # TK-61 C3: was `template` (now the content class, no compactor).
         rc, out, err = _fail_open(
             infra_filter.run_helm,
-            ["template", "mychart"],
+            ["list"],
             "actx_lib.filters.infra_filter._dedup_compact",
         )
         self._assert_raw(rc, out, err)
@@ -649,12 +548,61 @@ class InfraFailOpenTests(unittest.TestCase):
         self._assert_raw(rc, out, err)
 
     def test_aws_fails_open(self):
-        rc, out, err = _fail_open(
-            infra_filter.run_aws,
-            ["sts"],
-            "actx_lib.filters.infra_filter.compact_aws",
+        # TK-61 C3: aws has no compactor left; the generic runner.run path
+        # fails open when masking raises (raw text, original exit code).
+        result = subprocess.CompletedProcess(
+            ["aws", "sts"], 0, "raw stdout\n", "raw stderr\n"
         )
-        self._assert_raw(rc, out, err)
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch(
+            "actx_lib.runner.subprocess.run", return_value=result
+        ), mock.patch(
+            "actx_lib.runner._redact_result", return_value=None
+        ):
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = infra_filter.run_aws(["sts"], CONFIG)
+        self._assert_raw(rc, out.getvalue(), err.getvalue())
+
+
+class AwsRawTextTests(unittest.TestCase):
+    """TK-61 C3: aws output is its own text with secret values masked - no
+    JSON re-dump (key order, indentation and duplicates as aws printed
+    them); was compact_aws (json.dumps indent=2, sort_keys=True)."""
+
+    def _run(self, stdout, returncode=0):
+        result = subprocess.CompletedProcess(
+            ["aws", "sts", "get-caller-identity"], returncode, stdout, ""
+        )
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch("actx_lib.runner.subprocess.run", return_value=result):
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = infra_filter.run_aws(["sts", "get-caller-identity"], CONFIG)
+        return rc, out.getvalue()
+
+    def test_json_keeps_raw_text_with_values_masked(self):
+        rc, out = self._run(AWS_JSON)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("AKIAEXAMPLE", out)
+        self.assertNotIn("shhh", out)
+        self.assertEqual(
+            out,
+            AWS_JSON.replace('"AKIAEXAMPLE"', '"%s"' % MASK).replace(
+                '"shhh"', '"%s"' % MASK
+            ),
+        )
+
+    def test_one_line_json_is_not_reformatted(self):
+        text = '{"zeta": [5, 1, 3], "arn": "a", "nested": {"b": 2, "a": 1}}\n'
+        rc, out = self._run(text, returncode=3)
+        self.assertEqual(rc, 3)
+        self.assertEqual(out, text)
+
+    def test_text_masks_value_keeps_line(self):
+        rc, out = self._run(AWS_TEXT)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "line with password=%s\nnormal line\n" % MASK)
 
 
 if __name__ == "__main__":

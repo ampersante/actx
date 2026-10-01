@@ -51,6 +51,12 @@ head or per verb-path node:
                    eslint/swiftlint/swiftformat): reject if the tail
                    carries the literal "--fix"/"fix"/"format" or any token
                    starting with "--fix".
+  output        -- output class (TK-61): "content" (bytes 1:1, secret
+                   values masked), "log" (repeat collapse + ANSI strip, no
+                   cap) or "summary" (the REGISTRY filter). Every head node
+                   sets it explicitly; None on a child level means "inherit
+                   from the nearest ancestor" (rewriter.output_class). Not
+                   part of the admission grammar.
 
 Source per head, in order of preference: (1) exact rewrite corpus token
 usage; (2) tables already vetted with a dated citation elsewhere in this
@@ -88,8 +94,10 @@ BRANCH_READ_ONLY = frozenset({
 def spec(verbs=None, bool=(), value=None, optional=None, numeric=False,
          cluster=False, positional="none", after_dashdash="forbid",
          hook=None, inherit=False, require_verb=False,
-         dashdash_literals=("--",), require_any_of=(), forbid_write_token=False):
+         dashdash_literals=("--",), require_any_of=(), forbid_write_token=False,
+         output=None):
     return {
+        "output": output,
         "verbs": verbs,
         "bool": frozenset(bool),
         "value": dict(value or {}),
@@ -328,10 +336,12 @@ HEAD_SPECS = {
                     positional="any", after_dashdash="positional"),
         "diff": spec(bool=_GIT_DIFF_BOOL, value=_GIT_DIFF_VALUE,
                      optional=_GIT_DIFF_OPTIONAL,
-                     positional="any", after_dashdash="positional"),
+                     positional="any", after_dashdash="positional",
+                     output="content"),
         "show": spec(bool=_GIT_LOG_DIFF_SHOW_BOOL, value=_GIT_LOG_DIFF_SHOW_VALUE,
                      optional=_GIT_LOG_DIFF_SHOW_OPTIONAL,
-                     positional="any", after_dashdash="positional"),
+                     positional="any", after_dashdash="positional",
+                     output="content"),
         "blame": spec(
             bool=("--incremental", "--no-incremental", "-b", "--root", "--no-root",
                   "--show-stats", "--no-show-stats", "--progress", "--no-progress",
@@ -346,7 +356,7 @@ HEAD_SPECS = {
                    "-S": "any", "--contents": "any", "--no-contents": "any",
                    "-L": "any"},
             optional={"-C": "int", "-M": "int", "--abbrev": "int"},
-            positional="any", after_dashdash="positional"),
+            positional="any", after_dashdash="positional", output="content"),
         "rev-parse": spec(
             bool=("--short", "--verify", "--is-inside-work-tree",
                   "--show-toplevel", "--abbrev-ref", "-q", "--quiet", "--sq",
@@ -481,9 +491,9 @@ HEAD_SPECS = {
                       "--points-at": "any", "--column": "any", "--abbrev": "int"},
             positional="none"),
         "stash": spec(require_verb=True, verbs={
-            "list": spec(positional="none"),
+            "list": spec(positional="none", output="content"),
         }),
-    }, require_verb=True),
+    }, require_verb=True, output="summary"),
 }
 
 
@@ -510,8 +520,9 @@ def _gh_group(children):
     return spec(value=dict(_GH_ROOT_VALUE), require_verb=True, verbs=children)
 
 
-def _gh_leaf(bool=(), value=None):
-    return spec(bool=bool, value=dict(value or {}), positional="any", inherit=True)
+def _gh_leaf(bool=(), value=None, output=None):
+    return spec(bool=bool, value=dict(value or {}), positional="any", inherit=True,
+                output=output)
 
 
 _GH_PR_STATE = frozenset({"open", "closed", "merged", "all"})
@@ -529,12 +540,13 @@ HEAD_SPECS["gh"] = spec(
                        "-H": "any", "--head": "any", "-l": "any", "--label": "any",
                        "-L": "any", "--limit": "any", "-S": "any", "--search": "any",
                        "-s": "any", "--state": _GH_PR_STATE}),
-            "view": _gh_leaf(bool=("-c", "--comments")),
+            "view": _gh_leaf(bool=("-c", "--comments"), output="content"),
             "status": _gh_leaf(bool=("-c", "--conflict-status")),
             "diff": _gh_leaf(
                 bool=("--allow-escape-sequences", "--name-only", "--patch"),
                 value={"--color": frozenset({"always", "never", "auto"}),
-                       "-e": "any", "--exclude": "any"}),
+                       "-e": "any", "--exclude": "any"},
+                output="content"),
             "checks": _gh_leaf(
                 bool=("--fail-fast", "--required"),
                 value={"-i": "any", "--interval": "any"}),
@@ -547,7 +559,7 @@ HEAD_SPECS["gh"] = spec(
                        "-m": "any", "--milestone": "any", "-S": "any",
                        "--search": "any", "-s": "any", "--state": _GH_ISSUE_STATE,
                        "--type": "any"}),
-            "view": _gh_leaf(bool=("-c", "--comments")),
+            "view": _gh_leaf(bool=("-c", "--comments"), output="content"),
             "status": _gh_leaf(),
         }),
         "run": _gh_group({
@@ -559,7 +571,8 @@ HEAD_SPECS["gh"] = spec(
                        "-w": "any", "--workflow": "any"}),
             "view": _gh_leaf(
                 bool=("--exit-status", "--log", "--log-failed", "-v", "--verbose"),
-                value={"-a": "any", "--attempt": "any", "-j": "any", "--job": "any"}),
+                value={"-a": "any", "--attempt": "any", "-j": "any", "--job": "any"},
+                output="content"),
         }),
         "repo": _gh_group({
             "list": _gh_leaf(
@@ -567,18 +580,19 @@ HEAD_SPECS["gh"] = spec(
                 value={"-l": "any", "--language": "any", "-L": "any", "--limit": "any",
                        "--topic": "any",
                        "--visibility": frozenset({"public", "private", "internal"})}),
-            "view": _gh_leaf(value={"-b": "any", "--branch": "any"}),
+            "view": _gh_leaf(value={"-b": "any", "--branch": "any"}, output="content"),
         }),
         "release": _gh_group({
             "list": _gh_leaf(
                 bool=("--exclude-drafts", "--exclude-pre-releases"),
                 value={"-L": "any", "--limit": "any",
                        "-O": frozenset({"asc", "desc"}), "--order": frozenset({"asc", "desc"})}),
-            "view": _gh_leaf(),
+            "view": _gh_leaf(output="content"),
         }),
         "workflow": _gh_group({
             "list": _gh_leaf(bool=("-a", "--all"), value={"-L": "any", "--limit": "any"}),
-            "view": _gh_leaf(bool=("-y", "--yaml"), value={"-r": "any", "--ref": "any"}),
+            "view": _gh_leaf(bool=("-y", "--yaml"), value={"-r": "any", "--ref": "any"},
+                             output="content"),
         }),
         "gist": _gh_group({
             "list": _gh_leaf(
@@ -617,6 +631,8 @@ HEAD_SPECS["gh"] = spec(
                    "--tree": "any", "--updated": "any", "--visibility": "any"},
             positional="any", inherit=True, after_dashdash="positional"),
     },
+    # list/status/checks/search summarise; views and `pr diff` are content.
+    output="summary",
 )
 
 
@@ -704,6 +720,7 @@ HEAD_SPECS["ls"] = spec(
     # cap), not applied here.
     bool=_LS_BOOL, value=_LS_VALUE,
     cluster=True, positional=("max", 1), hook="nonempty_positional",
+    output="summary",
 )
 HEAD_SPECS["gls"] = HEAD_SPECS["ls"]  # Homebrew coreutils spelling on macOS
 
@@ -752,6 +769,7 @@ HEAD_SPECS["grep"] = spec(
     },
     cluster=True,
     positional="any",
+    output="content",
 )
 
 
@@ -847,6 +865,7 @@ HEAD_SPECS["rg"] = spec(
     # `--` marks end-of-flags in ripgrep too (pattern/paths follow) -
     # history-replay pin: `rg -l -- <pattern> <paths>`.
     after_dashdash="positional",
+    output="content",
 )
 # --pre, --pre-glob, --hostname-bin: deliberately never declared - all
 # three exec an arbitrary named program (or spawn one per searched file).
@@ -870,19 +889,19 @@ HEAD_SPECS["cat"] = spec(
           "-A", "--show-all", "-e", "-E", "--show-ends", "-t", "-T", "--show-tabs",
           "-v", "--show-nonprinting", "-u", "-l",
           "--help", "--version"),
-    positional="any")
+    positional="any", output="content")
 HEAD_SPECS["wc"] = spec(
     bool=("-l", "-c", "-m", "-w", "-L", "--libxo",
           "--bytes", "--chars", "--lines", "--max-line-length", "--words",
           "--help", "--version"),
     value={"--files0-from": "any", "--total": frozenset({"auto", "always", "only", "never"})},
-    positional="any")
+    positional="any", output="content")
 HEAD_SPECS["head"] = spec(
     bool=("-c", "-n", "-q", "-v", "-z", "--zero-terminated", "--quiet",
           "--silent", "--verbose", "--help", "--version"),
     numeric=True,
     value={"-n": "int", "-c": "int", "--lines": "int", "--bytes": "int"},
-    positional="any")
+    positional="any", output="content")
 HEAD_SPECS["tail"] = spec(
     # -f/--follow/-F: never listed (stream forever/hang, TK-55); --pid/
     # --retry/-s/--max-unchanged-stats only matter paired with -f/-F, so
@@ -892,7 +911,7 @@ HEAD_SPECS["tail"] = spec(
     numeric=True,
     value={"-n": "int", "-c": "int", "-b": "int",
            "--lines": "int", "--bytes": "int", "--blocks": "int"},
-    positional="any")
+    positional="any", output="content")
 HEAD_SPECS["sort"] = spec(
     bool=("-c", "-C", "-m", "--merge", "-u", "-s", "-b", "-d", "-f", "-g",
           "-h", "-i", "-M", "-n", "-R", "-r", "-V", "-z",
@@ -907,7 +926,7 @@ HEAD_SPECS["sort"] = spec(
            "--batch-size": "int", "--parallel": "int",
            "--random-source": "any", "--files0-from": "any"},
     optional={"--check": frozenset({"silent", "quiet"})},
-    positional="any")
+    positional="any", output="content")
     # EXCLUDED: -o/--output (writes to a named file); -T/--temporary-
     # directory (names a scratch-write dir, doubt->exclude);
     # --compress-program (execs an arbitrary named program).
@@ -922,7 +941,7 @@ HEAD_SPECS["uniq"] = spec(
               "--group": frozenset({"separate", "prepend", "append", "both"})},
     # `uniq [input [output]]` - keep at most 1 positional: a second
     # operand is a write path.
-    positional=("max", 1))
+    positional=("max", 1), output="content")
 
 
 # ---------------------------------------------------------------------
@@ -945,6 +964,7 @@ HEAD_SPECS["tree"] = spec(
            "--hintro": "any", "--houtro": "any"},
     cluster=True,  # tree admits combined short bools, e.g. `-si`
     positional="any",
+    output="summary",
 )
 # EXCLUDED (tree): -o FILENAME (writes the listing to a named file); -H
 # (HTML mode, typically paired with -o, doubt->exclude); -R (this build's
@@ -997,6 +1017,7 @@ HEAD_SPECS["find"] = spec(
         "-samefile": "any", "-xattrname": "any",
     }, **{k: "any" for k in _FIND_NEWERXY}),
     positional="any",
+    output="summary",
 )
 
 
@@ -1069,6 +1090,7 @@ HEAD_SPECS["pytest"] = spec(
     },
     cluster=True,   # pytest/argparse admits combined short bools, e.g. `-xvs`
     positional="any",
+    output="summary",
 )
 # EXCLUDED (pytest): --pdb/--pdbcls/--trace (interactive debugger);
 # --pastebin (sends output to an external network service); --junitxml
@@ -1116,6 +1138,7 @@ HEAD_SPECS["jest"] = spec(
         "--workerGracefulExitTimeout": "int",
     },
     positional="any",
+    output="summary",
 )
 # EXCLUDED (jest): --coverage/--collectCoverage/--coverageDirectory
 # (writes a coverage report to disk); --outputFile (named file);
@@ -1199,6 +1222,7 @@ HEAD_SPECS["vitest"] = spec(
     # slipped through the (declared-but-unrequired) verbs dict via the
     # root's own `positional="any"` - confirmed by a "must NOT rewrite" pin).
     require_verb=True,
+    output="summary",
 )
 # EXCLUDED (vitest): --typecheck.checker (non-default value is an
 # arbitrary named executable); --coverage.customProviderModule (loads a
@@ -1270,6 +1294,7 @@ HEAD_SPECS["tsc"] = spec(
         "--excludeDirectories": "any", "--excludeFiles": "any",
     },
     positional="any",
+    output="summary",
 )
 # EXCLUDED (tsc): --init (writes tsconfig.json); --build/-b/--force/
 # --clean (build mode always emits, --clean deletes outputs); --watch
@@ -1316,6 +1341,7 @@ HEAD_SPECS["ruff"] = spec(
     # ADMIT recommendation wasn't cross-checked against that table.
     forbid_write_token=True,
     positional="any",
+    output="summary",
 )
 # EXCLUDED (ruff): --config (finding A, wave 2026-09-27, confirmed live
 # via `ruff check --help`: "Either a path to a TOML configuration file...
@@ -1358,6 +1384,7 @@ HEAD_SPECS["eslint"] = spec(
     },
     forbid_write_token=True,  # shared hook: rejects "--fix"/"fix"/"format"
     positional="any",
+    output="summary",
 )
 # EXCLUDED (eslint): --parser/--plugin (load arbitrary named packages);
 # --fix/--fix-dry-run/--fix-type/-o/--output-file/--suppress-all/
@@ -1420,6 +1447,7 @@ HEAD_SPECS["golangci-lint"] = spec(
     bool=("-h", "--help", "-v", "--verbose", "--version"),
     value={"--color": frozenset({"always", "auto", "never"})},
     require_verb=True,
+    output="summary",
 )
 # EXCLUDED (golangci-lint): --fix (writes source files); --cpu-profile-
 # path/--mem-profile-path/--trace-path (write profiling data to an
@@ -1447,7 +1475,7 @@ HEAD_SPECS["next"] = spec(verbs={
     "lint": _NEXT_VERB_LEVEL,
     "build": _NEXT_VERB_LEVEL,
     "info": spec(bool=("--verbose",), positional="none"),
-}, require_verb=True)
+}, require_verb=True, output="summary")
 
 
 # ---------------------------------------------------------------------
@@ -1566,6 +1594,7 @@ HEAD_SPECS["cargo"] = spec(
                          require_any_of=("-l", "--list")),
     },
     require_verb=True,
+    output="summary",
 )
 
 
@@ -1605,7 +1634,7 @@ HEAD_SPECS["go"] = spec(verbs={
         after_dashdash=("forward", "go_test_binary_forward"),
         dashdash_literals=("-args", "--args"),
     ),
-}, require_verb=True)
+}, require_verb=True, output="summary")
 
 
 # ---------------------------------------------------------------------
@@ -1668,7 +1697,7 @@ HEAD_SPECS["pip"] = spec(verbs={
         "debug": spec(bool=_PIP_GENERAL_BOOL, positional="none"),
         # "set"/"unset"/"edit" deliberately absent: write pip.conf.
     }),
-}, require_verb=True)
+}, require_verb=True, output="summary")
 
 
 HEAD_SPECS["npm"] = None  # placeholder overwritten immediately below
@@ -1700,7 +1729,7 @@ HEAD_SPECS["npm"] = spec(verbs={
         "list": spec(bool=("--json", "-l", "--long"), positional="none"),
         "get": spec(positional="any"),
     }),
-}, require_verb=True)
+}, require_verb=True, output="summary")
 
 # pnpm (DOC pnpm.io/cli/list; pnpm not installed locally). Same alias gap
 # as npm: "pnpm ls" is documented but was missing from the draft.
@@ -1715,7 +1744,7 @@ HEAD_SPECS["pnpm"] = spec(verbs={
     "outdated": spec(bool=("--long", "--json", "-r", "--recursive"),
                      value={"--filter": "any"}, positional="any"),
     "why": spec(bool=("--json", "-r", "--recursive"), positional="any"),
-}, require_verb=True)
+}, require_verb=True, output="summary")
 
 # `uv` itself is NOT a HEAD_SPECS entry: `uv run <inner>` is a run-prefix
 # (REQ-07) - the engine unwraps it via cli_families.run_prefix_split
@@ -1771,7 +1800,7 @@ HEAD_SPECS["flutter"] = spec(verbs={
                             "-C": "any", "--directory": "any"},
                      positional="any"),
     }, require_verb=True),
-}, require_verb=True)
+}, require_verb=True, output="summary")
 HEAD_SPECS["dart"] = spec(verbs={
     "analyze": spec(bool=("--fatal-infos", "--fatal-warnings", "--no-fatal-warnings"),
                      positional="any"),
@@ -1794,7 +1823,7 @@ HEAD_SPECS["dart"] = spec(verbs={
                  # divergence, do not copy flutter's ADMIT here);
                  # --file-reporter (user-named file); --debug/
                  # --pause-after-load (wait for a debugger - hang class).
-}, require_verb=True)
+}, require_verb=True, output="summary")
 _SWIFT_BUILD_TEST_SHARED_BOOL = (
     "-v", "--verbose", "--very-verbose", "--vv", "-q", "--quiet",
     "--color-diagnostics", "--no-color-diagnostics",
@@ -1840,7 +1869,7 @@ HEAD_SPECS["swift"] = spec(verbs={
                  value=dict(_SWIFT_BUILD_TEST_SHARED_VALUE,
                             **{"--filter": "any", "--skip": "any", "--num-workers": "int"}),
                  positional="any"),
-}, require_verb=True)
+}, require_verb=True, output="summary")
 # swiftlint: doc fetches this session returned only generic usage text
 # (TRAIN - well-established, stable CLI; recommend an owner spot-check
 # with `swiftlint lint --help` if available).
@@ -1858,7 +1887,7 @@ HEAD_SPECS["swiftlint"] = spec(verbs={
                  positional="any", forbid_write_token=True),
     "version": spec(positional="none"),
     "rules": spec(positional="any"),
-}, require_verb=True)
+}, require_verb=True, output="summary")
 # swiftformat: DOC (github.com/nicklockwood/SwiftFormat README, partial -
 # ~80 per-rule formatting flags not enumerable from what was fetched;
 # omitting them is a compression loss, not a security gap).
@@ -1873,6 +1902,7 @@ HEAD_SPECS["swiftformat"] = spec(
     positional="any",
     require_any_of=("--lint", "--dryrun", "--dry-run"),
     forbid_write_token=True,
+    output="summary",
 )
 # xcodebuild: not installed (CLT-only, no full Xcode) - TRAIN.
 # NAMED OWNER-DECISION (behaviour-parity, left AS TODAY): research this
@@ -1893,6 +1923,7 @@ HEAD_SPECS["xcodebuild"] = spec(
     positional="any",
     require_any_of=("-list", "-showsdks", "-showBuildSettings",
                      "-scheme", "-destination"),
+    output="summary",
 )
 # `xcrun` itself is not an entry (same run-prefix reasoning as `uv`
 # above): `xcrun simctl <verb>` unwraps to the inner head "simctl", which
@@ -1901,7 +1932,11 @@ HEAD_SPECS["xcodebuild"] = spec(
 # exactly (2026-09-27, no changes needed); `simctl` itself isn't
 # installed (needs full Xcode) - its own flags are TRAIN.
 HEAD_SPECS["simctl"] = spec(verbs={"list": spec(bool=("-j", "--json"), positional="any")},
-                             require_verb=True)
+                             require_verb=True, output="summary")
+# Heads whose spec exists only as the inner command of a run-prefix
+# (TK-61): rewrite() refuses them written bare (`simctl list` is not a
+# program on PATH; `xcrun simctl list` is).
+INNER_ONLY_HEADS = frozenset({"simctl"})
 # pod (CocoaPods; DOC guides.cocoapods.org/terminal/commands.html).
 HEAD_SPECS["pod"] = spec(verbs={
     "outdated": spec(bool=("--ignore-prerelease", "--no-repo-update",
@@ -1926,9 +1961,9 @@ HEAD_SPECS["pod"] = spec(verbs={
         "which": spec(bool=("--regex", "--show-all"), value={"--version": "any"},
                        positional="any"),
         "cat": spec(bool=("--regex", "--show-all"), value={"--version": "any"},
-                     positional="any"),
+                     positional="any", output="content"),
     }),
-}, require_verb=True)
+}, require_verb=True, output="summary")
 
 
 # ---------------------------------------------------------------------
@@ -1968,6 +2003,7 @@ HEAD_SPECS["./gradlew"] = spec(
                **{"--configuration": "any"}),
     positional="any",
     hook="gradle_task",
+    output="summary",
 )
 
 
@@ -2005,6 +2041,7 @@ HEAD_SPECS["psql"] = spec(
     cluster=True,  # psql admits combined short bools, e.g. `-At`, `-qtA`
     positional="any",
     hook="sql_payload",
+    output="summary",
 )
 # sqlite3: LIVE `/usr/bin/sqlite3 --help`/`-version` (3.43.2), 2026-09-27.
 # `-lookaside SIZE N`/`-pagecache SIZE N` consume TWO following tokens
@@ -2028,6 +2065,7 @@ HEAD_SPECS["sqlite3"] = spec(
     positional=("max", 2),
     after_dashdash="positional",
     hook="sql_payload",
+    output="summary",
 )
 # EXCLUDED, not added (sqlite3): -lookaside/-pagecache (2-value flags,
 # grammar cannot express); -key/-hexkey/-textkey (credential material);
@@ -2049,6 +2087,7 @@ HEAD_SPECS["duckdb"] = spec(
     positional=("max", 2),
     after_dashdash="positional",
     hook="sql_payload",
+    output="summary",
 )
 # EXCLUDED, not added (duckdb): -init (file-content classification out of
 # scope, same as sqlite3); -unsafe (unsigned extensions - security
@@ -2101,7 +2140,7 @@ HEAD_SPECS["dbt"] = spec(verbs={
     "compile": spec(bool=_DBT_SHARED_BOOL, value=_DBT_SHARED_VALUE, positional="any"),
     "list": spec(bool=_DBT_SHARED_BOOL, value=_DBT_LIST_VALUE, positional="any"),
     "ls": spec(bool=_DBT_SHARED_BOOL, value=_DBT_LIST_VALUE, positional="any"),
-}, require_verb=True)
+}, require_verb=True, output="summary")
 
 
 # ---------------------------------------------------------------------
@@ -2124,7 +2163,7 @@ HEAD_SPECS["terraform"] = spec(verbs={
                      "-replace": "any", "-target": "any",
                      "-parallelism": "int", "-lock-timeout": "any",
                      "-lock": frozenset({"true", "false"})}),
-                 positional="any"),
+                 positional="any", output="content"),
                  # EXCLUDED: -out=FILENAME (writes a plan file a later
                  # apply can consume without re-showing the diff, already
                  # an ask_spec too); -generate-config-out (writes HCL to a
@@ -2133,16 +2172,16 @@ HEAD_SPECS["terraform"] = spec(verbs={
     "validate": spec(bool=("-json", "-no-color", "-no-tests"),  # -no-tests: TRAIN
                      value=dict(_TF_VAR_VALUE, **{"-test-directory": "any"}),  # TRAIN
                      positional="any"),
-    "show": spec(bool=("-json", "-no-color"), positional="any"),
+    "show": spec(bool=("-json", "-no-color"), positional="any", output="content"),
     "version": spec(bool=("-json",), positional="none"),  # TRAIN, unverified
     "graph": spec(bool=("-draw-cycles", "-no-color"),  # TRAIN, unverified
                   value={"-type": frozenset({"plan", "plan-refresh-only",
                                               "plan-destroy", "apply"}),
                          "-plan": "any"},
-                  positional="any"),
+                  positional="any", output="content"),
     "output": spec(bool=("-json", "-raw", "-no-color"),  # verb addition, TRAIN
-                   value={"-state": "any"}, positional="any"),
-}, require_verb=True)
+                   value={"-state": "any"}, positional="any", output="content"),
+}, require_verb=True, output="summary")
 
 
 # =======================================================================
@@ -2357,7 +2396,7 @@ FAMILY_EXTRAS = {
 }
 
 
-def _verb_tree(ro_verbs, family_bool=(), family_value=None):
+def _verb_tree(ro_verbs, family_bool=(), family_value=None, output_verbs=None):
     """Builds a nested verbs dict from FAMILIES-style flat tuples
     (`(("compose", "ps"), ("compose", "logs"), ("ps",))`).
 
@@ -2381,7 +2420,12 @@ def _verb_tree(ro_verbs, family_bool=(), family_value=None):
     adds, so a multi-token verb path must still match with NO extra flag
     interposed between its own tokens (old never declared them at all, so
     `docker stats -a --no-stream` - "-a" is a FAMILY_EXTRAS addition, not
-    an old value_flag - stays rejected, matching old exactly)."""
+    an old value_flag - stays rejected, matching old exactly).
+
+    `output_verbs` ({path: class}, FAMILIES "output_verbs") sets the
+    `output` class of the node at each listed path; every other node
+    inherits the family head's class (TK-61)."""
+    output_verbs = output_verbs or {}
     terminal_paths = set(ro_verbs)
     intermediate_own = spec(bool=family_bool, value=family_value or {})
     root = {}
@@ -2414,6 +2458,7 @@ def _verb_tree(ro_verbs, family_bool=(), family_value=None):
                     node["inherit"] = True
             else:
                 node = spec(positional="any", inherit=True)
+            node["output"] = output_verbs.get(path)
             out[tok] = node
         return out
     return _freeze(root, ())
@@ -2430,8 +2475,10 @@ def _family_spec(head):
     return spec(
         bool=bool_flags,
         value=value_flags,
-        verbs=_verb_tree(fam["ro_verbs"], family_bool, family_value),
+        verbs=_verb_tree(fam["ro_verbs"], family_bool, family_value,
+                         fam.get("output_verbs")),
         require_verb=True,
+        output=fam["output"],
     )
 
 

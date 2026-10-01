@@ -195,13 +195,20 @@ class RunTerraformTests(unittest.TestCase):
         + "  + resource \"aws_instance\" \"web\" {}\n" * 80
     )
 
-    def test_plan_compacts_duplicates(self):
+    def test_plan_show_graph_output_are_not_filter_verbs(self):
+        # TK-61 C3: plan/show/graph/output are the content class
+        # (runner.run_content, bytes 1:1); cli.main never routes them here
+        # and reached directly they pass through raw (was: RLE dedup).
         result = subprocess.CompletedProcess(
             ["terraform", "plan"], 0, self.PLAN, ""
         )
-        rc, out, _ = _run(data_filter.run_terraform, ["plan"], result)
-        self.assertEqual(rc, 0)
-        self.assertIn("(x", out)  # RLE marker for repeated lines
+        for verb in ("plan", "show", "graph", "output"):
+            with self.subTest(verb=verb):
+                rc, out, _ = _run(
+                    data_filter.run_terraform, [verb], result, passthrough=7
+                )
+                self.assertEqual(rc, 7)
+                self.assertEqual(out, "")
 
     def test_apply_is_passthrough(self):
         result = subprocess.CompletedProcess(["terraform", "apply"], 0, "x", "")
@@ -210,47 +217,20 @@ class RunTerraformTests(unittest.TestCase):
         )
         self.assertEqual(rc, 7)
 
-    def test_validate_show_version_graph_compact(self):
-        result = subprocess.CompletedProcess(["terraform", "show"], 0, "a\na\n", "")
-        for verb in ("validate", "show", "version", "graph"):
+    def test_validate_version_compact(self):
+        result = subprocess.CompletedProcess(["terraform", "validate"], 0, "a\na\n", "")
+        for verb in ("validate", "version"):
             with self.subTest(verb=verb):
                 rc, out, _ = _run(
                     data_filter.run_terraform, [verb], result
                 )
                 self.assertEqual(rc, 0)
+                self.assertEqual(out, "a (x2)\n")
 
 
-class RunRedisTests(unittest.TestCase):
-    def test_ro_verb_runs_lossless(self):
-        result = subprocess.CompletedProcess(
-            ["redis-cli", "EXISTS", "k"], 0, "(integer) 1\n", ""
-        )
-        rc, out, _ = _run(data_filter.run_redis, ["EXISTS", "k"], result)
-        self.assertEqual(rc, 0)
-        self.assertIn("(integer) 1", out)
-
-    def test_non_ro_verb_is_passthrough(self):
-        result = subprocess.CompletedProcess(
-            ["redis-cli", "SET", "k", "v"], 0, "OK\n", ""
-        )
-        rc, _, _ = _run(
-            data_filter.run_redis, ["SET", "k", "v"], result, passthrough=5
-        )
-        self.assertEqual(rc, 5)
-
-    def test_lossless_error_fails_open(self):
-        # run_lossless already owns the fail-open contract; exercise it via
-        # a parser crash inside the lossless transform.
-        result = subprocess.CompletedProcess(
-            ["redis-cli", "DBSIZE"], 0, "(integer) 42\n", ""
-        )
-        with mock.patch(
-            "actx_lib.runner._lossless_transform", side_effect=RuntimeError("x")
-        ):
-            rc, out, _ = _run(data_filter.run_redis, ["DBSIZE"], result)
-        # raw_fallback path: stdout printed raw, exit code kept
-        self.assertEqual(rc, 0)
-        self.assertIn("(integer) 42", out)
+# TK-61 C3: RunRedisTests removed with data_filter.run_redis - redis-cli is
+# wholly the content class (runner.run_content); its dispatch is pinned in
+# tests/test_output_fidelity.py.
 
 
 DBT_RUN_OUTPUT = """\

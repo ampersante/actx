@@ -4,6 +4,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
+from actx_lib import runner
 from actx_lib.filters import read_filter, system_filter
 
 CONFIG = {
@@ -31,18 +32,27 @@ class ExistingFilterFailOpenTests(unittest.TestCase):
         self.assertEqual(err, result.stderr)
 
     def test_grep_fails_open(self):
-        stdout = "raw stdout\n" * 100
-        stderr = "raw stderr\n"
+        # TK-61 C3: grep is the content class (runner.run_content; was
+        # system_filter.run_grep). A masking error prints the raw bytes
+        # with the original exit code.
+        stdout = b"raw stdout\n" * 100
+        stderr = b"raw stderr\n"
         result = subprocess.CompletedProcess(
-            ["grep", "match", "f"], 0, stdout, stderr
+            ["grep", "match", "f"], 1, stdout, stderr
         )
-        rc, out, err = _run_with_result(
-            system_filter.run_grep,
-            ["match", "f"],
-            result,
-            "actx_lib.filters.system_filter._clip",
-        )
-        self._assert_raw(rc, out, err, result)
+        out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        err = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        with mock.patch(
+            "actx_lib.runner.subprocess.run", return_value=result
+        ), mock.patch(
+            "actx_lib.runner._mask_bytes", side_effect=RuntimeError("boom")
+        ), mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            rc = runner.run_content(["grep", "match", "f"], CONFIG)
+        out.flush()
+        err.flush()
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.buffer.getvalue(), stdout)
+        self.assertEqual(err.buffer.getvalue(), stderr)
 
     def test_ls_fails_open(self):
         result = subprocess.CompletedProcess(

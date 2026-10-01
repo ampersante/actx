@@ -10,7 +10,6 @@ means "do not rewrite" - never a fallback to the old predicate-based
 admission. This module is the engine only; the specs are pure data in
 `rewrite_spec.py`.
 """
-import os
 import shlex
 
 from actx_lib import cli_families, rewrite_spec, sql_verbs
@@ -293,11 +292,17 @@ def _match_flag(tok, eff):
     return None
 
 
-def _match_level(level, tokens, ancestor_eff):
+def _match_level(level, tokens, ancestor_eff, trail=None):
     """True when `tokens` (everything after the head, or after the last
     matched verb token) fully satisfies `level`'s grammar. `ancestor_eff`
     is the accumulated (bool, value, optional, cluster, numeric) admission
-    of every strict ancestor level, or None at the head."""
+    of every strict ancestor level, or None at the head.
+
+    `trail` (optional list, TK-61): every level entered through a verb is
+    appended in walk order, so its last element is the deepest matched
+    node - also when the tokens are rejected further on (output_class)."""
+    if trail is not None:
+        trail.append(level)
     require_any_of = level["require_any_of"]
     if require_any_of and require_any_of.isdisjoint(tokens):
         # Checked against the WHOLE tail (including anything past a `--`
@@ -332,7 +337,7 @@ def _match_level(level, tokens, ancestor_eff):
         if not verb_matched and verbs and tok in verbs:
             verb_matched = True
             return _match_level(verbs[tok], tokens[i + 1:],
-                                 _child_ancestor_eff(level, ancestor_eff))
+                                 _child_ancestor_eff(level, ancestor_eff), trail)
         if tok.startswith("-") and tok != "-":
             consumed = _match_flag(tok, eff)
             if consumed is not None:
@@ -429,9 +434,13 @@ def rewrite(command):
     # wrapper's OWN flags are validated by cli_families.run_prefix_split
     # (shared with the security gate, not duplicated here); the INNER
     # command is then validated against ITS OWN head-spec - a head without
-    # a confirmed spec never rewrites, closing "uv run <anything>". Basename
-    # lookup here mirrors run_prefix_split's own internal basename lookup.
-    if os.path.basename(tokens[0]) in cli_families.RUN_PREFIXES:
+    # a confirmed spec never rewrites, closing "uv run <anything>". The
+    # head_key lookup mirrors run_prefix_split's own; a prefix written as
+    # a path (`/tmp/x/uv`, `./uv`) is refused (TK-61): with path dispatch
+    # in cli.main it would execute an arbitrary path-named program.
+    if cli_families.head_key(tokens[0]) in cli_families.RUN_PREFIXES:
+        if tokens[0] not in cli_families.RUN_PREFIXES:
+            return None
         inner = cli_families.run_prefix_split(tokens)
         if inner is None:
             return None
@@ -454,9 +463,58 @@ def rewrite(command):
             return None
         return "actx " + command
 
+    if tokens[0] in rewrite_spec.INNER_ONLY_HEADS:
+        return None  # TK-61: bare `simctl` is no program on PATH
     head_spec = rewrite_spec.HEAD_SPECS.get(tokens[0])
     if head_spec is None:
         return None
     if not _match_head(head_spec, argv):
         return None
     return "actx " + command
+
+
+# ---------------------------------------------------------------------
+# Output classes (TK-61): which runner path `actx <argv>` takes.
+# ---------------------------------------------------------------------
+
+# Heads that have a REGISTRY entry but no HEAD_SPECS entry. aws/read/smart
+# are manual-only summary paths (never produced by rewrite()); uv/xcrun are
+# run-prefixes: the inner command's class wins, this is the fallback when
+# the argv is not a run-prefix form or its inner command has no class.
+_REGISTRY_ONLY_CLASSES = {
+    "aws": "summary",
+    "read": "summary",
+    "smart": "summary",
+    "uv": "summary",
+    "xcrun": "summary",
+}
+
+
+def output_class(argv):
+    """"content" | "log" | "summary" for `actx <argv>`, or None when the
+    head has no class (cli.main: unknown command).
+
+    The class is the nearest explicit `output` on the walk through the
+    head's spec (global options skipped exactly as rewrite() does); a
+    manual invocation the spec would reject gets the class of its deepest
+    matched verb. Run-prefixes are unwrapped: the inner command's class.
+    Heads are looked up by cli_families.head_key; argv is never changed."""
+    if not argv:
+        return None
+    head = cli_families.head_key(argv[0])
+    if head in cli_families.RUN_PREFIXES:
+        split = cli_families.run_prefix_split([head] + list(argv[1:]))
+        if split is not None:
+            inner = output_class(split[0])
+            if inner is not None:
+                return inner
+        return _REGISTRY_ONLY_CLASSES.get(head)
+    head_spec = rewrite_spec.HEAD_SPECS.get(head)
+    if head_spec is None:
+        return _REGISTRY_ONLY_CLASSES.get(head)
+    trail = []
+    _match_level(head_spec, list(argv[1:]), None, trail)
+    for level in reversed(trail):
+        if level["output"] is not None:
+            return level["output"]
+    return None

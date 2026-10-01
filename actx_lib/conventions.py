@@ -167,8 +167,9 @@ CONVENTIONS = {
             False,
         ),
     ),
-    # bq: JSON output auto-detects on runner.run; --format=json is the
-    # compact form of the single-token =-family (cli_families precedent).
+    # bq: --format=json gives machine-readable output (printed as its
+    # masked raw text, TK-61) - the single-token =-family (cli_families
+    # precedent).
     "bq": (
         (
             (),

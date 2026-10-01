@@ -93,12 +93,22 @@ _BUILTIN_COMMANDS = frozenset({
 })
 
 
+def _has_class(head):
+    """True when the bare head has an output class (fail open: False)."""
+    try:
+        return rewriter.output_class([head]) is not None
+    except Exception:
+        return False
+
+
 def _custom_head_requested(command, config, registry):
     """True when command is a user-declared custom head (TK-39).
 
     Validation: only a list of non-empty strings counts; names reserved for
-    builtin commands or REGISTRY heads are ignored with a stderr warning
-    (they keep their native semantics). custom_heads never extends the §7
+    builtin commands, REGISTRY heads or heads with an output class (TK-61:
+    cat/grep/... are dispatched by class before custom heads) are ignored
+    with a stderr warning (they keep their native semantics). custom_heads
+    never extends the §7
     rewriter whitelist - it only gives `actx <head> args` the semantics of
     `actx run <head> args`."""
     heads = config.get("custom_heads", [])
@@ -107,7 +117,7 @@ def _custom_head_requested(command, config, registry):
     for head in heads:
         if not isinstance(head, str) or not head:
             continue
-        if head in _BUILTIN_COMMANDS or head in registry:
+        if head in _BUILTIN_COMMANDS or head in registry or _has_class(head):
             print(
                 "actx: ignoring reserved custom head: %s" % head,
                 file=sys.stderr,
@@ -237,20 +247,39 @@ def main(argv):
     if _bypass_requested(command, cfg):
         return runner.run_passthrough([command] + args)
 
+    from actx_lib import cli_families
     from actx_lib.filters import REGISTRY
 
-    if command in REGISTRY:
-        if ultra:
-            cfg = dict(cfg)
-            cfg["ultra_compact"] = True
-        return REGISTRY[command](args, cfg)
+    # Output class (TK-61): content -> the command's bytes 1:1 (secret
+    # values masked); log -> repeat collapse + ANSI strip, no cap;
+    # summary -> the REGISTRY filter. Content/log and path-written summary
+    # heads execute the original argv (head token included); a summary
+    # head written as a path never reaches a REGISTRY filter (those
+    # rebuild argv from a literal name). Fail open to the content path.
+    argv = [command] + args
+    try:
+        head = cli_families.head_key(command)
+        output = rewriter.output_class(argv)
+    except Exception:
+        return runner.run_content(argv, cfg)
+    if output == "content":
+        return runner.run_content(argv, cfg)
+    if output == "log":
+        return runner.run_lossless(argv, cfg, cap=False, stderr=True)
+    if output == "summary":
+        if command == head and command in REGISTRY:
+            if ultra:
+                cfg = dict(cfg)
+                cfg["ultra_compact"] = True
+            return REGISTRY[command](args, cfg)
+        return runner.run_lossless(argv, cfg)
 
-    # Order is fixed (TK-39): raw/bypass -> REGISTRY -> custom_heads ->
-    # unknown. cfg is already loaded in main; calling runner.run directly
-    # (not _run) avoids a second config load. raw/bypass for custom heads
-    # are handled by the shared branches above.
+    # Order is fixed (TK-39): raw/bypass -> classes/REGISTRY ->
+    # custom_heads -> unknown. cfg is already loaded in main; calling
+    # runner.run directly (not _run) avoids a second config load.
+    # raw/bypass for custom heads are handled by the shared branches above.
     if _custom_head_requested(command, cfg, REGISTRY):
-        return runner.run([command] + args, cfg)
+        return runner.run(argv, cfg)
 
     print("error: unknown command: %s" % command, file=sys.stderr)
     print("hint: run it through actx: actx run %s" % command, file=sys.stderr)

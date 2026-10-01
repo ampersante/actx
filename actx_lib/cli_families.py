@@ -1,6 +1,6 @@
 """Declarative table of CLI families (TK-39; docker TK-41, kubectl/helm TK-40).
 
-Pure data + pure functions (effective_verbs, run_prefix_split,
+Pure data + pure functions (effective_verbs, run_prefix_split, head_key,
 gradle_task_class), zero imports: rewriter, security_gate and hang_policy
 all read it directly, so the cheap hook/rewrite
 import boundary must not gain transitive modules. Connecting a new CLI family
@@ -32,6 +32,14 @@ Family record schema:
                    into security_gate.T6_ASK_TABLE.
   stream_specs  -- streaming/interactive/secret-printing verb prefixes; the
                    hang policy refuses them (never-wrap, exit 125).
+  output        -- output class (TK-61) of a family whose rewrite spec is
+                   generated from this table (rewrite_spec._family_spec):
+                   "content" (bytes 1:1, secret values masked), "log"
+                   (repeat collapse + ANSI strip, no cap) or "summary"
+                   (the REGISTRY filter). Hand-authored specs (gh,
+                   terraform) declare their classes in rewrite_spec.py.
+  output_verbs  -- OPTIONAL {ro_verbs path: class} overrides for the verb
+                   paths whose class differs from the family's `output`.
 
 Qualification rule (N-F4): a verb is banned from ro_verbs when its family has
 a sibling that writes a local file or prints secret values (`vercel env
@@ -61,6 +69,8 @@ FAMILIES = {
             ("logs", "-f"), ("logs", "--follow"),
             ("dev",),
         ),
+        "output": "summary",
+        "output_verbs": {("logs",): "log"},
     },
     # netlify docs: `env:get` prints variable values and `env:export` writes
     # a local .env -> the whole env family is never-wrap; `watch` waits for a
@@ -77,6 +87,7 @@ FAMILIES = {
             ("logs",),
             ("dev",),
         ),
+        "output": "summary",
     },
     # railway docs: `variables` prints environment values (secret-bearing),
     # `connect`/`ssh` are REPLs, `run` executes a local dev command, `logs`
@@ -92,6 +103,7 @@ FAMILIES = {
             ("ssh",),
             ("run",),
         ),
+        "output": "summary",
     },
     # wrangler docs: `secret put` writes secret values and `secret bulk`
     # reads them -> secret family never-wrap; `tail` and logins are already
@@ -105,6 +117,7 @@ FAMILIES = {
         ),
         "ask_specs": (("deploy",), ("publish",), ("delete",)),
         "stream_specs": (("secret",), ("secret:bulk",)),
+        "output": "summary",
     },
     # supabase docs: global boolean flags --debug/--experimental/--yes/
     # --create-ticket; `secrets set` mutates project secrets -> secrets
@@ -114,6 +127,7 @@ FAMILIES = {
         "ro_verbs": (("status",), ("projects", "list")),
         "ask_specs": (("delete",), ("db", "reset")),
         "stream_specs": (("secrets",),),
+        "output": "summary",
     },
     # fly.io docs: top-level destructive verbs are `fly deploy` and
     # `fly apps destroy` (no top-level `release`/`delete`/`destroy` exist);
@@ -131,6 +145,7 @@ FAMILIES = {
             ("secrets",),
             ("tokens",),
         ),
+        "output": "summary",
     },
     # gcloud docs: 2-token read-only sequences; `config` and `auth` families
     # are banned from RO by siblings (`config set` persists to a local file,
@@ -141,6 +156,7 @@ FAMILIES = {
         "ro_verbs": (("projects", "list"),),
         "ask_specs": (("delete",), ("undeploy",)),
         "stream_specs": (("secrets",),),
+        "output": "summary",
     },
     # docker (TK-41): global value flags (--context/-H/--host) are
     # deliberately NOT skipped here — the scan stops at the first unknown
@@ -165,6 +181,12 @@ FAMILIES = {
             ("volume", "rm"), ("volume", "prune"),
         ),
         "stream_specs": (),
+        "output": "summary",
+        "output_verbs": {
+            ("logs",): "log",
+            ("compose", "logs"): "log",
+            ("inspect",): "content",
+        },
     },
     # kubectl (TK-40). RO verbs are the observational set; `logs` without -f
     # was already rewritten pre-TK-40 (N-F12b) - the -f form is refused by
@@ -183,6 +205,14 @@ FAMILIES = {
         "ask_specs": (("delete",), ("scale",), ("rollout", "undo"),
                       ("apply",), ("exec",)),
         "stream_specs": (),
+        # `get` is wholly content (no flag-dependent class: the table form
+        # is a few lines, -o json|yaml must reach the agent 1:1).
+        "output": "summary",
+        "output_verbs": {
+            ("get",): "content",
+            ("describe",): "content",
+            ("logs",): "log",
+        },
     },
     # helm (TK-40). `helm template` renders a local chart (a --set secret is
     # already visible in argv) -> RO; `helm get values` prints DEPLOYED
@@ -196,18 +226,28 @@ FAMILIES = {
                      ("history",)),
         "ask_specs": (("uninstall",), ("rollback",)),
         "stream_specs": (("get", "values"),),
+        "output": "summary",
+        "output_verbs": {
+            ("template",): "content",
+            ("get", "metadata"): "content",
+            ("show", "values"): "content",
+            ("show", "chart"): "content",
+        },
     },
     # bq (TK-43). Only the single-token `=`-forms of --format are declared
     # as boolean globals (conservative: the two-token `--format json` form
-    # stops the scan -> no rewrite, safe); --debug_mode is boolean. The head
-    # runs through the generic registry entry (_cloud_entry): JSON output
-    # auto-detects on runner.run. `query` is RO only with --dry_run - the
-    # executing form stays unwritten (TK-52 reviews an ask).
+    # stops the scan -> no rewrite, safe); --debug_mode is boolean. Summary
+    # leaves run through the generic registry entry (_cloud_entry ->
+    # runner.run: JSON is printed as its masked raw text, TK-61); `show`
+    # and `head` print data and are content. `query` is RO only with
+    # --dry_run - the executing form stays unwritten (TK-52 reviews an ask).
     "bq": {
         "global_flags": ("--format=json", "--format=prettyjson", "--debug_mode"),
         "ro_verbs": (("ls",), ("show",), ("head",), ("query", "--dry_run")),
         "ask_specs": (),
         "stream_specs": (),
+        "output": "summary",
+        "output_verbs": {("show",): "content", ("head",): "content"},
     },
     # terraform (TK-43). RO verbs are the plan-inspection set; `plan -out`
     # persists a plan file that a later `terraform apply` executes without
@@ -241,6 +281,8 @@ FAMILIES = {
                       ("flushdb",), ("config", "set"), ("CONFIG", "SET"),
                       ("Config", "Set")),
         "stream_specs": (("GET",), ("get",)),
+        # Every admitted verb prints data (key facts) -> content.
+        "output": "content",
     },
     # gh (TK-55 F2): every verb below verified against `gh <ns> --help`
     # (gh 2.100.0). ro_verbs are the observational sequences; ask_specs
@@ -323,6 +365,21 @@ def effective_verbs(argv):
         out.append(tok)
         i += 1
     return out
+
+
+# Head tokens that are lookup keys exactly as written (TK-61): a relative
+# path that names the project-local wrapper, not a program on PATH.
+LITERAL_HEAD_KEYS = ("./gradlew",)
+
+
+def head_key(token):
+    """The one head normaliser (TK-61) for lookups by cli.main dispatch,
+    rewriter.output_class and hang_policy.classify: an exact literal key
+    first (`./gradlew`), else the basename (`/usr/bin/docker` -> `docker`).
+    Lookup only - the executed argv[0] is never rewritten. Zero imports."""
+    if token in LITERAL_HEAD_KEYS:
+        return token
+    return token.rsplit("/", 1)[-1]
 
 
 # Literal skip sets for unwrapping an `actx` prefix in security_gate
@@ -424,9 +481,8 @@ def run_prefix_split(tokens: list[str]) -> tuple[list[str], list[str]] | None:
     """
     if not tokens:
         return None
-    # basename without os.path — cli_families keeps zero imports (hook/rewrite
-    # import boundary); covers `/usr/bin/uv run ...` alongside bare `uv`.
-    spec = RUN_PREFIXES.get(tokens[0].rsplit("/", 1)[-1])
+    # head_key (basename) covers `/usr/bin/uv run ...` alongside bare `uv`.
+    spec = RUN_PREFIXES.get(head_key(tokens[0]))
     if spec is None:
         return None
     idx = 1

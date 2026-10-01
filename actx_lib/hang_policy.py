@@ -348,9 +348,16 @@ def _classify(argv):
 
 
 def classify(argv):
-    """Return "never_wrap", "generous" or "default" for an exec-array."""
+    """Return "never_wrap", "generous" or "default" for an exec-array.
+
+    argv[0] of the internal copy is normalised by cli_families.head_key
+    (TK-61) before any predicate runs, so `/usr/bin/docker logs -f`
+    classifies exactly like `docker logs -f`."""
     try:
-        return _classify(list(argv))
+        argv = list(argv)
+        if argv:
+            argv[0] = cli_families.head_key(argv[0])
+        return _classify(argv)
     except Exception:
         return "default"
 

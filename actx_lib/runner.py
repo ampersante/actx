@@ -683,11 +683,22 @@ def execute(cmd, shell_codes=False):
         return None
 
 
+def _masked_or_raw(text):
+    """redact_text(text); the text itself when masking fails (fail open)."""
+    try:
+        return redaction.redact_text(text)
+    except Exception:
+        return text
+
+
 def print_raw(result):
+    """The result's own text with secret values masked (TK-61: the fallback
+    of a failed or empty compactor never prints a secret value); every other
+    byte as the command wrote it."""
     if result.stdout:
-        print(result.stdout, end="")
+        print(_masked_or_raw(result.stdout), end="")
     if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
+        print(_masked_or_raw(result.stderr), end="", file=sys.stderr)
 
 
 def raw_fallback(result):
@@ -752,9 +763,9 @@ def tee_listing(cmd, raw, shown, config):
     return path
 
 
-def print_lossless_stdout(cmd, result, config, tee_policy="auto"):
+def print_lossless_stdout(cmd, result, config):
     """stdout in the run_lossless form (a cap cut forces a tee and names
-    its path), then the masked stderr; without a cut, tee per tee_policy.
+    its path), then the masked stderr; without a cut, tee per tee.mode.
 
     Summary paths use it where their compactor would print nothing: a
     non-zero exit (stdout survives, TK-61) or an empty compactor result.
@@ -776,7 +787,7 @@ def print_lossless_stdout(cmd, result, config, tee_policy="auto"):
             print()
     if stderr:
         print(stderr, end="", file=sys.stderr)
-    _finish_tee(cmd, result, config, cut, path, tee_policy)
+    _finish_tee(cmd, result, config, cut, path)
     return stdout
 
 

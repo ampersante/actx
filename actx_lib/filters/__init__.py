@@ -13,18 +13,15 @@ from actx_lib.filters import (
     tree_filter,
 )
 
+# Summary-class heads only (TK-61): content and log heads (cat head tail
+# sort uniq wc rg grep, git diff/show/blame/stash list, views, logs, ...)
+# are dispatched by cli.main straight to runner.run_content /
+# runner.run_lossless by their output class (rewriter.output_class).
 REGISTRY = {
     "git": git_filter.run,
     "ls": system_filter.run_ls,
-    "grep": system_filter.run_grep,
+    "gls": system_filter.run_gls,
     "find": system_filter.run_find,
-    "wc": system_filter.run_wc,
-    "head": system_filter.run_head,
-    "tail": system_filter.run_tail,
-    "sort": system_filter.run_sort,
-    "uniq": system_filter.run_uniq,
-    "rg": system_filter.run_rg,
-    "cat": system_filter.run_cat,
     "read": read_filter.run,
     "smart": smart_filter.run,
     "tree": tree_filter.run,
@@ -55,12 +52,12 @@ REGISTRY = {
     "xcrun": mobile_filter.run_xcrun,
     "pod": mobile_filter.run_pod,
     "./gradlew": mobile_filter.run_gradlew,
-    # Data stack (TK-43); bq stays on the generic _cloud_entry below (JSON
-    # auto-detect on runner.run).
+    # Data stack (TK-43); bq summary leaves stay on the generic _cloud_entry
+    # below (runner.run: JSON printed as its masked raw text, TK-61);
+    # redis-cli is wholly content (no filter).
     "psql": data_filter.run_psql,
     "sqlite3": data_filter.run_sqlite3,
     "duckdb": data_filter.run_duckdb,
-    "redis-cli": data_filter.run_redis,
     "terraform": data_filter.run_terraform,
     "dbt": data_filter.run_dbt,
 }
@@ -87,9 +84,10 @@ REGISTRY["go"] = _run_go
 
 
 def _cloud_entry(head):
-    """Generic registry entry for a cloud CLI family head (TK-39): the
-    generic runner path already gives JSON auto-detect, redaction and hang
-    policy. Transport only - no rewrite logic lives here."""
+    """Generic registry entry for a cloud CLI family head's summary verbs
+    (TK-39): the generic runner path gives value masking, the run_lossless
+    form with JSON printed as its masked raw text (TK-61) and hang policy.
+    Transport only - no rewrite logic lives here."""
 
     def run(args, config):
         return runner.run([head] + args, config)
@@ -98,5 +96,6 @@ def _cloud_entry(head):
 
 
 for _cloud_head in cli_families.FAMILIES:
-    REGISTRY.setdefault(_cloud_head, _cloud_entry(_cloud_head))
+    if cli_families.FAMILIES[_cloud_head].get("output", "summary") == "summary":
+        REGISTRY.setdefault(_cloud_head, _cloud_entry(_cloud_head))
 del _cloud_head

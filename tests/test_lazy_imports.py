@@ -38,7 +38,6 @@ CLI_FILTER_PATH_MODULES = {
     "actx_lib.filters.data_filter",
     "actx_lib.filters.git_filter",
     "actx_lib.filters.infra_filter",
-    "actx_lib.filters.json_compactor",
     "actx_lib.filters.linter_filter",
     "actx_lib.filters.mobile_filter",
     "actx_lib.filters.package_filter",

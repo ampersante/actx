@@ -402,9 +402,17 @@ class KubectlHelmShimE2ETests(_ShimTestCase):
 
     # -- H-F4: `actx kubectl -n prod get pods` -> COMPACT, not passthrough --
 
-    def test_kubectl_n_prod_get_pods_compacts_not_passthrough(self):
-        # 3 identical lines collapse to "(x3)": only the dedup compaction
-        # path can emit that marker - raw passthrough never would.
+    # TK-61 C3: kubectl get/describe and helm template are the content
+    # class - the command's own bytes, repeated lines included (was: RLE
+    # dedup "(x3)"). The effective-verb skip (`-n prod` before the verb)
+    # still reaches the right class.
+
+    def test_kubectl_n_prod_get_pods_prints_bytes_unchanged(self):
+        expected = (
+            "NAME READY STATUS RESTARTS AGE\n"
+            + "web-abc 1/1 Running 0 2h\n" * 3
+            + "web-def 1/1 Running 0 2h\n"
+        )
         self.install_shim(
             "kubectl",
             "print('NAME READY STATUS RESTARTS AGE')\n"
@@ -414,10 +422,9 @@ class KubectlHelmShimE2ETests(_ShimTestCase):
         )
         p = self.run_actx(["kubectl", "-n", "prod", "get", "pods"])
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("web-abc 1/1 Running 0 2h (x3)", p.stdout)
-        self.assertIn("web-def", p.stdout)
+        self.assertEqual(p.stdout, expected)
 
-    def test_kubectl_describe_compacts(self):
+    def test_kubectl_describe_prints_bytes_unchanged(self):
         self.install_shim(
             "kubectl",
             "for _ in range(3):\n"
@@ -426,8 +433,9 @@ class KubectlHelmShimE2ETests(_ShimTestCase):
         )
         p = self.run_actx(["kubectl", "describe", "pod", "web-abc"])
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("Name: web-abc (x3)", p.stdout)
-        self.assertIn("node-1/10.0.0.5", p.stdout)
+        self.assertEqual(
+            p.stdout, "Name: web-abc\n" * 3 + "Node: node-1/10.0.0.5\n"
+        )
 
     def test_kubectl_dash_o_json_compacts_as_json(self):
         payload = json.dumps(
@@ -449,7 +457,7 @@ class KubectlHelmShimE2ETests(_ShimTestCase):
         self.assertEqual(p.returncode, 3)
         self.assertIn("boom", p.stdout)
 
-    def test_helm_template_compacts(self):
+    def test_helm_template_prints_bytes_unchanged(self):
         self.install_shim(
             "helm",
             "for _ in range(3):\n"
@@ -458,8 +466,10 @@ class KubectlHelmShimE2ETests(_ShimTestCase):
         )
         p = self.run_actx(["helm", "template", "mychart"])
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("# Source: mychart/templates/svc.yaml (x3)", p.stdout)
-        self.assertIn("kind: Service", p.stdout)
+        self.assertEqual(
+            p.stdout,
+            "# Source: mychart/templates/svc.yaml\n" * 3 + "kind: Service\n",
+        )
 
     def test_helm_list_compacts(self):
         self.install_shim(

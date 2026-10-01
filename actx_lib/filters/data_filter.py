@@ -10,12 +10,12 @@ runner.compacted_result / run_lossless contracts; PRD.md 8):
   keeps every cell width so pipe positions (the compaction contract) are
   untouched; output without a framed table falls back to secret value
   masking (redaction.redact_text). Exit code preserved.
-- terraform             -> plan/validate/show/version/graph dedup
-                          compaction (infra_filter _run_compact pattern).
-- redis-cli             -> RO verb subset through the lossless runner path
-                          (collapse-dedup + explicit truncation markers,
-                          raw fallback).
-- dbt                   -> run/test/build failures-only via the declarative
+- terraform             -> validate/version dedup compaction (infra_filter
+                          _run_compact pattern); plan/show/graph/output are
+                          the content class (TK-61) and never reach here.
+- redis-cli             -> content class (TK-61): runner.run_content, no
+                          filter here.
+- dbt                 -> run/test/build failures-only via the declarative
                           dbt_run profile (test_runner_filter pattern).
 
 Data fidelity notes (TK-43 DoD addition, documented at command level):
@@ -25,7 +25,7 @@ Data fidelity notes (TK-43 DoD addition, documented at command level):
   the TK-44 contract); commas inside values make the output CSV-like, not
   strict CSV.
 - Duplicate rows are NOT deduplicated on the SQL path (only consecutive
-  identical lines collapse on the redis/generic lossless path, with an
+  identical lines collapse on the generic lossless path, with an
   explicit [xN] marker).
 """
 
@@ -160,9 +160,7 @@ def run_duckdb(args, config):
 
 # --- terraform: lossy-in-format, lossless-in-values dedup ------------------
 
-_TERRAFORM_COMPACT_VERBS = (
-    ("plan",), ("validate",), ("show",), ("version",), ("graph",),
-)
+_TERRAFORM_COMPACT_VERBS = (("validate",), ("version",))
 
 
 def run_terraform(args, config):
@@ -173,29 +171,6 @@ def run_terraform(args, config):
         if tuple(verbs[: len(verb)]) == verb:
             return _run_compact(["terraform"] + args, config, _dedup_compact)
     return runner.run_passthrough(["terraform"] + args)
-
-
-# --- redis-cli: factual small output on the lossless path ------------------
-
-_REDIS_RO = frozenset(
-    {"EXISTS", "TTL", "TYPE", "SCAN", "DBSIZE",
-     "exists", "ttl", "type", "scan", "dbsize"}
-)
-
-
-def run_redis(args, config):
-    """RO verb subset -> lossless runner path (ANSI strip + collapse-dedup
-    with explicit markers + explicit truncation); anything else ->
-    passthrough. GET/MONITOR never arrive wrapped (never-wrap, exit 125);
-    destructive verbs ask on the hook path."""
-    if not args:
-        return runner.run_passthrough(["redis-cli"])
-    verbs = cli_families.effective_verbs(["redis-cli"] + args)
-    if verbs and verbs[0] in _REDIS_RO:
-        return runner.run_lossless(
-            ["redis-cli"] + args, config, strategy="data"
-        )
-    return runner.run_passthrough(["redis-cli"] + args)
 
 
 # --- dbt: failures-only through the declarative profile --------------------

@@ -282,7 +282,9 @@ class BqShimE2ETests(_ShimTestCase):
 
 
 class TerraformShimE2ETests(_ShimTestCase):
-    def test_plan_compacts_repeated_lines(self):
+    def test_plan_prints_bytes_unchanged(self):
+        # TK-61 C3: `terraform plan` is the content class - its own bytes,
+        # repeated lines included (was: RLE-compacted to "(x200)").
         plan = (
             "Terraform used the selected providers to generate the following execution plan.\n"
             + "  + resource \"aws_instance\" \"web\" {}\n" * 200
@@ -290,8 +292,7 @@ class TerraformShimE2ETests(_ShimTestCase):
         self.install_shim("terraform", output=plan)
         p = self.run_actx(["terraform", "plan"])
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("(x200)", p.stdout)
-        self.assertIn("execution plan", p.stdout)
+        self.assertEqual(p.stdout, plan)
 
     def test_hook_apply_state_and_plan_out_ask(self):
         for command in (

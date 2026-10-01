@@ -39,7 +39,10 @@ class LosslessCliTests(unittest.TestCase):
         self.home.cleanup()
         self.work.cleanup()
 
-    def test_sort_collapses_repeats(self):
+    def test_sort_keeps_repeats(self):
+        # TK-61 C3: sort is the content class - its own bytes, repeats
+        # included (was: run_lossless collapse "a  [×2]"). The collapse
+        # itself is pinned in LosslessTransformTests.
         path = os.path.join(self.work.name, "f.txt")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("b\na\na\n")
@@ -52,8 +55,7 @@ class LosslessCliTests(unittest.TestCase):
             env=env,
         )
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("a  [×2]", p.stdout)
-        self.assertIn("b", p.stdout)
+        self.assertEqual(p.stdout, "a\na\nb\n")
 
 
 if __name__ == "__main__":

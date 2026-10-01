@@ -9,7 +9,7 @@ prefix - not collected by `unittest discover`); imported by
 Scope, and why: see the module docstring of `tests/test_rewrite_spec.py`
 (SQL heads and FORWARD_SPECS are out of scope here, kept separately).
 """
-from actx_lib import rewrite_spec
+from actx_lib import cli_families, rewrite_spec
 
 _SKIP_HEADS = frozenset({"psql", "sqlite3", "duckdb"})
 
@@ -166,5 +166,15 @@ def iter_flag_cases():
     for head, root in rewrite_spec.HEAD_SPECS.items():
         if root is None or head in _SKIP_HEADS:
             continue
-        for prefix, level, filler in _walk(root, [head], []):
+        # TK-61 C3: an inner-only head (simctl) rewrites only behind the
+        # run-prefix whose only_tool it is (`xcrun simctl ...`); walk its
+        # grammar there - the bare form is refused (typical_usage fixture).
+        start = [head]
+        if head in rewrite_spec.INNER_ONLY_HEADS:
+            start = [
+                name
+                for name, spec in cli_families.RUN_PREFIXES.items()
+                if spec.get("only_tool") == head
+            ][:1] + [head]
+        for prefix, level, filler in _walk(root, start, []):
             yield from _cases_for_level(prefix, level, filler)

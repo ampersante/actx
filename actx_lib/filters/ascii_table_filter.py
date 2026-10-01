@@ -23,8 +23,8 @@ Contract (lossy in format, lossless in values):
   can detect "nothing was compacted" with `compact_table(t) is t`.
 
 Out of scope: markdown tables, Unicode box drawing, psql border-0
-aligned output (no frame lines). REGISTRY wiring arrives with the
-SQL-CLI filter (TK-43); import lazily like json_compactor.
+aligned output (no frame lines). Wired into REGISTRY through the
+SQL-CLI filter (data_filter, TK-43).
 """
 
 import re

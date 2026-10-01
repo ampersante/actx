@@ -1,28 +1,15 @@
+"""Listing summaries: ls/gls and find. The content heads (cat head tail
+sort uniq wc rg grep) are runner.run_content paths (TK-61) and never reach
+this module."""
+
 import os
 
 from actx_lib import runner
-
-_GREP_PASSTHROUGH = {
-    "-h", "-l", "-c", "-o", "-q", "--quiet", "--silent",
-    "-s", "-Z", "--color", "--colour", "--null",
-}
-
-_GREP_PREFIXES = (
-    "-A", "-B", "-C",
-    "--after-context=", "--before-context=", "--context=",
-    "--color=", "--colour=",
-)
 
 _FIND_PASSTHROUGH = {
     "-print0", "-printf", "-ls", "-delete", "-exec", "-execdir",
     "-ok", "-okdir", "-fprint", "-fprintf", "-fls",
 }
-
-
-def _clip(text, limit):
-    if len(text) <= limit:
-        return text
-    return text[:limit]
 
 
 _LS_FLAGS = {
@@ -31,22 +18,24 @@ _LS_FLAGS = {
 }
 
 
-def run_ls(args, config):
+def run_ls(args, config, head="ls"):
+    """`head` is the executed program (`gls`, Homebrew coreutils, shares
+    this summary)."""
     if any(arg.startswith("-") for arg in args):
         if all(
             (arg in _LS_FLAGS) or (not arg.startswith("-"))
             for arg in args
         ) and sum(1 for arg in args if not arg.startswith("-")) <= 1:
-            return runner.run_lossless(["ls"] + args, config, strategy="ls")
-        return runner.run_passthrough(["ls"] + args)
+            return runner.run_lossless([head] + args, config, strategy="ls")
+        return runner.run_passthrough([head] + args)
     if len(args) > 1:
-        return runner.run_passthrough(["ls"] + args)
-    cmd = ["ls", "-1"] + args
+        return runner.run_passthrough([head] + args)
+    cmd = [head, "-1"] + args
     result = runner.execute(cmd)
     if result is None:
         return 1
     if result.returncode != 0:
-        return runner.run_passthrough(["ls"] + args)
+        return runner.run_passthrough([head] + args)
 
     try:
         path = args[0] if args else "."
@@ -96,62 +85,6 @@ def run_ls(args, config):
         else:
             print(text)
         runner.record_compacted(cmd, result, text, "ls", extra_bytes=extra)
-        return 0
-    except Exception:
-        return runner.raw_fallback(result)
-
-
-def _grep_passthrough(args):
-    for arg in args:
-        if arg in _GREP_PASSTHROUGH or arg.startswith(_GREP_PREFIXES):
-            return True
-    return False
-
-
-def run_grep(args, config):
-    if _grep_passthrough(args):
-        return runner.run_passthrough(["grep"] + args)
-    cmd = ["grep"] + args
-    result = runner.execute(cmd)
-    if result is None:
-        return 1
-    if result.returncode == 1:
-        print("no matches")
-        runner.record_compacted(cmd, result, "no matches", "grep")
-        return 1
-    if result.returncode >= 2:
-        runner.print_raw(result)
-        if runner.tee_decision(config, "auto", result.returncode):
-            runner.write_tee(cmd, result, config)
-        return result.returncode
-    if len(result.stdout) <= 1000:
-        runner.print_raw(result)
-        runner.record_raw(cmd, result, "grep")
-        return result.returncode
-
-    try:
-        groups = {}
-        binary = []
-        for line in result.stdout.split("\n"):
-            if not line:
-                continue
-            if line.startswith("Binary file "):
-                binary.append(line)
-            elif ":" in line:
-                file, rest = line.split(":", 1)
-                groups.setdefault(file, []).append(_clip(rest, 200))
-            else:
-                groups.setdefault("(no path)", []).append(_clip(line, 200))
-
-        out = list(binary)
-        for file, matches in groups.items():
-            out.append("%s: %d matches" % (file, len(matches)))
-            out.extend("  " + match for match in matches[:5])
-            if len(matches) > 5:
-                out.append("  ...")
-        if out:
-            print("\n".join(out))
-        runner.record_compacted(cmd, result, "\n".join(out), "grep")
         return 0
     except Exception:
         return runner.raw_fallback(result)
@@ -207,33 +140,5 @@ def run_find(args, config):
         return runner.raw_fallback(result)
 
 
-def _run_lossless_head(head, args, config):
-    return runner.run_lossless([head] + args, config)
-
-
-def run_wc(args, config):
-    return _run_lossless_head("wc", args, config)
-
-
-def run_head(args, config):
-    return _run_lossless_head("head", args, config)
-
-
-def run_tail(args, config):
-    return _run_lossless_head("tail", args, config)
-
-
-def run_sort(args, config):
-    return _run_lossless_head("sort", args, config)
-
-
-def run_uniq(args, config):
-    return _run_lossless_head("uniq", args, config)
-
-
-def run_rg(args, config):
-    return runner.run_lossless(["rg"] + args, config, strategy="rg")
-
-
-def run_cat(args, config):
-    return runner.run_lossless(["cat"] + args, config, strategy="cat")
+def run_gls(args, config):
+    return run_ls(args, config, head="gls")

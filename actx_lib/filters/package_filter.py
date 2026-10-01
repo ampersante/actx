@@ -146,6 +146,10 @@ def run_pip(args, config):
 
 
 def run_uv(args, config):
+    # `uv run <inner>` arrives here only when the inner command is of the
+    # summary class (or has no class): cli.main sends content/log inners
+    # (`uv run rg x`, `uv run cat f`) to runner.run_content/run_lossless
+    # by rewriter.output_class (TK-61), so compact_uv_run never sees them.
     if args and args[0] == "run":
         return _run_compact(["uv"] + args, config, compact_uv_run)
     if args and args[0] == "pip" and len(args) >= 2 and args[1] == "install":

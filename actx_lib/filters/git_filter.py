@@ -1,10 +1,9 @@
+"""git summary verbs. diff/show/blame/stash list are the content class
+(TK-61): cli.main runs them through runner.run_content and they never
+reach this module."""
+
 from actx_lib import runner
 from actx_lib.rewriter import BRANCH_READ_ONLY
-
-_DIFF_PASSTHROUGH = {
-    "--stat", "--numstat", "--name-only", "--name-status",
-    "--check", "--quiet", "--output", "--exit-code",
-}
 
 _LOG_PASSTHROUGH = {
     "-p", "--stat", "--graph", "--numstat", "--name-only",
@@ -12,15 +11,9 @@ _LOG_PASSTHROUGH = {
 }
 
 
-def _clip(text, limit):
-    if len(text) <= limit:
-        return text
-    return text[:limit]
-
-
-def _failure(cmd, result, config, tee_policy="auto"):
+def _failure(cmd, result, config):
     # stdout survives a failing exit (TK-61), then stderr.
-    runner.print_lossless_stdout(cmd, result, config, tee_policy)
+    runner.print_lossless_stdout(cmd, result, config)
     return result.returncode
 
 
@@ -94,83 +87,6 @@ def _status(rest, config):
         return runner.raw_fallback(result)
 
 
-def _diff_path(header):
-    marker = " b/"
-    if marker not in header:
-        return header[len("diff --git "):]
-    left, right = header.split(marker, 1)
-    if "a/" in left:
-        old = left.split("a/", 1)[1]
-    else:
-        old = left[len("diff --git "):]
-    if old != right:
-        return "%s -> %s" % (old, right)
-    return old
-
-
-def _format_diff_block(block):
-    header = block[0]
-    additions = 0
-    deletions = 0
-    preview = []
-    for line in block[1:]:
-        if line.startswith("+") and not line.startswith("+++"):
-            additions += 1
-            preview.append(line)
-        elif line.startswith("-") and not line.startswith("---"):
-            deletions += 1
-            preview.append(line)
-    out = [_diff_path(header), "+%d -%d" % (additions, deletions)]
-    out.extend(_clip(line, 300) for line in preview[:5])
-    if len(preview) > 5:
-        out.append("... (truncated, full in tee)")
-    return out
-
-
-def _split_diff_blocks(stdout):
-    blocks = []
-    current = None
-    for line in stdout.split("\n"):
-        if line.startswith("diff --git "):
-            if current is not None:
-                blocks.append(current)
-            current = [line]
-        elif current is not None:
-            current.append(line)
-    if current is not None:
-        blocks.append(current)
-    return blocks
-
-
-def _diff(rest, config):
-    if any(arg in _DIFF_PASSTHROUGH for arg in rest):
-        return runner.run_passthrough(["git", "diff"] + rest)
-    cmd = ["git", "diff"] + rest
-    result = runner.execute(cmd)
-    if result is None:
-        return 1
-    if result.returncode != 0:
-        return _failure(cmd, result, config, tee_policy="always")
-    if len(result.stdout) <= 1000:
-        runner.print_raw(result)
-        runner.record_raw(cmd, result, "git.diff")
-        return result.returncode
-
-    try:
-        out = []
-        for block in _split_diff_blocks(result.stdout):
-            out.extend(_format_diff_block(block))
-        out_text = "\n".join(out)
-        if out_text:
-            print(out_text)
-        path = runner.write_tee(cmd, result, config)
-        extra = len("[full output: %s]\n" % path) if path else 0
-        runner.record_compacted(cmd, result, out_text, "git.diff", extra_bytes=extra)
-        return 0
-    except Exception:
-        return runner.raw_fallback(result)
-
-
 def _log(rest, config):
     if any(arg in _LOG_PASSTHROUGH for arg in rest):
         return runner.run_passthrough(["git", "log"] + rest)
@@ -231,19 +147,8 @@ def _mutating(sub, rest, config):
         return runner.raw_fallback(result)
 
 
-def _show_or_blame(sub, rest, config):
-    cmd = ["git", sub] + rest
-    return runner.run_lossless(cmd, config, strategy="git.%s" % sub)
-
-
 def _rev_parse(rest, config):
     return runner.run_passthrough(["git", "rev-parse"] + rest)
-
-
-def _stash(rest, config):
-    if rest and rest[0] == "list":
-        return runner.run_lossless(["git", "stash"] + rest, config, strategy="git.stash")
-    return runner.run_passthrough(["git", "stash"] + rest)
 
 
 def run(args, config):
@@ -253,18 +158,12 @@ def run(args, config):
     rest = args[1:]
     if sub == "status":
         return _status(rest, config)
-    if sub == "diff":
-        return _diff(rest, config)
     if sub == "log":
         return _log(rest, config)
     if sub == "branch":
         return _branch(rest, config)
-    if sub in {"show", "blame"}:
-        return _show_or_blame(sub, rest, config)
     if sub == "rev-parse":
         return _rev_parse(rest, config)
-    if sub == "stash":
-        return _stash(rest, config)
     if sub in {"add", "commit", "push", "pull", "fetch"}:
         return _mutating(sub, rest, config)
     return runner.run_passthrough(["git"] + args)

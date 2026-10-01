@@ -1,5 +1,4 @@
 import io
-import json
 import os
 import subprocess
 import tempfile
@@ -88,7 +87,10 @@ class GitFilterTests(unittest.TestCase):
             p.stdout,
         )
 
-    def test_git_diff_known_hunk_counts(self):
+    # TK-61 C3: git diff is the content class - the command's own bytes
+    # (was: a per-file "+N -M" hunk summary with a forced tee on success).
+
+    def test_git_diff_prints_bytes_unchanged(self):
         self._init_repo()
         original = ["line%03d abcdefghij" % i for i in range(200)]
         original.insert(100, "remove_me")
@@ -101,12 +103,13 @@ class GitFilterTests(unittest.TestCase):
         changed.insert(101, "added_two")
         self._write("f", "\n".join(changed) + "\n")
 
+        raw = self.git("diff", "-U100")
         p = self.run_actx("git", "diff", "-U100")
         self.assertEqual(p.returncode, 0)
-        self.assertIn("+2 -1", p.stdout)
-        self.assertNotIn("+6 -5", p.stdout)
+        self.assertEqual(p.stdout, raw.stdout)
+        self.assertIn("+added_two", p.stdout)
 
-    def test_git_diff_large_writes_tee_on_success(self):
+    def test_git_diff_large_writes_no_tee(self):
         self._init_repo()
         original = ["line%03d abcdefghij" % i for i in range(200)]
         self._write("f", "\n".join(original) + "\n")
@@ -116,14 +119,7 @@ class GitFilterTests(unittest.TestCase):
 
         p = self.run_actx("git", "diff", "-U100")
         self.assertEqual(p.returncode, 0)
-        files = self._tee_files()
-        self.assertEqual(len(files), 1)
-        with open(
-            os.path.join(self.home.name, ".local", "share", "actx", "tee", files[0]),
-            encoding="utf-8",
-        ) as handle:
-            record = json.load(handle)
-        self.assertEqual(record["exit_code"], 0)
+        self.assertEqual(self._tee_files(), [])
 
     def test_git_diff_exit_code_passthrough(self):
         self._init_repo()
