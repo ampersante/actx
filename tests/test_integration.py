@@ -11,6 +11,9 @@ class IntegrationTests(unittest.TestCase):
     def run_actx(self, args, home):
         env = os.environ.copy()
         env["HOME"] = home
+        # Agent-dir overrides would redirect init to a real config (TK-65).
+        env.pop("XDG_CONFIG_HOME", None)
+        env.pop("PI_CODING_AGENT_DIR", None)
         return subprocess.run(
             [ACTX] + args,
             capture_output=True,
@@ -56,7 +59,11 @@ class IntegrationTests(unittest.TestCase):
             with open(plugin, "r", encoding="utf-8") as handle:
                 content = handle.read()
             self.assertEqual(content.count("const ACTX = "), 1)
-            self.assertEqual(content.count('["rewrite", cmd]'), 1)
+            # TK-65: one v2 default export, one actx hook call.
+            self.assertEqual(content.count("export default"), 1)
+            self.assertEqual(content.count('ctx.tool.hook("execute.before"'), 1)
+            self.assertEqual(content.count('"hook", "--agent", "opencode"'), 1)
+            self.assertNotIn('"rewrite"', content)
 
 
 if __name__ == "__main__":

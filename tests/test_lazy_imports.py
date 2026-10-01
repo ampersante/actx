@@ -132,6 +132,24 @@ class LazyImportTests(unittest.TestCase):
             },
         )
 
+    def test_hook_agent_paths_import_same_set(self):
+        # TK-65: `--agent`/`--payload` parsing and rewriter.is_mutator add
+        # no module to the hook path (git push reaches is_mutator).
+        baseline = self.run_path(["hook"], stdin_text=HOOK_JSON)
+        push = json.dumps({"tool_name": "Bash",
+                           "tool_input": {"command": "git push origin main"}})
+        for args in (["hook", "--agent", "opencode"],
+                     ["hook", "--agent", "devin"],
+                     ["hook", "--agent", "pi"],
+                     ["hook", "--agent", "opencode", "--payload", push]):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_path(args, stdin_text=push), baseline)
+        self.assertEqual(
+            self.run_path(["rewrite", "git push origin main"]),
+            {"actx_lib", "actx_lib.cli", "actx_lib.cli_families",
+             "actx_lib.rewriter", "actx_lib.rewrite_spec", "actx_lib.sql_verbs"},
+        )
+
     def test_cli_filter_path_imports_mobile_filter(self):
         # TK-42 (H-F14): mobile REGISTRY entries are ordinary top-level
         # imports, so the CLI path pulls in actx_lib.filters.mobile_filter.

@@ -590,15 +590,49 @@ def output_class(argv):
             if inner is not None:
                 return inner
         return _REGISTRY_ONLY_CLASSES.get(head)
+    trail = _spec_trail(head, argv)
+    if not trail:
+        return _REGISTRY_ONLY_CLASSES.get(head)
+    for level in reversed(trail):
+        if level["output"] is not None:
+            return level["output"]
+    return None
+
+
+def _spec_trail(head, argv):
+    """The levels of `head`'s spec entered by `argv` (deepest last): the
+    strict walk, or the lenient one (_lenient_trail) when it went deeper.
+    [] when the head has no spec. Shared by output_class and is_mutator."""
     head_spec = rewrite_spec.HEAD_SPECS.get(head)
     if head_spec is None:
-        return _REGISTRY_ONLY_CLASSES.get(head)
+        return []
     trail = []
     if not _match_level(head_spec, list(argv[1:]), None, trail):
         lenient = _lenient_trail(head, head_spec, list(argv[1:]))
         if len(lenient) > len(trail):
             trail = lenient
-    for level in reversed(trail):
-        if level["output"] is not None:
-            return level["output"]
-    return None
+    return trail
+
+
+def _mutator_argv(argv):
+    if not argv:
+        return False
+    head = cli_families.head_key(argv[0])
+    if head in cli_families.RUN_PREFIXES:
+        split = cli_families.run_prefix_split([head] + list(argv[1:]))
+        return split is not None and _mutator_argv(split[0])
+    trail = _spec_trail(head, argv)
+    return bool(trail) and trail[-1]["mutator"] is True
+
+
+def is_mutator(command):
+    """True when the deepest spec node `command` reaches (run-prefixes
+    unwrapped, the output_class walk) is marked `mutator` - the git verbs
+    add/commit/push/pull/fetch (TK-65). hook.py uses it to leave such a
+    command unrewritten for harnesses whose user rules match the typed
+    string. Any exception -> True: fail toward the harness's own rules
+    (the command is then not rewritten; this predicate never blocks)."""
+    try:
+        return _mutator_argv(shlex.split(command))
+    except Exception:
+        return True

@@ -1,7 +1,9 @@
+import io
 import json
 import os
 import subprocess
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACTX = os.path.join(ROOT, "actx")
@@ -476,6 +478,176 @@ class HookCliTests(unittest.TestCase):
             list(output),
             ["hookEventName", "permissionDecision", "updatedInput", "additionalContext"],
         )
+
+
+# TK-65 (plan D5 §1): per-agent policy selected by `actx hook --agent <name>`.
+PUSH = "git push origin main"
+FORCE_PUSH = "git push --force origin main"
+FORCE_PUSH_REASON = "Force-pushing to remote git repository requires human confirmation"
+# Byte-exact HEAD b051058 (v2.12.0) output of `actx hook` for PUSH.
+PUSH_NO_AGENT_STDOUT = (
+    '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
+    '"permissionDecision": "allow", "updatedInput": {"command": '
+    '"actx git push origin main"}, "additionalContext": '
+    '"Command rewritten by actx for output compression."}}\n'
+)
+DEVIN_MUTATOR_ALLOW = {
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "allow",
+    }
+}
+
+
+def gate_ask_as_deny(agent, category, reason):
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                f"actx security gate ({agent}: no confirmation channel) "
+                f"[{category}]: {reason}"
+            ),
+        }
+    }
+
+
+class HookAgentPolicyTests(unittest.TestCase):
+    def run_hook(self, args, command=None, stdin_text=None):
+        if stdin_text is None:
+            stdin_text = hook_input("Bash", {"command": command})
+        return subprocess.run(
+            [ACTX, "hook"] + args,
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+        )
+
+    def hook_stdout(self, args, command):
+        p = self.run_hook(args, command)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    # --- mutators -------------------------------------------------------
+    def test_opencode_mutator_not_rewritten_empty(self):
+        self.assertEqual(self.hook_stdout(["--agent", "opencode"], PUSH), "")
+
+    def test_devin_mutator_allow_without_updated_input(self):
+        out = self.hook_stdout(["--agent", "devin"], PUSH)
+        self.assertEqual(out, json.dumps(DEVIN_MUTATOR_ALLOW) + "\n")
+
+    def test_pi_mutator_rewritten(self):
+        self.assertEqual(self.hook_stdout(["--agent", "pi"], PUSH),
+                         PUSH_NO_AGENT_STDOUT)
+
+    def test_no_agent_mutator_rewritten_byte_identical(self):
+        self.assertEqual(self.hook_stdout([], PUSH), PUSH_NO_AGENT_STDOUT)
+
+    # --- gate verdicts --------------------------------------------------
+    def test_devin_force_push_gate_ask_first(self):
+        out = self.hook_stdout(["--agent", "devin"], FORCE_PUSH)
+        self.assertEqual(out, self.hook_stdout([], FORCE_PUSH))
+        self.assertEqual(
+            json.loads(out)["hookSpecificOutput"]["permissionDecision"], "ask")
+
+    def test_opencode_force_push_ask_becomes_deny(self):
+        out = self.hook_stdout(["--agent", "opencode"], FORCE_PUSH)
+        self.assertEqual(json.loads(out), gate_ask_as_deny(
+            "opencode", "T6_HIGH_RISK_GIT", FORCE_PUSH_REASON))
+
+    def test_pi_force_push_ask_becomes_deny(self):
+        out = self.hook_stdout(["--agent", "pi"], FORCE_PUSH)
+        self.assertEqual(json.loads(out), gate_ask_as_deny(
+            "pi", "T6_HIGH_RISK_GIT", FORCE_PUSH_REASON))
+
+    def test_gate_deny_unchanged_for_every_agent(self):
+        # TK-64 row (replaces `actx rewrite "cat .env"` -> empty): the gate
+        # deny is emitted before any rewrite, identical for every agent.
+        expected = self.hook_stdout([], "cat .env")
+        data = json.loads(expected)["hookSpecificOutput"]
+        self.assertEqual(data["permissionDecision"], "deny")
+        self.assertEqual(
+            data["permissionDecisionReason"],
+            "actx security gate violation [T1_CREDENTIAL_ACCESS]: "
+            "Access to sensitive credential/file '.env' is prohibited",
+        )
+        for agent in ("opencode", "devin", "pi"):
+            with self.subTest(agent=agent):
+                self.assertEqual(
+                    self.hook_stdout(["--agent", agent], "cat .env"), expected)
+
+    # --- other rewrites -------------------------------------------------
+    def test_observational_rewrite_unchanged_for_every_agent(self):
+        expected = self.hook_stdout([], "git status")
+        self.assertEqual(
+            json.loads(expected)["hookSpecificOutput"]["updatedInput"],
+            {"command": "actx git status"},
+        )
+        for agent in ("opencode", "devin", "pi"):
+            with self.subTest(agent=agent):
+                self.assertEqual(
+                    self.hook_stdout(["--agent", agent], "git status"), expected)
+
+    # --- malformed argv -> no-agent behaviour ---------------------------
+    def test_malformed_agent_argv_falls_back_to_no_agent(self):
+        for args in (["--agent", "nosuch"], ["--agent"], ["--bogus"],
+                     ["--agent", "opencode", "--bogus"],
+                     ["--bogus", "--agent", "opencode"]):
+            with self.subTest(args=args):
+                p = self.run_hook(args, PUSH)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(p.stdout, PUSH_NO_AGENT_STDOUT)
+
+    # --- --payload (A1 fallback) ----------------------------------------
+    def test_payload_either_order_matches_stdin_form(self):
+        # stdin carries a different command: the payload must replace it.
+        decoy = hook_input("Bash", {"command": "git log"})
+        for command in (PUSH, FORCE_PUSH, "git status"):
+            expected = self.hook_stdout(["--agent", "opencode"], command)
+            payload = hook_input("Bash", {"command": command})
+            for args in (["--agent", "opencode", "--payload", payload],
+                         ["--payload", payload, "--agent", "opencode"]):
+                with self.subTest(command=command, order=args[0]):
+                    p = self.run_hook(args, stdin_text=decoy)
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertEqual(p.stdout, expected)
+        self.assertEqual(self.hook_stdout(["--agent", "opencode"], PUSH), "")
+        self.assertEqual(
+            json.loads(self.hook_stdout(["--agent", "opencode"], FORCE_PUSH))
+            ["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(
+            json.loads(self.hook_stdout(["--agent", "opencode"], "git status"))
+            ["hookSpecificOutput"]["updatedInput"],
+            {"command": "actx git status"})
+
+    def test_payload_missing_or_non_json_empty(self):
+        stdin_text = hook_input("Bash", {"command": "git status"})
+        for args in (["--agent", "opencode", "--payload"],
+                     ["--payload"],
+                     ["--agent", "opencode", "--payload", "not json"],
+                     ["--payload", "{", "--agent", "opencode"]):
+            with self.subTest(args=args):
+                p = self.run_hook(args, stdin_text=stdin_text)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(p.stdout, "")
+
+    # --- gate exception -> no opinion, every agent ----------------------
+    def test_gate_exception_empty_for_every_agent(self):
+        from actx_lib import hook
+
+        for args in ([], ["--agent", "opencode"], ["--agent", "devin"],
+                     ["--agent", "pi"]):
+            with self.subTest(args=args):
+                out = io.StringIO()
+                with mock.patch(
+                    "actx_lib.security_gate.evaluate_security",
+                    side_effect=RuntimeError("boom"),
+                ), mock.patch(
+                    "sys.stdin", io.StringIO(hook_input("Bash", {"command": PUSH}))
+                ), mock.patch("sys.stdout", out):
+                    rc = hook.main(args)
+                self.assertEqual(rc, 0)
+                self.assertEqual(out.getvalue(), "")
 
 
 if __name__ == "__main__":

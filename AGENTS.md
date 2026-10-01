@@ -21,7 +21,7 @@ Rules, not fact copies; each points to its owner (PRD).
 - **No `shell=True` / `os.system` / `eval` / `exec` anywhere.** Every subprocess is an exec-array. Source: `PRD.md` §11.1–11.2.
 - **Auto-rewrite observational CLI + narrow mutator allow-list.** Observational heads (git RO, ls/grep/find/wc/…, test runners, linters without write flags, docker/kubectl/gh RO, …) plus mutators: `git add|commit|push|pull|fetch`, `npm|pnpm install|ci`, `pip install`, `uv pip install`. Safety = metachar/exec/fail-open/write-flag rejects, not list length. No lexer; no `python3`/`aws` auto-rewrite. Source: `PRD.md` §7.
 - **One rewriter for all agents.** `actx_lib/rewriter.py` is the single source of truth; adapters are transport only. Source: `PRD.md` §4, §7.
-- **Adapters fail open.** Hook and plugin never throw on any input; `actx init` merges, never overwrites user files wholly. Source: `PRD.md` §10.7–10.8, §6.4.
+- **Adapters fail open.** Hook and plugin never throw on an error or malformed input; the only intentional throw is the OpenCode plugin's deny (OpenCode's block primitive, `PRD.md` §11.8); `actx init` merges, never overwrites user files wholly. Source: `PRD.md` §10.7–10.8, §6.4, §11.8.
 - **No project configs; adapters write only to global user files.** Source: `PRD.md` §2, §11.5.
 - **Original exit code preserved exactly.** Source: `PRD.md` §10.2.
 - **No network, telemetry, or accounts.** Source: `PRD.md` §2.

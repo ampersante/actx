@@ -57,6 +57,11 @@ head or per verb-path node:
                    sets it explicitly; None on a child level means "inherit
                    from the nearest ancestor" (rewriter.output_class). Not
                    part of the admission grammar.
+  mutator       -- True on a node whose command changes repository or
+                   remote state (exactly git add/commit/push/pull/fetch;
+                   TK-65). Read by rewriter.is_mutator for per-agent hook
+                   policy (hook.py); not part of the admission grammar.
+                   Adding a mutator needs a journal entry and owner sign-off.
 
 Source per head, in order of preference: (1) exact rewrite corpus token
 usage; (2) tables already vetted with a dated citation elsewhere in this
@@ -95,9 +100,10 @@ def spec(verbs=None, bool=(), value=None, optional=None, numeric=False,
          cluster=False, positional="none", after_dashdash="forbid",
          hook=None, inherit=False, require_verb=False,
          dashdash_literals=("--",), require_any_of=(), forbid_write_token=False,
-         output=None):
+         output=None, mutator=False):
     return {
         "output": output,
+        "mutator": mutator,
         "verbs": verbs,
         "bool": frozenset(bool),
         "value": dict(value or {}),
@@ -389,7 +395,7 @@ HEAD_SPECS = {
             value={"-U": "int", "--unified": "int", "--inter-hunk-context": "int",
                    "--chmod": frozenset({"+x", "-x"}),
                    "--pathspec-from-file": "any"},
-            positional="any", after_dashdash="positional"),
+            positional="any", after_dashdash="positional", mutator=True),
             # EXCLUDED: -i/--interactive, -p/--patch (interactive); -e/--edit
             # (opens $EDITOR, same class).
         "commit": spec(
@@ -418,7 +424,8 @@ HEAD_SPECS = {
             # cluster=True: getopt-style short-flag clustering with a
             # trailing value flag - `-am <msg>` == `-a -m <msg>` (history-
             # replay pin: `git commit -am <msg>`).
-            cluster=True, positional="any", after_dashdash="positional"),
+            cluster=True, positional="any", after_dashdash="positional",
+            mutator=True),
             # EXCLUDED: -p/--patch, --interactive (interactive); -c/
             # --reedit-message, --fixup, -e/--edit (open $EDITOR).
         "push": spec(
@@ -433,7 +440,7 @@ HEAD_SPECS = {
                    "-o": "any", "--push-option": "any"},
             optional={"--force-with-lease": "any",
                       "--signed": frozenset({"yes", "no", "if-asked"})},
-            positional="any"),
+            positional="any", mutator=True),
             # EXCLUDED: --receive-pack, --exec (exec-by-name).
         "pull": spec(
             bool=("-v", "--verbose", "-q", "--quiet", "--progress",
@@ -458,7 +465,7 @@ HEAD_SPECS = {
                       "--recurse-submodules": "any", "--log": "int",
                       "--signoff": "any", "-j": "int", "--jobs": "int",
                       "-S": "any", "--gpg-sign": "any"},
-            positional="any"),
+            positional="any", mutator=True),
             # EXCLUDED: --edit (opens $EDITOR); -s/--strategy (execs an
             # arbitrary PATH-resolved git-merge-<name> helper); --upload-pack
             # (exec-by-name); "interactive" removed from --rebase's domain.
@@ -480,7 +487,7 @@ HEAD_SPECS = {
                    "--negotiation-include": "any", "--filter": "any",
                    "-j": "int", "--jobs": "int"},
             optional={"--recurse-submodules": "any"},
-            positional="any"),
+            positional="any", mutator=True),
             # EXCLUDED: --upload-pack (exec-by-name); --stdin (blocks
             # indefinitely reading stdin if none is piped - hang class).
         "branch": spec(

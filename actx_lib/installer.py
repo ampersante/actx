@@ -22,6 +22,8 @@ AGENTS = (
     "aider",
     "gemini",
     "copilot",
+    "devin",
+    "pi",
 )
 
 def _tier2_flags_block():
@@ -61,11 +63,11 @@ Package manager discipline:
 _SECTION_HEADER = "## Output compression (actx)"
 
 # Per-agent integration points.  cursor has no file target: install prints the
-# section to stdout for manual insertion in the Cursor UI.
+# section to stdout for manual insertion in the Cursor UI.  opencode, devin
+# and pi resolve their directories from the environment (_agent_config).
 _AGENT_PATHS = {
     "claude": {"hook": "~/.claude/settings.json"},
     "codex": {"hook": "~/.codex/hooks.json"},
-    "opencode": {"plugin": "~/.config/opencode/plugins/actx.ts"},
     "grok": {"instructions": "~/.grok/rules/actx.md"},
     "cursor": {},
     "cline": {"instructions": "~/.cline/rules/actx.md"},
@@ -79,6 +81,28 @@ _AGENT_PATHS = {
 }
 
 _AIDER_READ_PATH = "~/.config/actx/instructions.md"
+
+_ADAPTERS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "adapters"
+)
+
+# Devin CLI: Claude-format PreToolUse hook; its shell tool is `exec`.
+_DEVIN_MATCHER = "^exec$"
+
+
+def _config_home():
+    """``$XDG_CONFIG_HOME`` when set to an absolute path, else ``~/.config``
+    (the XDG spec says a relative value is ignored)."""
+    value = os.environ.get("XDG_CONFIG_HOME", "")
+    return value if os.path.isabs(value) else "~/.config"
+
+
+def _pi_agent_dir():
+    """``$PI_CODING_AGENT_DIR`` when set to an absolute path (``~`` expanded),
+    else ``~/.pi/agent``.  A relative value is ignored: resolving it against
+    the cwd would write into a project."""
+    value = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", ""))
+    return value if os.path.isabs(value) else "~/.pi/agent"
 
 
 def abs_path():
@@ -97,15 +121,18 @@ def abs_path():
 
 
 def _is_actx_hook_command(command):
-    """True for our hook command format ``'<path-to-actx>' hook``."""
-    if not isinstance(command, str) or not command.endswith(" hook"):
+    """True only for our hook command forms: ``shlex.split`` gives exactly
+    ``[<path with basename actx>, "hook"]`` or ``[<same>, "hook", "--agent",
+    <name>]``.  A split failure is False."""
+    if not isinstance(command, str):
         return False
-    path_part = command[: -len(" hook")]
     try:
-        parts = shlex.split(path_part)
+        parts = shlex.split(command)
     except ValueError:
         return False
-    return len(parts) == 1 and os.path.basename(parts[0]) == "actx"
+    if len(parts) not in (2, 4) or os.path.basename(parts[0]) != "actx":
+        return False
+    return parts[1] == "hook" and (len(parts) == 2 or parts[2] == "--agent")
 
 
 def _hook_handler(abs_actx):
@@ -120,6 +147,14 @@ def _gemini_handler(abs_actx):
     return {
         "type": "command",
         "command": shlex.quote(abs_actx) + " hook",
+        "timeout": 10,
+    }
+
+
+def _devin_handler(abs_actx):
+    return {
+        "type": "command",
+        "command": shlex.quote(abs_actx) + " hook --agent devin",
         "timeout": 10,
     }
 
@@ -429,6 +464,149 @@ def _uninstall_copilot(path, abs_actx):
     return True
 
 
+def _devin_shape_error(data):
+    """None when actx may edit this Devin config, else the reason.  A missing
+    ``hooks`` / ``hooks.PreToolUse`` key is the normal create path; a key that
+    is present with the wrong type is refused, never normalised."""
+    if not isinstance(data, dict):
+        return "the top level is not a JSON object"
+    if "hooks" not in data:
+        return None
+    hooks = data["hooks"]
+    if not isinstance(hooks, dict):
+        return '"hooks" is not an object'
+    if "PreToolUse" not in hooks:
+        return None
+    pretool = hooks["PreToolUse"]
+    if not isinstance(pretool, list):
+        return '"hooks.PreToolUse" is not a list'
+    for entry in pretool:
+        if not isinstance(entry, dict):
+            return 'a "hooks.PreToolUse" entry is not an object'
+        if "hooks" in entry and not isinstance(entry["hooks"], list):
+            return 'a "hooks.PreToolUse" entry has "hooks" that is not a list'
+    return None
+
+
+def _load_devin(path):
+    """The parsed Devin config ({} when the file is missing).  ValueError
+    with the reason when the file must be left untouched."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot read it as strict JSON (%s)" % exc) from exc
+    reason = _devin_shape_error(data)
+    if reason is not None:
+        raise ValueError(reason)
+    return data
+
+
+def _write_devin(path, data):
+    """Write in place: an existing file keeps its mode; a new one is 0600."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2)
+        handle.write("\n")
+
+
+def _strip_actx_handlers(pretool, keep=None):
+    """Return (entries, kept): ``pretool`` without actx handlers.  An entry
+    emptied by that removal is dropped; other entries and user handlers are
+    returned as they were.  ``keep`` (our exact current handler) survives
+    once, in the first ``^exec$`` entry holding it; ``kept`` says whether it
+    did."""
+    kept = False
+    entries = []
+    for entry in pretool:
+        handlers = entry.get("hooks")
+        if not isinstance(handlers, list):
+            entries.append(entry)
+            continue
+        remaining = []
+        for handler in handlers:
+            if isinstance(handler, dict) and _is_actx_hook_command(handler.get("command")):
+                if (keep is not None and not kept and handler == keep
+                        and entry.get("matcher") == _DEVIN_MATCHER):
+                    kept = True
+                    remaining.append(handler)
+                continue
+            remaining.append(handler)
+        if len(remaining) == len(handlers):
+            entries.append(entry)
+        elif remaining:
+            entries.append(dict(entry, hooks=remaining))
+    return entries, kept
+
+
+def _install_devin(path, abs_actx):
+    """Merge the actx handler into ``hooks.PreToolUse`` of Devin's config.
+    Stale actx handlers are removed first; ours is appended to an existing
+    ``^exec$`` entry or added as a new one.  Writes only on change."""
+    data = _load_devin(path)
+    handler = _devin_handler(abs_actx)
+    hooks = data.get("hooks", {})
+    pretool, kept = _strip_actx_handlers(hooks.get("PreToolUse", []), keep=handler)
+    if not kept:
+        for index, entry in enumerate(pretool):
+            if entry.get("matcher") == _DEVIN_MATCHER and isinstance(entry.get("hooks"), list):
+                pretool[index] = dict(entry, hooks=entry["hooks"] + [handler])
+                break
+        else:
+            pretool.append({"matcher": _DEVIN_MATCHER, "hooks": [handler]})
+    updated = dict(data)
+    updated["hooks"] = dict(hooks, PreToolUse=pretool)
+    if os.path.exists(path) and updated == data:
+        return False
+    _write_devin(path, updated)
+    return True
+
+
+def _uninstall_devin(path):
+    """Remove actx handlers; drop an entry, ``PreToolUse`` or ``hooks`` only
+    when that removal emptied it."""
+    if not os.path.exists(path):
+        return False
+    data = _load_devin(path)
+    hooks = data.get("hooks")
+    if not hooks or "PreToolUse" not in hooks:
+        return False
+    pretool, _ = _strip_actx_handlers(hooks["PreToolUse"])
+    if pretool == hooks["PreToolUse"]:
+        return False
+    updated_hooks = dict(hooks)
+    if pretool:
+        updated_hooks["PreToolUse"] = pretool
+    else:
+        del updated_hooks["PreToolUse"]
+    updated = dict(data)
+    if updated_hooks:
+        updated["hooks"] = updated_hooks
+    else:
+        del updated["hooks"]
+    _write_devin(path, updated)
+    return True
+
+
+def _devin_installed(path):
+    try:
+        data = _load_devin(path)
+    except ValueError:
+        return False
+    command = _devin_handler(abs_path())["command"]
+    return any(
+        entry.get("matcher") == _DEVIN_MATCHER
+        and any(
+            isinstance(handler, dict) and handler.get("command") == command
+            for handler in entry.get("hooks", [])
+        )
+        for entry in data.get("hooks", {}).get("PreToolUse", [])
+    )
+
+
 def _read_instructions(path):
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as handle:
@@ -523,10 +701,9 @@ def _uninstall_instructions(path):
     return True
 
 
-def _install_opencode(path, abs_actx):
-    template_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "adapters")
-    template_path = os.path.join(template_dir, "opencode.ts.template")
-    with open(template_path, "r", encoding="utf-8") as handle:
+def _install_template(path, template_name, abs_actx):
+    """Write an actx-owned adapter file (opencode plugin, pi extension)."""
+    with open(os.path.join(_ADAPTERS_DIR, template_name), "r", encoding="utf-8") as handle:
         template = handle.read()
     content = template.replace("__ACTX_ABS_PATH__", json.dumps(abs_actx))
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -535,7 +712,7 @@ def _install_opencode(path, abs_actx):
     return True
 
 
-def _uninstall_opencode(path):
+def _remove_file(path):
     if not os.path.exists(path):
         return False
     os.remove(path)
@@ -669,6 +846,12 @@ def _uninstall_aider(paths):
 
 
 def _agent_config(agent):
+    if agent == "opencode":
+        return {"plugin": os.path.join(_config_home(), "opencode", "plugins", "actx.ts")}
+    if agent == "devin":
+        return {"hook": os.path.join(_config_home(), "devin", "config.json")}
+    if agent == "pi":
+        return {"plugin": os.path.join(_pi_agent_dir(), "extensions", "actx.ts")}
     return _AGENT_PATHS[agent]
 
 
@@ -676,10 +859,12 @@ def _detect_existing(agent):
     paths = _agent_config(agent)
     if agent == "cursor":
         return False
-    if agent in ("claude", "codex", "gemini", "copilot"):
+    if agent in ("claude", "codex", "gemini", "copilot", "devin"):
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["hook"])))
     if agent == "opencode":
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["plugin"])))
+    if agent == "pi":
+        return os.path.isdir(os.path.expanduser(_pi_agent_dir()))
     if agent == "grok":
         return os.path.isdir(os.path.expanduser("~/.grok"))
     if agent == "cline":
@@ -769,8 +954,10 @@ def _installed(agent):
             isinstance(existing, dict) and existing.get("bash") == bash
             for existing in pretool
         )
-    if agent == "opencode":
+    if agent in ("opencode", "pi"):
         return os.path.exists(os.path.expanduser(paths["plugin"]))
+    if agent == "devin":
+        return _devin_installed(os.path.expanduser(paths["hook"]))
     if agent in ("grok", "cline", "windsurf", "aider"):
         text = _read_instructions(os.path.expanduser(paths["instructions"]))
         return _contains_section(text)
@@ -814,9 +1001,24 @@ def install(agent, abs_actx):
             print(str(exc), file=sys.stderr)
             return 1
         return 0
-    if agent == "opencode":
+    if agent in ("opencode", "pi"):
         path = os.path.expanduser(paths["plugin"])
-        _install_opencode(path, abs_actx)
+        _install_template(path, "%s.ts.template" % agent, abs_actx)
+        return 0
+    if agent == "devin":
+        path = os.path.expanduser(paths["hook"])
+        try:
+            _install_devin(path, abs_actx)
+        except ValueError as exc:
+            entry = {"matcher": _DEVIN_MATCHER, "hooks": [_devin_handler(abs_actx)]}
+            print(
+                "cannot install: %s: %s. The file may contain comments or an "
+                "unexpected shape; it was left unchanged. Add this entry to the "
+                '"hooks.PreToolUse" list manually:\n%s'
+                % (path, exc, json.dumps(entry, indent=2)),
+                file=sys.stderr,
+            )
+            return 1
         return 0
     if agent in ("grok", "cline", "windsurf"):
         path = os.path.expanduser(paths["instructions"])
@@ -858,8 +1060,22 @@ def uninstall(agent, abs_actx):
             print(str(exc), file=sys.stderr)
             return 1
         return 0
-    if agent == "opencode":
-        _uninstall_opencode(os.path.expanduser(paths["plugin"]))
+    if agent in ("opencode", "pi"):
+        _remove_file(os.path.expanduser(paths["plugin"]))
+        return 0
+    if agent == "devin":
+        path = os.path.expanduser(paths["hook"])
+        try:
+            _uninstall_devin(path)
+        except ValueError as exc:
+            print(
+                "cannot uninstall: %s: %s. The file may contain comments or an "
+                "unexpected shape; it was left unchanged. Remove the actx "
+                "handler (command ending in \"hook --agent devin\") manually."
+                % (path, exc),
+                file=sys.stderr,
+            )
+            return 1
         return 0
     if agent in ("grok", "cline", "windsurf"):
         _uninstall_instructions(os.path.expanduser(paths["instructions"]))
@@ -884,7 +1100,11 @@ def main(args):
     import argparse
 
     parser = argparse.ArgumentParser(prog="actx init", add_help=True)
-    parser.add_argument("--agent", dest="agent")
+    parser.add_argument(
+        "--agent",
+        dest="agent",
+        help="one of: %s, all (default: agents whose config exists)" % ", ".join(AGENTS),
+    )
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--uninstall", action="store_true")
     opts = parser.parse_args(args)

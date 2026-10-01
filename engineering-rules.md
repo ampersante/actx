@@ -76,10 +76,13 @@ Pre-dev: hard rules now; stack-specific idioms marked "refine with code".
 - Parse with `shlex.split`; never rebuild commands from tokens — return the original string verbatim (`"actx " + command`). Source: `PRD.md` §7.
 - Tests: `unittest` (not pytest); fixture-based, deterministic.
 
-## TypeScript Adapter (OpenCode)
+## TypeScript Adapters (OpenCode, pi)
 
-- One file `adapters/opencode.ts.template`; installer substitutes `__ACTX_ABS_PATH__` via `json.dumps` (a valid TS string literal).
-- No rewrite logic in TS; delegate to `actx rewrite`. Fail-open try/catch leaves the command unchanged. Source: `PRD.md` §6.2.
+- One file per agent: `adapters/opencode.ts.template`, `adapters/pi.ts.template`; installer substitutes `__ACTX_ABS_PATH__` via `json.dumps` (a valid TS string literal).
+- No rewrite or gate logic in TS: each adapter sends the Claude-format payload to `actx hook --agent <name>` (one actx process per command) and only applies the verdict. Policy differences between harnesses live in `actx_lib/hook.py` (`AGENT_POLICIES`), never in the template. Source: `PRD.md` §6.1, §6.2, §6.6.
+- Fail-open: any actx failure (missing binary, timeout, non-JSON) leaves the command unchanged. OpenCode treats any thrown exception as a deny, so its only intentional throw is the gate's deny; pi blocks on a throwing handler, so the pi handler never throws and returns `{block: true, reason}` instead.
+- pi awaits an async `spawn` (its event loop must not freeze); OpenCode uses synchronous `execFileSync` (argv, `timeout` and `stdio` live-verified under its Bun; stdin via `input:` was live-verified on 2026-10-01 — `assumptions.md` A1; `actx hook --payload` remains an unused fallback).
+- No JS/TS runtime is available locally: templates are checked by string tests and live acceptance only (`PRD.md` §13.11).
 
 ## Naming
 

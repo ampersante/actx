@@ -10,7 +10,7 @@ $ git status        →   $ actx git status
 
 ![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB)
 ![Stdlib only](https://img.shields.io/badge/dependencies-none-brightgreen)
-![Tests](https://img.shields.io/badge/tests-1168%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1202%20passed-brightgreen)
 
 ---
 
@@ -54,14 +54,14 @@ M (3):
 ## Features
 
 - **L7 Security Gatekeeper (`actx hook`)** — deterministic PreToolUse guard (<0.02ms latency) that intercepts dangerous commands before execution. Blocks credential exposure (`.env`, `~/.ssh/id_rsa`, AWS/GCP keys, Keychain), network exfiltration (`curl -d @.env`, `nc`/`socat`), pipe-to-interpreter obfuscation, OS destruction (`rm -rf /`), and insecure package registries. Requests human confirmation (`ask`) on destructive git operations (`git push --force`, `git reset --hard`).
-- **Auto-rewrite (observational + narrow mutators)** — observational CLI (`git` RO, `ls`/`grep`/`find`/`wc`/…, test runners, linters without write flags, `docker`/`kubectl`/`gh` RO, …) plus a narrow mutator allow-list (`git add|commit|push|pull|fetch`, `npm|pnpm install|ci`, `pip install`, `uv pip install`). Safety is metachar/exec/fail-open/write-flag rejects (`--fix`, `ruff format`, …), not “read-only only”. No lexer; no `python3`/`aws` auto-rewrite.
+- **Auto-rewrite (observational + narrow mutators)** — observational CLI (`git` RO, `ls`/`grep`/`find`/`wc`/…, test runners, linters without write flags, `docker`/`kubectl`/`gh` RO, …) plus a narrow mutator allow-list (`git add|commit|push|pull|fetch`; package installs left it and always ask for confirmation). Safety is metachar/exec/fail-open/write-flag rejects (`--fix`, `ruff format`, …), not “read-only only”. No lexer; no `python3`/`aws` auto-rewrite.
 - **Exact exit codes** — the original command's exit code is preserved, including `git status` returning `128` outside a repo and `grep` returning `1` for no matches.
 - **Lossless filenames** — `git status`, `ls`, and `find` compress the format, not the names.
 - **Tee for recovery** — truncated or failed output is saved to `~/.local/share/actx/tee` as JSON (secret values masked); a truncated result is always saved and its tee path printed.
-- **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent; on any error they pass the command through unchanged and the output through with secret values masked (if masking itself fails, lines that may carry a secret are withheld and a marker line says how many).
+- **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent on an error (the OpenCode plugin's deliberate throw on a security-gate deny is OpenCode's only way to block a command); on any error they pass the command through unchanged and the output through with secret values masked (if masking itself fails, lines that may carry a secret are withheld and a marker line says how many).
 - **Escape hatch** — `ACTX_BYPASS=1` or a `bypass_commands` entry runs the matching command unfiltered (byte-for-byte except masked secret values), preserving the exit code.
 - **Stdlib only** — Python 3.14 standard library. No pip, no brew, no network, no telemetry.
-- **Multi-agent** — deterministic hooks for Claude Code, Codex, and OpenCode; rule-based instructions for Grok, Cline, Windsurf, Aider, and Cursor.
+- **Multi-agent** — deterministic hooks and plugins for Claude Code, Codex, Gemini/Antigravity, GitHub Copilot CLI, OpenCode, Devin CLI, and pi; rule-based instructions for Grok, Cline, Windsurf, Aider, and Cursor.
 
 ## Installation
 
@@ -83,6 +83,8 @@ actx init --agent all  # install for every supported agent
 actx init --agent claude
 actx init --agent codex
 actx init --agent opencode
+actx init --agent devin
+actx init --agent pi
 ```
 
 After installation, restart the agent.
@@ -90,8 +92,8 @@ After installation, restart the agent.
 ### Via curl (release tarball)
 
 ```bash
-curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.10.0.tar.gz | tar xz
-cd actx-2.10.0
+curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.13.0.tar.gz | tar xz
+cd actx-2.13.0
 bash install.sh
 ```
 
@@ -153,9 +155,9 @@ actx gain [--graph|--history|--daily|--breakdown] [--format json]
 actx discover
 actx session
 actx tracking [on|off|status|clear]
-actx rewrite "<command>"
-actx hook
-actx init [--agent <name>] [--show] [--uninstall]
+actx rewrite "<command>"      # pure rewriter, no security gate
+actx hook [--agent opencode|devin|pi] [--payload <json>]
+actx init [--agent <name>|all] [--show] [--uninstall]
 actx --version
 actx --help
 ```
@@ -206,13 +208,13 @@ actx --raw git status      # unfiltered: byte-for-byte except masked secret valu
 ## How it works
 
 ```
-agent Bash call
+agent shell call
       │
       ▼
 agent adapter (hook / plugin / rules)
       │
       ▼
-actx rewrite "<command>"   →  "actx <command>" or nothing
+actx hook [--agent X]   →  deny | ask | allow + "actx <command>" | nothing
       │
       ▼
 actx CLI: parse → route → execute (exec-array) → filter → print → tee
@@ -225,7 +227,7 @@ One rewriter is the single source of truth for every adapter. It rewrites simple
 
 ## Agent integration
 
-Tier-1 hooks (Claude/Codex) append a compact-flag hint to `additionalContext` on
+Tier-1 hooks (Claude/Codex; Devin and pi do not deliver it) append a compact-flag hint to `additionalContext` on
 allow+rewrite verdicts for known verbose forms (e.g. a bare `git log` gets the
 `-n` advice); deny/ask verdicts and the Antigravity schema carry no hints, and a
 clean command without a rewrite still returns strict no-op. Tier-2 instruction
@@ -244,7 +246,9 @@ entirely — actx cannot protect an agent run under that flag.
 | Codex | PreToolUse JSON hook | `actx init --agent codex` | ✅ deterministic¹ |
 | Gemini / Antigravity | PreToolUse JSON hook | `actx init --agent gemini` | ✅ deterministic |
 | GitHub Copilot CLI | PreToolUse JSON hook | `actx init --agent copilot` | ✅ deterministic |
-| OpenCode | TypeScript plugin | `actx init --agent opencode` | ✅ deterministic |
+| OpenCode ≥ 2.0.0 | TypeScript plugin (v2) | `actx init --agent opencode` | ✅ deterministic² |
+| Devin CLI | PreToolUse JSON hook (`exec` tool) | `actx init --agent devin` | ✅ deterministic² |
+| pi | TypeScript extension | `actx init --agent pi` | ✅ deterministic² |
 | Grok Build | Rules instruction | `actx init --agent grok` | soft (~70–85%) |
 | Cline / Roo | Rules file | `actx init --agent cline` | soft |
 | Windsurf | Rules file | `actx init --agent windsurf` | soft |
@@ -252,6 +256,13 @@ entirely — actx cannot protect an agent run under that flag.
 | Cursor | Printed for manual UI insert | `actx init --agent cursor` | manual |
 
 ¹ Codex requires the user to trust the hook once via `/hooks`.
+
+² These adapters call `actx hook --agent <name>` and require actx ≥ 2.13.0. Per harness:
+
+- **OpenCode** checks its own `permission` rules against the command *after* the plugin has rewritten it. So the git mutators (`git add|commit|push|pull|fetch`) are left unrewritten, and your rules such as `shell:git push*` still match them. OpenCode has no confirmation channel for plugins, so a gate `ask` (e.g. `git push --force`) becomes a deny with the reason `actx security gate (opencode: no confirmation channel) …`. Not covered: user-typed `!cmd`, the `execute` tool (code-mode bridge for catalog/MCP tools), MCP tools. The agentic-kit `apply` writes the same plugin file; until the kit drops its template, re-run `actx init` after a kit apply.
+- **Devin** also checks its rules after the hook. Git mutators are allowed without being rewritten, so a matching `deny` rule of yours still wins. A gate `ask` prompts; `devin -p` rejects it. Mutator forms actx does not rewrite (`git -C dir push`) get Devin's default prompt, which `-p` rejects. `~/.config/devin/config.json` (or `$XDG_CONFIG_HOME/devin/config.json`) is merged in place and keeps mode 0600; if it contains comments or an unexpected shape, `actx init` leaves it untouched, exits 1 and prints the entry to add by hand.
+- **pi** never asks the human: a gate `ask` becomes a deny with the reason `actx security gate (pi: no confirmation channel) …`, so the agent sees why and continues. The extension goes to `$PI_CODING_AGENT_DIR/extensions/actx.ts` (default `~/.pi/agent/extensions/actx.ts`). Not covered: user-typed `!cmd`.
+- In OpenCode and Devin, a rule of yours on an observational command (e.g. `git log*`) no longer matches once actx rewrites it to `actx git log …`.
 
 `actx init` merges — it never overwrites your configuration files. `actx init --show` lists status, and `actx init --uninstall` removes only the actx entry.
 

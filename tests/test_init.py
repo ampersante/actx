@@ -47,10 +47,20 @@ Package manager discipline:
 """
 
 
+def isolated_env(home, extra=None):
+    """HOME=<tmp>; agent-dir overrides from the caller's environment are
+    dropped so no test can reach a real config through them."""
+    env = os.environ.copy()
+    env["HOME"] = home
+    env.pop("XDG_CONFIG_HOME", None)
+    env.pop("PI_CODING_AGENT_DIR", None)
+    env.update(extra or {})
+    return env
+
+
 class InitTests(unittest.TestCase):
     def run_actx(self, args, home):
-        env = os.environ.copy()
-        env["HOME"] = home
+        env = isolated_env(home)
         return subprocess.run(
             [ACTX] + args,
             capture_output=True,
@@ -149,10 +159,17 @@ class InitTests(unittest.TestCase):
             with open(plugin, encoding="utf-8") as handle:
                 content = handle.read()
             self.assertNotIn("__ACTX_ABS_PATH__", content)
-            self.assertIn("tool.execute.before", content)
-            self.assertIn("execFileSync", content)
-            self.assertIn('["rewrite", cmd]', content)
-            self.assertIn("catch", content)
+            # TK-65: OpenCode v2 plugin form only (default {id, setup},
+            # ctx.tool.hook("execute.before"), shell tool, actx hook).
+            for needle in ("export default", 'id: "actx"', "setup(ctx)",
+                           'ctx.tool.hook("execute.before"',
+                           '"hook", "--agent", "opencode"', "execFileSync",
+                           "input: JSON.stringify", 'event.tool !== "shell"',
+                           "throw new Error", "catch"):
+                self.assertIn(needle, content)
+            for needle in ("tool.execute.before", "export const", '"rewrite"',
+                           '"bash"'):
+                self.assertNotIn(needle, content)
 
             match = re.search(r"const ACTX = (.*)", content)
             self.assertIsNotNone(match)
@@ -395,9 +412,26 @@ class InitTests(unittest.TestCase):
             self.assertFalse(
                 os.path.exists(os.path.join(home, ".config", "opencode", "plugins", "actx.ts"))
             )
+            self.assertFalse(os.path.exists(os.path.join(home, ".config", "devin")))
+            self.assertFalse(os.path.exists(os.path.join(home, ".pi")))
             grok_rules = os.path.join(home, ".grok", "rules", "actx.md")
             with open(grok_rules, encoding="utf-8") as handle:
                 self.assertIn(INSTRUCTION_SECTION, handle.read())
+
+    def test_autodetect_devin_and_pi(self):
+        # TK-65: devin is detected by its config dir, pi by its agent dir.
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".config", "devin"))
+            os.makedirs(os.path.join(home, ".pi", "agent"))
+            p = self.run_actx(["init"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertTrue(os.path.exists(
+                os.path.join(home, ".config", "devin", "config.json")))
+            self.assertTrue(os.path.exists(
+                os.path.join(home, ".pi", "agent", "extensions", "actx.ts")))
+            self.assertFalse(os.path.exists(os.path.join(home, ".claude")))
+            self.assertFalse(os.path.exists(
+                os.path.join(home, ".config", "opencode")))
 
     def test_agent_all_installs_everything(self):
         with tempfile.TemporaryDirectory() as home:
@@ -415,6 +449,8 @@ class InitTests(unittest.TestCase):
                 os.path.join(home, ".config", "actx", "instructions.md"),
                 os.path.join(home, ".aider.conf.yml"),
                 os.path.join(home, ".gemini", "config", "hooks.json"),
+                os.path.join(home, ".config", "devin", "config.json"),
+                os.path.join(home, ".pi", "agent", "extensions", "actx.ts"),
             ):
                 self.assertTrue(os.path.exists(path), path)
 
@@ -428,6 +464,8 @@ class InitTests(unittest.TestCase):
                 "windsurf",
                 "aider",
                 "gemini",
+                "devin",
+                "pi",
             ):
                 self.assertIn("%s: installed" % agent, p.stdout)
             self.assertIn("cursor: manual (cursor)", p.stdout)
@@ -578,6 +616,274 @@ class InitTests(unittest.TestCase):
                 data = json.load(handle)
             hooks = data["hooks"]["PreToolUse"][0]["hooks"]
             self.assertEqual(hooks, [other])
+
+
+# TK-65 (plan D5 §4-§6): OpenCode XDG path, pi extension, Devin hook.
+DEVIN_COMMAND = shlex.quote(ACTX) + " hook --agent devin"
+DEVIN_HANDLER = {"type": "command", "command": DEVIN_COMMAND, "timeout": 10}
+DEVIN_ENTRY = {"matcher": "^exec$", "hooks": [DEVIN_HANDLER]}
+# Synthetic config with the owner's key set (devin-findings.md §6), no hooks.
+DEVIN_OWNER_SHAPED = {
+    "version": 1,
+    "devin": {"org_id": "org-test"},
+    "shell": {"setup_complete": True},
+    "theme_mode": "dark",
+    "agent": {"model": "test-model"},
+    "permissions": {"allow": ["Exec(ls)", "Read(**)"]},
+    "read_config_from": {"claude": False},
+}
+USER_BASH_ENTRY = {"matcher": "Bash",
+                   "hooks": [{"type": "command", "command": "echo bash-user"}]}
+USER_EXEC_HANDLER = {"type": "command", "command": "echo exec-user", "timeout": 5}
+
+
+class AdapterInitTests(unittest.TestCase):
+    def run_actx(self, args, home, extra_env=None):
+        return subprocess.run(
+            [ACTX] + args,
+            capture_output=True,
+            text=True,
+            env=isolated_env(home, extra_env),
+        )
+
+    def init(self, home, *args, extra_env=None):
+        p = self.run_actx(["init"] + list(args), home, extra_env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p
+
+    @staticmethod
+    def substituted_actx(content):
+        match = re.search(r"const ACTX = (.*)", content)
+        value = match.group(1).strip().rstrip(";")
+        return json.loads(value)
+
+    # --- OpenCode -------------------------------------------------------
+    def test_opencode_honours_xdg_config_home(self):
+        with tempfile.TemporaryDirectory() as home:
+            xdg = os.path.join(home, "xdg")
+            env = {"XDG_CONFIG_HOME": xdg}
+            self.init(home, "--agent", "opencode", extra_env=env)
+            plugin = os.path.join(xdg, "opencode", "plugins", "actx.ts")
+            self.assertTrue(os.path.exists(plugin))
+            self.assertFalse(os.path.exists(os.path.join(home, ".config")))
+            p = self.init(home, "--show", extra_env=env)
+            self.assertIn("opencode: installed", p.stdout)
+            self.init(home, "--agent", "opencode", "--uninstall", extra_env=env)
+            self.assertFalse(os.path.exists(plugin))
+
+    # --- pi ---------------------------------------------------------------
+    def check_pi_extension(self, path):
+        with open(path, encoding="utf-8") as handle:
+            content = handle.read()
+        self.assertNotIn("__ACTX_ABS_PATH__", content)
+        for needle in ("export default function", 'pi.on("tool_call"',
+                       'toolName !== "bash"', '"hook", "--agent", "pi"',
+                       "await runActx(", 'on("close"', "child.kill()", "3000",
+                       "block: true", "catch"):
+            self.assertIn(needle, content)
+        for needle in ("execFileSync", "throw ", "ctx.ui.confirm"):
+            self.assertNotIn(needle, content)
+        self.assertEqual(os.path.realpath(self.substituted_actx(content)), ACTX)
+
+    def test_pi_install_show_uninstall_default_dir(self):
+        with tempfile.TemporaryDirectory() as home:
+            for _ in range(2):
+                self.init(home, "--agent", "pi")
+            ext_dir = os.path.join(home, ".pi", "agent", "extensions")
+            self.assertEqual(os.listdir(ext_dir), ["actx.ts"])
+            self.check_pi_extension(os.path.join(ext_dir, "actx.ts"))
+            self.assertIn("pi: installed", self.init(home, "--show").stdout)
+            self.init(home, "--agent", "pi", "--uninstall")
+            self.assertEqual(os.listdir(ext_dir), [])
+            self.assertIn("pi: not installed", self.init(home, "--show").stdout)
+
+    def test_pi_honours_pi_coding_agent_dir(self):
+        with tempfile.TemporaryDirectory() as home:
+            agent_dir = os.path.join(home, "pi-agent")
+            env = {"PI_CODING_AGENT_DIR": agent_dir}
+            self.init(home, "--agent", "pi", extra_env=env)
+            path = os.path.join(agent_dir, "extensions", "actx.ts")
+            self.check_pi_extension(path)
+            self.assertFalse(os.path.exists(os.path.join(home, ".pi")))
+            self.init(home, "--agent", "pi", "--uninstall", extra_env=env)
+            self.assertFalse(os.path.exists(path))
+
+    # --- Devin ------------------------------------------------------------
+    def devin_path(self, home):
+        return os.path.join(home, ".config", "devin", "config.json")
+
+    def write_devin(self, home, text, mode=0o600):
+        path = self.devin_path(home)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(path, mode)
+        return path
+
+    def load(self, path):
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_devin_missing_file_created_0600(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.init(home, "--agent", "devin")
+            path = self.devin_path(home)
+            self.assertEqual(self.load(path), {"hooks": {"PreToolUse": [DEVIN_ENTRY]}})
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertIn("devin: installed", self.init(home, "--show").stdout)
+
+    def test_devin_empty_config(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_devin(home, "{}\n")
+            self.init(home, "--agent", "devin")
+            self.assertEqual(self.load(path), {"hooks": {"PreToolUse": [DEVIN_ENTRY]}})
+            self.init(home, "--agent", "devin", "--uninstall")
+            self.assertEqual(self.load(path), {})
+
+    def test_devin_owner_shaped_config_round_trip_keeps_0600(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_devin(home, json.dumps(DEVIN_OWNER_SHAPED, indent=2))
+            for _ in range(2):
+                self.init(home, "--agent", "devin")
+            data = self.load(path)
+            self.assertEqual(data.pop("hooks"), {"PreToolUse": [DEVIN_ENTRY]})
+            self.assertEqual(data, DEVIN_OWNER_SHAPED)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.init(home, "--agent", "devin", "--uninstall")
+            self.assertEqual(self.load(path), DEVIN_OWNER_SHAPED)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_devin_user_hooks_untouched_ours_appended(self):
+        original = {
+            "theme_mode": "dark",
+            "hooks": {
+                "PreToolUse": [
+                    USER_BASH_ENTRY,
+                    {"matcher": "^exec$", "hooks": [USER_EXEC_HANDLER]},
+                ],
+                "PostToolUse": [USER_BASH_ENTRY],
+            },
+        }
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_devin(home, json.dumps(original))
+            for _ in range(2):
+                self.init(home, "--agent", "devin")
+            data = self.load(path)
+            self.assertEqual(data["hooks"]["PreToolUse"], [
+                USER_BASH_ENTRY,
+                {"matcher": "^exec$", "hooks": [USER_EXEC_HANDLER, DEVIN_HANDLER]},
+            ])
+            self.assertEqual(data["hooks"]["PostToolUse"], [USER_BASH_ENTRY])
+            self.init(home, "--agent", "devin", "--uninstall")
+            self.assertEqual(self.load(path), original)
+
+    def test_devin_double_init_one_handler_file_unchanged(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.init(home, "--agent", "devin")
+            path = self.devin_path(home)
+            with open(path, "rb") as handle:
+                first = handle.read()
+            os.utime(path, (1, 1))
+            self.init(home, "--agent", "devin")
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), first)
+            self.assertEqual(os.stat(path).st_mtime, 1)  # not rewritten
+            entries = self.load(path)["hooks"]["PreToolUse"]
+            self.assertEqual(entries, [DEVIN_ENTRY])
+
+    def test_devin_stale_actx_handlers_replaced(self):
+        stale_plain = {"type": "command", "timeout": 10,
+                       "command": "'/opt/homebrew/Cellar/actx/2.2/libexec/actx' hook"}
+        stale_agent = {"type": "command", "timeout": 10,
+                       "command": "/old/bin/actx hook --agent devin"}
+        original = {"hooks": {"PreToolUse": [
+            {"matcher": "", "hooks": [stale_plain]},
+            {"matcher": "^exec$", "hooks": [USER_EXEC_HANDLER, stale_agent]},
+        ]}}
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_devin(home, json.dumps(original))
+            self.init(home, "--agent", "devin")
+            self.assertEqual(self.load(path), {"hooks": {"PreToolUse": [
+                {"matcher": "^exec$", "hooks": [USER_EXEC_HANDLER, DEVIN_HANDLER]},
+            ]}})
+
+    def test_devin_refuses_malformed_shapes_byte_identical(self):
+        cases = {
+            "comment": '{\n  // comment\n  "theme_mode": "dark"\n}\n',
+            "top_level_list": "[]\n",
+            "hooks_not_dict": '{"hooks": []}\n',
+            "hooks_null": '{"hooks": null}\n',
+            "pretool_not_list": '{"hooks": {"PreToolUse": {}}}\n',
+            "entry_not_dict": '{"hooks": {"PreToolUse": ["x"]}}\n',
+            "entry_hooks_not_list": (
+                '{"hooks": {"PreToolUse": [{"matcher": "^exec$", "hooks": "x"}]}}\n'),
+        }
+        for name, text in cases.items():
+            for args in (["--agent", "devin"], ["--agent", "devin", "--uninstall"]):
+                with self.subTest(case=name, args=args):
+                    with tempfile.TemporaryDirectory() as home:
+                        path = self.write_devin(home, text)
+                        p = self.run_actx(["init"] + args, home)
+                        self.assertEqual(p.returncode, 1, p.stdout)
+                        self.assertIn(path, p.stderr)
+                        if "--uninstall" not in args:
+                            self.assertIn('"^exec$"', p.stderr)
+                            self.assertIn("hook --agent devin", p.stderr)
+                        with open(path, encoding="utf-8") as handle:
+                            self.assertEqual(handle.read(), text)
+
+    def test_devin_honours_xdg_config_home(self):
+        with tempfile.TemporaryDirectory() as home:
+            xdg = os.path.join(home, "xdg")
+            env = {"XDG_CONFIG_HOME": xdg}
+            self.init(home, "--agent", "devin", extra_env=env)
+            path = os.path.join(xdg, "devin", "config.json")
+            self.assertEqual(self.load(path), {"hooks": {"PreToolUse": [DEVIN_ENTRY]}})
+            self.assertFalse(os.path.exists(os.path.join(home, ".config")))
+            self.assertIn("devin: installed",
+                          self.init(home, "--show", extra_env=env).stdout)
+
+    # --- shared -----------------------------------------------------------
+    def test_is_actx_hook_command_exact_forms(self):
+        from actx_lib import installer
+
+        for command, expected in (
+            ("actx hook", True),
+            ("/opt/homebrew/bin/actx hook", True),
+            ("'/Users/x/My Tools/actx' hook", True),
+            ("/opt/homebrew/bin/actx hook --agent devin", True),
+            ("'/a b/actx' hook --agent opencode", True),
+            ("my-actx hook", False),
+            ("actx hook && rm x", False),
+            ("echo actx hook", False),
+            ("actx hook --agent", False),
+            ("actx hook --agent devin extra", False),
+            ("actx hook --payload x", False),
+            ("actx rewrite", False),
+            ("'/a b/actx hook", False),
+            (None, False),
+        ):
+            with self.subTest(command=command):
+                self.assertIs(installer._is_actx_hook_command(command), expected)
+
+    def test_claude_keeps_user_hook_that_only_looks_like_actx(self):
+        with tempfile.TemporaryDirectory() as home:
+            settings = os.path.join(home, ".claude", "settings.json")
+            os.makedirs(os.path.dirname(settings))
+            user = [{"type": "command", "command": c}
+                    for c in ("my-actx hook", "actx hook && rm x", "echo actx hook")]
+            with open(settings, "w", encoding="utf-8") as handle:
+                json.dump({"hooks": {"PreToolUse": [
+                    {"matcher": "Bash", "hooks": list(user)}]}}, handle)
+            self.init(home, "--agent", "claude")
+            self.init(home, "--agent", "claude", "--uninstall")
+            self.assertEqual(self.load(settings)["hooks"]["PreToolUse"][0]["hooks"], user)
+
+    def test_help_lists_new_agents(self):
+        with tempfile.TemporaryDirectory() as home:
+            p = self.init(home, "--help")
+            self.assertRegex(p.stdout, r"\bdevin\b")
+            self.assertRegex(p.stdout, r"\bpi\b")
 
 
 if __name__ == "__main__":

@@ -11,8 +11,33 @@ ADDITIONAL_CONTEXT = "Command rewritten by actx for output compression."
 
 _AGY_DEFER_REASON = "actx: command outside actx policy — deferred to user confirmation"
 
+# Per-agent policy for the Claude/Codex schema (TK-65, `actx hook --agent
+# <name>`); None = no --agent, today's behaviour. The gate runs first for
+# every agent.
+#   ask_as_deny: the agent has no confirmation channel - a gate "ask" is
+#                emitted as "deny" with the gate's reason.
+#   mutator:     a rewritable git mutator (rewriter.is_mutator):
+#                "rewrite" - allow + updatedInput, like any other rewrite;
+#                "none"    - no output: the harness's own rules see the
+#                            command as typed (OpenCode);
+#                "allow"   - allow without updatedInput: auto-allowed as
+#                            today, rules see the typed string (Devin, whose
+#                            empty response would prompt; `-p` rejects).
+AGENT_POLICIES = {
+    None: {"ask_as_deny": False, "mutator": "rewrite"},
+    "opencode": {"ask_as_deny": True, "mutator": "none"},
+    "devin": {"ask_as_deny": False, "mutator": "allow"},
+    "pi": {"ask_as_deny": True, "mutator": "rewrite"},
+}
 
-def process(text):
+
+def _gate_reason(prefix, category, reason):
+    if category:
+        return f"{prefix} [{category}]: {reason}"
+    return f"{prefix}: {reason}"
+
+
+def process(text, agent=None):
     try:
         data = json.loads(text)
     except (ValueError, TypeError):
@@ -104,17 +129,28 @@ def process(text):
         # Fail-open guarantee: defer to native harness permissions on gate error
         return None
 
+    policy = AGENT_POLICIES.get(agent, AGENT_POLICIES[None])
+
     if sec_res is not None:
         if sec_res.decision == "deny":
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
-                    "permissionDecisionReason": (
-                        f"actx security gate violation [{sec_res.category}]: {sec_res.reason}"
-                        if sec_res.category
-                        else f"actx security gate violation: {sec_res.reason}"
-                    ),
+                    "permissionDecisionReason": _gate_reason(
+                        "actx security gate violation",
+                        sec_res.category, sec_res.reason),
+                }
+            }
+
+        if sec_res.decision == "ask" and policy["ask_as_deny"]:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": _gate_reason(
+                        f"actx security gate ({agent}: no confirmation channel)",
+                        sec_res.category, sec_res.reason),
                 }
             }
 
@@ -140,6 +176,16 @@ def process(text):
         # to defer to the agent harness's native permission policy
         return None
 
+    if policy["mutator"] != "rewrite" and rewriter.is_mutator(command):
+        if policy["mutator"] == "none":
+            return None
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+            }
+        }
+
     updated_input = dict(tool_input)
     updated_input["command"] = rewritten
 
@@ -163,13 +209,41 @@ def process(text):
     }
 
 
-def main():
-    try:
-        text = sys.stdin.read()
-    except OSError:
-        print("actx hook: failed to read stdin", file=sys.stderr)
-        return 1
-    result = process(text)
+def _parse_args(argv):
+    """(agent, payload) from `hook` argv, parsed by hand in any order.
+    `--agent <name>` selects AGENT_POLICIES; an unknown name, a trailing
+    `--agent` or any unknown token -> agent None (today's behaviour).
+    `--payload <json>` replaces stdin; a trailing `--payload` -> "" (not
+    JSON -> no output). payload None = read stdin."""
+    agent = None
+    payload = None
+    known = True
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--agent" and i + 1 < len(argv):
+            agent = argv[i + 1]
+            i += 2
+        elif tok == "--payload":
+            payload = argv[i + 1] if i + 1 < len(argv) else ""
+            i += 2
+        else:
+            known = False
+            i += 1
+    if not known or agent not in AGENT_POLICIES:
+        agent = None
+    return agent, payload
+
+
+def main(argv=()):
+    agent, text = _parse_args(list(argv))
+    if text is None:
+        try:
+            text = sys.stdin.read()
+        except OSError:
+            print("actx hook: failed to read stdin", file=sys.stderr)
+            return 1
+    result = process(text, agent)
     if result is not None:
         try:
             json.dump(result, sys.stdout)
@@ -181,4 +255,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

@@ -1,19 +1,50 @@
+// actx adapter for OpenCode >= 2.0.0, written by `actx init --agent opencode`.
+// Transport only: every decision comes from `actx hook --agent opencode`
+// (one rewriter, one security gate). OpenCode treats any exception thrown
+// by this hook as a deny, so every failure path returns and the original
+// command runs under OpenCode's own permissions (fail-open). The only
+// intentional throw is the gate's deny.
 import { execFileSync } from "node:child_process"
 
 const ACTX = __ACTX_ABS_PATH__
 
-export const ActxPlugin = async (ctx) => {
-  return {
-    "tool.execute.before": async (input, output) => {
-      if (input.tool !== "bash") return
-      const cmd = output.args && typeof output.args.command === "string" ? output.args.command : ""
-      if (!cmd) return
+function verdict(command) {
+  const out = String(
+    execFileSync(ACTX, ["hook", "--agent", "opencode"], {
+      input: JSON.stringify({ tool_name: "shell", tool_input: { command } }),
+      encoding: "utf8",
+      timeout: 3000,
+      stdio: ["pipe", "pipe", "ignore"],
+    }),
+  ).trim()
+  return out ? JSON.parse(out).hookSpecificOutput : undefined
+}
+
+export default {
+  id: "actx",
+  async setup(ctx) {
+    await ctx.tool.hook("execute.before", (event) => {
+      let res
       try {
-        const rewritten = String(execFileSync(ACTX, ["rewrite", cmd])).trim()
-        if (rewritten) output.args.command = rewritten
+        if (event.tool !== "shell") return
+        const input = event.input
+        if (!input || typeof input !== "object" || typeof input.command !== "string" || !input.command) return
+        res = verdict(input.command)
+        if (!res || typeof res !== "object") return
+        if (res.permissionDecision === "allow") {
+          if (res.updatedInput && typeof res.updatedInput.command === "string") {
+            input.command = res.updatedInput.command
+          }
+          return
+        }
       } catch {
-        // fail-open: оставить команду как есть
+        return
       }
-    },
-  }
+      // `ask` is never emitted for --agent opencode; an older actx could
+      // emit it, and it must never run silently.
+      if (res.permissionDecision === "deny" || res.permissionDecision === "ask") {
+        throw new Error(String(res.permissionDecisionReason || "actx security gate"))
+      }
+    })
+  },
 }

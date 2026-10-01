@@ -2,7 +2,7 @@ import sys
 
 import actx_lib.rewriter as rewriter
 
-VERSION = "actx 2.12.0"
+VERSION = "actx 2.13.0"
 
 USAGE = """usage: actx [--raw] [--ultra-compact] [-v|-vv|-vvv] <command> [args...]
 
@@ -18,8 +18,8 @@ commands:
   insights [--days N] [--top N] [--verbose-commands] [--json]
   tracking [on|off|status|clear]
   rewrite "<command>"
-  hook
-  init [--agent <name>] [--show] [--uninstall]
+  hook [--agent opencode|devin|pi] [--payload <json>]
+  init [--agent <name>|all] [--show] [--uninstall]
 
 user-declared heads from the "custom_heads" list in
 ~/.config/actx/config.json behave like `actx run <head> ...`.
@@ -216,7 +216,7 @@ def main(argv):
         except ImportError:
             print("not implemented", file=sys.stderr)
             return 1
-        return hook.main()
+        return hook.main(args)
 
     if command == "init":
         try:

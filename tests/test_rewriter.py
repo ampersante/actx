@@ -1159,5 +1159,103 @@ class GitExecFlagTests(unittest.TestCase):
                 self.assertEqual(rewrite(command), "actx " + command)
 
 
+GIT_MUTATOR_VERBS = frozenset({"add", "commit", "push", "pull", "fetch"})
+
+
+def _spec_nodes(node, path):
+    yield path, node
+    for verb, child in (node["verbs"] or {}).items():
+        yield from _spec_nodes(child, path + (verb,))
+
+
+def _unwrapped(argv):
+    """Strip run-prefixes (`uv run git push` -> `git push`); test-side
+    oracle, independent of rewriter.is_mutator's spec walk."""
+    from actx_lib import cli_families
+
+    while argv:
+        split = cli_families.run_prefix_split(argv)
+        if split is None:
+            return argv
+        argv = split[0]
+    return argv
+
+
+class MutatorPredicateTests(unittest.TestCase):
+    """TK-65 (plan D5 §2): the spec field `mutator` and rewriter.is_mutator."""
+
+    def test_mutator_spec_paths_exactly_five_git_verbs(self):
+        from actx_lib import rewrite_spec
+
+        marked = set()
+        for head, head_spec in rewrite_spec.HEAD_SPECS.items():
+            for path, node in _spec_nodes(head_spec, (head,)):
+                self.assertIsInstance(node["mutator"], bool, path)
+                if node["mutator"]:
+                    marked.add(path)
+        self.assertEqual(marked, {("git", v) for v in GIT_MUTATOR_VERBS})
+
+    def test_is_mutator_over_rewritten_corpora(self):
+        import json
+        import shlex
+
+        from actx_lib import cli_families, rewriter
+
+        checked = 0
+        for name in ("typical_usage.json", "rewrite_corpus.json"):
+            with open(os.path.join(ROOT, "tests", "fixtures", name)) as fh:
+                corpus = json.load(fh)
+            for command in corpus:
+                if rewrite(command) is None:
+                    continue
+                argv = _unwrapped(shlex.split(command))
+                expected = (
+                    cli_families.head_key(argv[0]) == "git"
+                    and len(argv) > 1 and argv[1] in GIT_MUTATOR_VERBS
+                )
+                with self.subTest(fixture=name, command=command):
+                    self.assertIs(rewriter.is_mutator(command), expected)
+                checked += 1
+        self.assertGreaterEqual(checked, 700)
+
+    def test_is_mutator_named_cases(self):
+        from actx_lib import rewriter
+
+        for command, expected in (
+            ("git push", True),
+            ("git push origin main", True),
+            ("uv run git push", True),
+            ("git add -A", True),
+            ("git commit -m msg", True),
+            ("git pull --rebase", True),
+            ("git fetch --all", True),
+            ("git status", False),
+            ("git log", False),
+            ("git log -1", False),
+            ("ls -la", False),
+        ):
+            with self.subTest(command=command):
+                self.assertIs(rewriter.is_mutator(command), expected)
+
+    def test_is_mutator_exception_is_true(self):
+        from unittest import mock
+
+        from actx_lib import rewriter
+
+        # Unbalanced quote: shlex.split raises -> fail toward the harness.
+        self.assertIs(rewriter.is_mutator('git status "'), True)
+        with mock.patch("actx_lib.rewriter.shlex.split",
+                        side_effect=RuntimeError("boom")):
+            self.assertIs(rewriter.is_mutator("git status"), True)
+
+    def test_rewrite_cli_force_push_still_rewritten(self):
+        # Plan §3: `actx rewrite` stays gate-free by design (pin).
+        p = subprocess.run([ACTX, "rewrite", "git push --force origin main"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, "actx git push --force origin main\n")
+        self.assertEqual(p.stderr, "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,72 @@
+// actx adapter for pi (https://pi.dev), written by `actx init --agent pi`.
+// Transport only: every decision comes from `actx hook --agent pi` (one
+// rewriter, one security gate). pi blocks the tool when a tool_call handler
+// throws, so this handler never throws: any actx failure (missing binary,
+// timeout, non-zero exit, bad JSON) leaves the command unchanged.
+// The actx call is asynchronous and awaited: pi's event loop keeps running
+// while the verdict is applied before the handler returns.
+import { spawn } from "node:child_process";
+
+const ACTX = __ACTX_ABS_PATH__;
+const TIMEOUT_MS = 3000;
+
+// Resolves with actx's stdout once the child has closed, or with null on a
+// spawn error, a non-zero exit, or after TIMEOUT_MS (the child is killed).
+function runActx(payload: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let out = "";
+    let settled = false;
+    let timer: any = null;
+    const finish = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(value);
+    };
+    try {
+      const child = spawn(ACTX, ["hook", "--agent", "pi"], { stdio: ["pipe", "pipe", "ignore"] });
+      timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {}
+        finish(null);
+      }, TIMEOUT_MS);
+      child.on("error", () => finish(null));
+      child.on("close", (code: number | null) => finish(code === 0 ? out : null));
+      child.stdout.on("data", (chunk: any) => {
+        out += String(chunk);
+      });
+      child.stdin.on("error", () => {});
+      child.stdin.end(payload);
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+export default function (pi: any) {
+  pi.on("tool_call", async (event: any) => {
+    try {
+      if (event?.toolName !== "bash") return undefined;
+      const input = event.input;
+      const cmd = input && typeof input.command === "string" ? input.command : "";
+      if (!cmd) return undefined;
+      const out = await runActx(JSON.stringify({ tool_name: "bash", tool_input: { command: cmd } }));
+      if (!out || !out.trim()) return undefined;
+      const res = JSON.parse(out)?.hookSpecificOutput;
+      const decision = res?.permissionDecision;
+      if (decision === "allow" && typeof res.updatedInput?.command === "string") {
+        input.command = res.updatedInput.command;
+        return undefined;
+      }
+      // `ask` is never emitted for --agent pi; an older actx could emit it,
+      // and it must never run silently.
+      if (decision === "deny" || decision === "ask") {
+        return { block: true, reason: String(res.permissionDecisionReason || "actx security gate") };
+      }
+    } catch {
+      return undefined;
+    }
+    return undefined;
+  });
+}
