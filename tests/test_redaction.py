@@ -214,6 +214,10 @@ class GenericRunRedactionTests(unittest.TestCase):
                 rc = runner.run_passthrough(["python3", "-c", "x"])
         self.assertEqual(rc, 0)
         self.assertEqual(self._command_text(), [""])
+        # TK-61: passthrough masks the value too (secrets always masked).
+        self.assertEqual(
+            out_sink.buffer.getvalue(), ("client_secret=" + M + "\n").encode()
+        )
 
 
 if __name__ == "__main__":

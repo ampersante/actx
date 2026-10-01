@@ -73,7 +73,7 @@ def _status(rest, config):
                 out.extend("  " + path for path in paths[:200])
                 if len(paths) > 200:
                     out.append("  ... (%d more)" % (len(paths) - 200))
-        text = "\n".join(out)
+        text = runner.mask_text("\n".join(out))
         extra = 0
         if any(len(paths) > 200 for _, paths in groups):
             # Paths omitted: the full porcelain stays recoverable (TK-61).
@@ -98,9 +98,10 @@ def _log(rest, config):
     if result.returncode != 0:
         return _failure(cmd, result, config)
     try:
-        if result.stdout:
-            print(result.stdout, end="")
-            if not result.stdout.endswith("\n"):
+        text = runner.mask_text(result.stdout or "")
+        if text:
+            print(text, end="")
+            if not text.endswith("\n"):
                 print()
         runner.record_raw(cmd, result, "git.log")
         return 0

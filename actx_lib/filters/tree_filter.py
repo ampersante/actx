@@ -63,7 +63,8 @@ def run(args, config):
             return 1
         lines = _render(path, ignore_dirs, ignore_files)
         if len(lines) <= _ENTRY_LIMIT:
-            print("\n".join(lines))
+            # Names are file-system data: masked like command output (TK-61).
+            print(runner.mask_text("\n".join(lines)))
             return 0
         shown = lines[:_ENTRY_LIMIT]
         shown.append("... (%d more)" % (len(lines) - _ENTRY_LIMIT))

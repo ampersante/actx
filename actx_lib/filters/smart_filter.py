@@ -164,7 +164,7 @@ def run(args, config):
         return result.returncode
 
     try:
-        out = _summarize(result.stdout, ext)
+        out = runner.mask_text(_summarize(result.stdout, ext))
         print(out)
         runner.record_compacted(cmd, result, out, "smart")
         return 0

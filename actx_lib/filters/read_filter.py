@@ -285,8 +285,10 @@ def run(args, config):
         if not out.strip() and result.stdout.strip():
             # Never empty (TK-61): nothing survived the stripping.
             out = runner.print_lossless_stdout(cmd, result, config)
-        elif out:
-            print(out, end="")
+        else:
+            out = runner.mask_text(out)
+            if out:
+                print(out, end="")
         runner.record_compacted(cmd, result, out, "read", newline=False)
         return 0
     except Exception:

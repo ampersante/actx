@@ -410,7 +410,10 @@ def _session_hints(result):
 
 
 def run_passthrough(cmd):
-    """Execute without filtering; bytes mode preserves non-UTF-8 output."""
+    """Execute without filtering; bytes mode preserves non-UTF-8 output.
+
+    Secret values are masked like run_content (TK-61: secrets always
+    masked); an exec failure maps like a shell (127/126)."""
     try:
         timeout_class = hang_policy.classify(cmd)
     except Exception:
@@ -424,14 +427,10 @@ def run_passthrough(cmd):
     except subprocess.TimeoutExpired:
         return _timed_out(cmd, timeout, passthrough=True)
     except OSError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    if result.stdout:
-        sys.stdout.buffer.write(result.stdout)
-        sys.stdout.buffer.flush()
-    if result.stderr:
-        sys.stderr.buffer.write(result.stderr)
-        sys.stderr.buffer.flush()
+        code, message = _exec_failure(cmd, exc)
+        print(message, file=sys.stderr)
+        return code
+    _write_masked_bytes(result)
     raw_bytes = len(result.stdout) + len(result.stderr)
     tracking.record(
         cmd, cmd[0], raw_bytes, raw_bytes, result.returncode,
@@ -469,6 +468,32 @@ def _mask_bytes(data):
     return redaction.redact_text(text).encode("utf-8", "surrogateescape")
 
 
+def _write_masked_bytes(result):
+    """Write a bytes-mode result to stdout/stderr with secret values masked
+    (byte-identical when nothing is masked); fail open to the raw bytes.
+    Returns the (stdout, stderr) bytes written."""
+    try:
+        stdout = _mask_bytes(result.stdout)
+        stderr = _mask_bytes(result.stderr)
+    except Exception:
+        # Fail open: the agent needs the output (redact_text itself fails
+        # open the same way).
+        stdout, stderr = result.stdout, result.stderr
+    # Text written earlier goes out first; a stream object without a text
+    # layer flush (a bare .buffer holder) is fine.
+    for stream in (sys.stdout, sys.stderr):
+        flush = getattr(stream, "flush", None)
+        if flush is not None:
+            flush()
+    if stdout:
+        sys.stdout.buffer.write(stdout)
+        sys.stdout.buffer.flush()
+    if stderr:
+        sys.stderr.buffer.write(stderr)
+        sys.stderr.buffer.flush()
+    return stdout, stderr
+
+
 def run_content(cmd, config):
     """Content class (TK-61): the command's own bytes, secret values masked.
 
@@ -494,21 +519,7 @@ def run_content(cmd, config):
         code, message = _exec_failure(cmd, exc)
         print(message, file=sys.stderr)
         return code
-    try:
-        stdout = _mask_bytes(result.stdout)
-        stderr = _mask_bytes(result.stderr)
-    except Exception:
-        # Fail open: the agent needs the output (redact_text itself fails
-        # open the same way).
-        stdout, stderr = result.stdout, result.stderr
-    sys.stdout.flush()
-    sys.stderr.flush()
-    if stdout:
-        sys.stdout.buffer.write(stdout)
-        sys.stdout.buffer.flush()
-    if stderr:
-        sys.stderr.buffer.write(stderr)
-        sys.stderr.buffer.flush()
+    stdout, stderr = _write_masked_bytes(result)
     tracking.record(
         cmd, cmd[0],
         len(result.stdout or b"") + len(result.stderr or b""),
@@ -683,8 +694,11 @@ def execute(cmd, shell_codes=False):
         return None
 
 
-def _masked_or_raw(text):
-    """redact_text(text); the text itself when masking fails (fail open)."""
+def mask_text(text):
+    """redact_text(text); the text itself when masking fails (fail open).
+
+    Every print path of command output goes through it (or _mask_bytes):
+    secret values are always masked (TK-61); masking is idempotent."""
     try:
         return redaction.redact_text(text)
     except Exception:
@@ -696,9 +710,9 @@ def print_raw(result):
     of a failed or empty compactor never prints a secret value); every other
     byte as the command wrote it."""
     if result.stdout:
-        print(_masked_or_raw(result.stdout), end="")
+        print(mask_text(result.stdout), end="")
     if result.stderr:
-        print(_masked_or_raw(result.stderr), end="", file=sys.stderr)
+        print(mask_text(result.stderr), end="", file=sys.stderr)
 
 
 def raw_fallback(result):
@@ -756,7 +770,7 @@ def tee_listing(cmd, raw, shown, config):
     """Print a listing summary that omits entries, then the path of a
     forced tee holding the full raw result (TK-61), regardless of
     tee.enabled/mode/min_bytes. Returns the path, or None."""
-    print(shown)
+    print(mask_text(shown))
     path = _tee_file(cmd, raw, config)
     if path:
         print("[full output: %s]" % path, file=sys.stderr)
@@ -818,6 +832,9 @@ def compacted_result(cmd, result, config, compact_fn, tee_policy="auto",
             rules = []
         if rules and out:
             out = user_filter.apply(rules, cmd[0], out)
+        # Compactors keep raw lines: mask before printing (idempotent on
+        # the already-masked lossless form).
+        out = mask_text(out)
         if out:
             print(out, end="")
             if not out.endswith("\n"):
@@ -854,13 +871,14 @@ def run_errors(cmd):
     result = execute(cmd)
     if result is None:
         return 1
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
-        if not result.stderr.endswith("\n"):
+    err = mask_text(result.stderr or "")
+    if err:
+        print(err, end="", file=sys.stderr)
+        if not err.endswith("\n"):
             print(file=sys.stderr)
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-    emitted = _text_bytes(result.stderr)
-    emitted += 1 if result.stderr and not result.stderr.endswith("\n") else 0
+    emitted = _text_bytes(err)
+    emitted += 1 if err and not err.endswith("\n") else 0
     tracking.record(
         cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="errors",
         store_text=not _secret_bearing_result(result),
@@ -895,18 +913,19 @@ def run_digest(cmd, n=10):
     if result is None:
         return 1
     if result.stdout:
-        out = digest_text(result.stdout, n)
+        out = digest_text(mask_text(result.stdout), n)
         print(out, end="")
         if not out.endswith("\n"):
             print()
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
-        if not result.stderr.endswith("\n"):
+    err = mask_text(result.stderr or "")
+    if err:
+        print(err, end="", file=sys.stderr)
+        if not err.endswith("\n"):
             print(file=sys.stderr)
     emitted = _text_bytes(out) if result.stdout else 0
     emitted += 1 if result.stdout and not out.endswith("\n") else 0
-    emitted += _text_bytes(result.stderr)
-    emitted += 1 if result.stderr and not result.stderr.endswith("\n") else 0
+    emitted += _text_bytes(err)
+    emitted += 1 if err and not err.endswith("\n") else 0
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
     tracking.record(
         cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="digest",

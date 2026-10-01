@@ -90,6 +90,14 @@ PUBLISHED_CLASSES = {
     "terraform graph": "content", "terraform output": "content",
     "bq show": "content", "bq head": "content",
     "pod spec cat": "content",
+    # one named object's data: borderline -> content (TK-61 C3 fix)
+    "npm view": "content", "npm info": "content", "npm show": "content",
+    "npm explain": "content", "npm config get": "content",
+    "pnpm why": "content",
+    "pip show": "content", "pip inspect": "content",
+    "pip config get": "content",
+    "cargo metadata": "content",
+    "pod spec which": "content",
     # the log class: exactly these four
     "docker logs": "log", "docker compose logs": "log",
     "kubectl logs": "log", "vercel logs": "log",
@@ -624,6 +632,267 @@ class PrintRawMaskingTests(unittest.TestCase):
         ):
             _, out, _ = self._capture(runner.print_raw, result)
         self.assertEqual(out, "password=s3cret\n")
+
+
+# ---------------------------------------------------------------------
+# TK-61 C3 fix: red on 6f22533, green after.
+# ---------------------------------------------------------------------
+
+SECRET = b"s3cret"
+SECRET_DATA = b"ok \xff line\npassword=s3cret\n"
+SECRET_ERR = b"token=abc123def\n"
+_PYTEST_FAILURE = (
+    "============================= test session starts ==============\n"
+    "collected 1 item\n\n"
+    "test_x.py F                                                [100%]\n\n"
+    "=================================== FAILURES ===================\n"
+    "___________________________________ test_x ____________________\n\n"
+    "    def test_x():\n"
+    ">       assert False, \"password=s3cret\"\n"
+    "E       AssertionError: password=s3cret\n\n"
+    "test_x.py:2: AssertionError\n"
+    "=========================== short test summary info ============\n"
+    "FAILED test_x.py::test_x - AssertionError: password=s3cret\n"
+    "============================== 1 failed in 0.01s ===============\n"
+)
+
+
+def _mask(data):
+    """The bytes a masking path must print: redact_text over the
+    surrogateescape text, every other byte unchanged."""
+    text = data.decode("utf-8", "surrogateescape")
+    return redaction.redact_text(text).encode("utf-8", "surrogateescape")
+
+
+class SecretsAlwaysMaskedTests(_Harness):
+    """Owner rule "secrets always masked, no exceptions": every path that
+    prints command output masks secret values - the bytes passthrough
+    (unknown-flag forms, ls at rc != 0, --raw, the filters' passthrough
+    branches) and every summary print site."""
+
+    PASSTHROUGH_FORMS = (
+        ["ls", "--color=never"],
+        ["ls", "a", "b"],
+        ["gls", "-R"],
+        ["find", ".", "-print0"],
+        ["git", "log", "-p"],
+        ["git", "branch"],
+        ["git", "rev-parse", "HEAD"],
+        ["uv", "pip", "show", "x"],
+        ["read", "f.py"],
+        ["--raw", "git", "status"],
+        ["--raw", "run", "x"],
+        ["docker", "--context", "x", "inspect", "c"],
+        ["terraform", "-chdir=x", "show"],
+        ["npm", "view", "x"],
+        ["pip", "show", "x"],
+    )
+
+    def test_mask_oracle(self):
+        self.assertNotIn(SECRET, _mask(SECRET_DATA))
+        self.assertIn(b"\xff", _mask(SECRET_DATA))
+        self.assertNotIn(b"abc123def", _mask(SECRET_ERR))
+
+    def test_bytes_paths_mask_values_and_keep_every_other_byte(self):
+        for argv in self.PASSTHROUGH_FORMS:
+            for rc in (0, 1):
+                with self.subTest(argv=argv, rc=rc):
+                    code, out, err, calls = self.dispatch(
+                        argv, rc, data=SECRET_DATA, err_data=SECRET_ERR
+                    )
+                    self.assertEqual(code, rc)
+                    self.assertEqual(out, _mask(SECRET_DATA))
+                    self.assertTrue(err.startswith(_mask(SECRET_ERR)), err)
+                    self.assertNotIn(b"abc123def", err)
+
+    def test_bytes_paths_are_identity_without_a_secret(self):
+        for argv in self.PASSTHROUGH_FORMS:
+            with self.subTest(argv=argv):
+                code, out, err, calls = self.dispatch(argv, 0)
+                self.assertEqual(code, 0)
+                self.assertEqual(out, RAW_BYTES)
+                self.assertEqual(err, ERR_BYTES)
+
+    def test_ls_nonzero_exit_masks(self):
+        code, out, err, calls = self.dispatch(
+            ["ls", "d"], 2, text="", err_text="",
+            data=SECRET_DATA, err_data=SECRET_ERR,
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(calls, [["ls", "-1", "d"], ["ls", "d"]])
+        self.assertEqual(out, _mask(SECRET_DATA))
+        self.assertNotIn(b"abc123def", err)
+
+    def test_passthrough_masking_error_fails_open(self):
+        with mock.patch(
+            "actx_lib.redaction.redact_text", side_effect=RuntimeError("x")
+        ):
+            code, out, err, calls = self.dispatch(
+                ["ls", "a", "b"], 0, data=SECRET_DATA, err_data=b""
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(out, SECRET_DATA)
+
+    def _summary(self, argv, text, rc=0, err_text=""):
+        code, out, err, calls = self.dispatch(
+            argv, rc, text=text, err_text=err_text
+        )
+        self.assertNotIn(SECRET, out)
+        self.assertNotIn(SECRET, err)
+        self.assertIn("‹masked›".encode("utf-8"), out + err)
+        return code, out, err, calls
+
+    def test_summary_print_sites_mask(self):
+        cases = (
+            # git_filter status groups (path names)
+            (["git", "status"], "?? password=s3cret\n"),
+            # git_filter log (printed as returned)
+            (["git", "log"], "abc1234 set password=s3cret\n"),
+            # system_filter ls listing
+            (["ls"], "password=s3cret\nb\n"),
+            # system_filter find groups (> 200 chars: the grouped form)
+            (["find", "."], "".join("./d/q%02d\n" % i for i in range(40))
+             + "./d/password=s3cret\n"),
+            # runner.compacted_result (a compactor keeping raw lines)
+            (["pytest"], _PYTEST_FAILURE),
+            # runner.run_digest
+            (["run", "--digest", "x"], "password=s3cret\n"),
+        )
+        for argv, text in cases:
+            with self.subTest(argv=argv):
+                self._summary(argv, text, rc=1 if argv == ["pytest"] else 0)
+
+    def test_run_errors_masks_stderr(self):
+        code, out, err, calls = self.dispatch(
+            ["run", "--errors", "x"], 1, text="", err_text="password=s3cret\n"
+        )
+        self.assertEqual(code, 1)
+        self.assertNotIn(SECRET, err)
+        self.assertIn("password=‹masked›".encode("utf-8"), err)
+
+    def test_listing_with_omitted_entries_masks(self):
+        names = ["q%02d" % i for i in range(40)] + ["password=s3cret"]
+        self._summary(["ls"], "\n".join(names) + "\n")
+
+    def test_read_level_output_masks(self):
+        with open("f.py", "w", encoding="utf-8") as handle:
+            handle.write("x = 1\n")
+        self._summary(
+            ["read", "f.py", "--level", "minimal"],
+            "# comment\npassword = 's3cret'\nx = 1\n",
+        )
+
+    def test_smart_output_masks(self):
+        with open("f.py", "w", encoding="utf-8") as handle:
+            handle.write("x = 1\n")
+        key = "AKIA" + "IOSFODNN7EXAMPLE"
+        code, out, err, calls = self.dispatch(
+            ["smart", "f.py"], 0, text="import os\nimport %s\n" % key
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn(key.encode(), out)
+        self.assertIn("‹masked›".encode("utf-8"), out)
+
+    def test_tree_walk_masks(self):
+        os.mkdir("d")
+        with open(os.path.join("d", "password=s3cret"), "w") as handle:
+            handle.write("")
+        code, out, err, calls = self.dispatch(["tree", "d"], 0)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [])
+        self.assertNotIn(SECRET, out)
+        self.assertIn("password=‹masked›".encode("utf-8"), out)
+
+
+class MissingBinaryTests(_Harness):
+    """A missing binary is rc 127 on every ls/gls path and the bytes
+    passthrough (the shared _exec_failure mapping)."""
+
+    def test_missing_binary_is_127(self):
+        for argv in (
+            ["ls"],
+            ["gls"],
+            ["ls", "d"],
+            ["gls", "d"],
+            ["ls", "-la"],
+            ["ls", "--color=never"],
+            ["ls", "a", "b"],
+            ["find", ".", "-print0"],
+            ["git", "log", "-p"],
+            ["--raw", "git", "status"],
+        ):
+            with self.subTest(argv=argv):
+                code, out, err, calls = self.dispatch(
+                    argv, raise_exc=FileNotFoundError(2, "No such file")
+                )
+                self.assertEqual(code, 127)
+                self.assertEqual(len(calls), 1)
+                self.assertTrue(err.strip())
+
+    def test_not_executable_is_126(self):
+        code, out, err, calls = self.dispatch(
+            ["ls"], raise_exc=PermissionError(13, "Permission denied")
+        )
+        self.assertEqual(code, 126)
+
+
+class GlobalOptionClassTests(_Harness):
+    """A manual form with a global option before the verb resolves to the
+    verb's class (the lenient class walk); the executed argv is unchanged."""
+
+    CASES = (
+        (["docker", "--context", "x", "inspect", "c"], "content"),
+        (["docker", "-H", "tcp://h", "inspect", "c"], "content"),
+        (["docker", "--context=x", "inspect", "c"], "content"),
+        (["docker", "--context", "x", "logs", "c"], "log"),
+        (["docker", "compose", "-f", "x.yml", "logs"], "log"),
+        (["docker", "compose", "--project-name=p", "logs"], "log"),
+        (["terraform", "-chdir=x", "show"], "content"),
+        (["terraform", "-chdir=x", "plan"], "content"),
+        (["git", "-C", "x", "diff"], "content"),
+        (["git", "-c", "a=b", "show", "HEAD"], "content"),
+        (["git", "--no-pager", "diff"], "content"),
+        (["helm", "--kube-context", "x", "get", "metadata", "r"], "content"),
+        (["helm", "-n", "ns", "show", "values", "c"], "content"),
+        (["npm", "--prefix", "x", "view", "y"], "content"),
+        (["pip", "--isolated", "show", "x"], "content"),
+        (["bq", "--format", "json", "show", "d.t"], "content"),
+        (["vercel", "--token", "t", "logs", "u"], "log"),
+        # still summary: the verb itself is summary, or no verb is reached
+        (["docker", "--context", "x", "ps"], "summary"),
+        (["git", "-C", "x", "log"], "summary"),
+        (["git", "-C", "x", "status"], "summary"),
+        (["docker", "--context", "x", "nosuchverb", "inspect"], "summary"),
+        (["terraform", "-chdir", "x", "show"], "summary"),
+    )
+
+    def test_class_skips_global_options(self):
+        for argv, cls in self.CASES:
+            with self.subTest(argv=argv):
+                self.assertEqual(rewriter.output_class(argv), cls)
+
+    def test_dispatch_follows_the_verb_class(self):
+        expected_log = _expand_collapse(_ANSI.sub("", RAW_TEXT))
+        for argv, cls in self.CASES:
+            if cls == "summary":
+                continue
+            with self.subTest(argv=argv):
+                code, out, err, calls = self.dispatch(argv, 0)
+                self.assertEqual(code, 0)
+                self.assertEqual(calls, [argv])
+                if cls == "content":
+                    self.assertEqual(out, RAW_BYTES)
+                    self.assertEqual(err, ERR_BYTES)
+                else:
+                    shown = out.decode("utf-8")
+                    self.assertIn("same  [×3]", shown)
+                    self.assertEqual(_expand_collapse(shown), expected_log)
+
+    def test_rewrite_decisions_unchanged(self):
+        # Class only: the lenient walk never admits a rewrite.
+        for argv, _ in self.CASES:
+            with self.subTest(argv=argv):
+                self.assertIsNone(rewriter.rewrite(shlex.join(argv)))
 
 
 if __name__ == "__main__":

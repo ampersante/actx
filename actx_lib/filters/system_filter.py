@@ -3,6 +3,7 @@ sort uniq wc rg grep) are runner.run_content paths (TK-61) and never reach
 this module."""
 
 import os
+import sys
 
 from actx_lib import runner
 
@@ -31,9 +32,14 @@ def run_ls(args, config, head="ls"):
     if len(args) > 1:
         return runner.run_passthrough([head] + args)
     cmd = [head, "-1"] + args
-    result = runner.execute(cmd)
+    # A missing binary is rc 127 like a shell (TK-61); a synthetic result
+    # (exec failure, refusal, timeout) carries only actx's own message.
+    result = runner.execute(cmd, shell_codes=True)
     if result is None:
         return 1
+    if getattr(result, "actx_synthetic", False):
+        print(result.stderr, file=sys.stderr)
+        return result.returncode
     if result.returncode != 0:
         return runner.run_passthrough([head] + args)
 
@@ -76,7 +82,7 @@ def run_ls(args, config, head="ls"):
                 out.extend("  " + entry for entry in shown_dirs + shown_files)
                 remaining = len(entries) - len(shown_dirs) - len(shown_files)
                 out.append("  ... (%d more)" % remaining)
-        text = "\n".join(out)
+        text = runner.mask_text("\n".join(out))
         extra = 0
         if remaining:
             # Entries omitted: the full listing stays recoverable (TK-61).
@@ -126,7 +132,7 @@ def run_find(args, config):
                 omitted = True
         if total_dirs > 200:
             out.append("... (%d more dirs)" % (total_dirs - 200))
-        text = "\n".join(out)
+        text = runner.mask_text("\n".join(out))
         extra = 0
         if omitted:
             # Entries omitted: the full listing stays recoverable (TK-61).

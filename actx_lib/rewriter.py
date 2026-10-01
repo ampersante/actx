@@ -490,6 +490,85 @@ _REGISTRY_ONLY_CLASSES = {
 }
 
 
+# Value-taking global options a manual invocation may put before a verb
+# where the strict grammar does not admit them (`docker --context x
+# inspect`, `git -C dir diff`, `docker compose -f x.yml logs`). Read ONLY by
+# the lenient class walk below, which skips each together with its value:
+# rewrite() admission, hang_policy and security_gate never see this table
+# (cli_families value_flags are unchanged). Sources: `docker --help` and
+# `docker compose --help` (29.8.1), `git help git` (2.56.0); helm, npm, pip,
+# bq, vercel and cargo global options per their CLI docs. `=`-forms
+# (`terraform -chdir=x`) need no entry: one token, skipped whole.
+_CLASS_SKIP_VALUE_FLAGS = {
+    "docker": frozenset({
+        "--config", "-c", "--context", "-H", "--host", "-l", "--log-level",
+        "--tlscacert", "--tlscert", "--tlskey",
+        # compose level
+        "--ansi", "--env-file", "-f", "--file", "--parallel", "--profile",
+        "--progress", "--project-directory", "-p", "--project-name",
+    }),
+    "git": frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                      "--attr-source"}),
+    "helm": frozenset({
+        "--burst-limit", "--color", "--colour", "--content-cache",
+        "--kube-apiserver", "--kube-as-group", "--kube-as-user",
+        "--kube-ca-file", "--kube-context", "--kube-tls-server-name",
+        "--kube-token", "--kubeconfig", "-n", "--namespace", "--qps",
+        "--registry-config", "--repository-cache", "--repository-config",
+    }),
+    "npm": frozenset({"--prefix", "-C", "-w", "--workspace", "--registry",
+                      "--userconfig", "--globalconfig", "--cache",
+                      "--loglevel", "--tag", "--scope"}),
+    "pip": frozenset({"--python", "--keyring-provider", "--retries",
+                      "--timeout", "--use-feature", "--use-deprecated",
+                      "--resume-retries", "--log", "--cache-dir", "--proxy",
+                      "--trusted-host", "--cert", "--client-cert",
+                      "--exists-action"}),
+    "bq": frozenset({"--api", "--api_version", "--apilog", "--bigqueryrc",
+                     "--ca_certificates_file", "--dataset_id", "--format",
+                     "--job_id", "--location", "--max_rows_per_request",
+                     "--project_id"}),
+    "vercel": frozenset({"--cwd", "-A", "--local-config", "-Q",
+                         "--global-config", "-S", "--scope", "-t", "--token",
+                         "-T", "--team"}),
+    "cargo": frozenset({"--config", "--color", "-Z", "-C"}),
+}
+
+
+def _lenient_trail(head, head_spec, tokens):
+    """The levels a verb walk enters when every option before a verb is
+    skipped: a `--flag=value` token or an undeclared flag skips one token,
+    a value flag (declared on a walked level, or listed in
+    _CLASS_SKIP_VALUE_FLAGS for the head) skips two; `--` or any other
+    non-verb token ends the walk.
+
+    Class resolution only (output_class): the class picks the output form
+    of the unchanged argv, never what runs. A wrong skip can at worst move
+    a summary form to content/log - both lossless - or leave the class the
+    strict walk gave."""
+    skip = _CLASS_SKIP_VALUE_FLAGS.get(head, frozenset())
+    trail = [head_spec]
+    level = head_spec
+    values = set(level["value"])
+    i, n = 0, len(tokens)
+    while i < n and level["verbs"]:
+        tok = tokens[i]
+        if tok in level["verbs"]:
+            level = level["verbs"][tok]
+            trail.append(level)
+            values |= set(level["value"])
+            i += 1
+        elif tok == "--" or not tok.startswith("-") or tok == "-":
+            break
+        elif "=" in tok:
+            i += 1
+        elif tok in values or tok in skip:
+            i += 2
+        else:
+            i += 1
+    return trail
+
+
 def output_class(argv):
     """"content" | "log" | "summary" for `actx <argv>`, or None when the
     head has no class (cli.main: unknown command).
@@ -497,7 +576,9 @@ def output_class(argv):
     The class is the nearest explicit `output` on the walk through the
     head's spec (global options skipped exactly as rewrite() does); a
     manual invocation the spec would reject gets the class of its deepest
-    matched verb. Run-prefixes are unwrapped: the inner command's class.
+    verb on the strict walk or on the lenient walk (_lenient_trail: global
+    options before a verb skipped, `docker --context x inspect`), whichever
+    went deeper. Run-prefixes are unwrapped: the inner command's class.
     Heads are looked up by cli_families.head_key; argv is never changed."""
     if not argv:
         return None
@@ -513,7 +594,10 @@ def output_class(argv):
     if head_spec is None:
         return _REGISTRY_ONLY_CLASSES.get(head)
     trail = []
-    _match_level(head_spec, list(argv[1:]), None, trail)
+    if not _match_level(head_spec, list(argv[1:]), None, trail):
+        lenient = _lenient_trail(head, head_spec, list(argv[1:]))
+        if len(lenient) > len(trail):
+            trail = lenient
     for level in reversed(trail):
         if level["output"] is not None:
             return level["output"]

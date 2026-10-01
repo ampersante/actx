@@ -1589,7 +1589,7 @@ HEAD_SPECS["cargo"] = spec(
                                       "--format-version": frozenset({"1"})},
                                      **_CARGO_FEATURE_VALUE),
                           positional="none",
-                          require_any_of=("--no-deps",)),
+                          require_any_of=("--no-deps",), output="content"),
         "package": spec(inherit=True, bool=("-l", "--list"), positional="none",
                          require_any_of=("-l", "--list")),
     },
@@ -1672,7 +1672,7 @@ HEAD_SPECS["pip"] = spec(verbs={
                  positional="none"),
     "show": spec(bool=("-f", "--files") + _PIP_GENERAL_BOOL + _PIP_GENERAL_BOOL_SAFE_CACHE,
                  value=_PIP_GENERAL_VALUE,
-                 positional="any"),
+                 positional="any", output="content"),
     "freeze": spec(bool=("-l", "--local", "--user", "--all", "--exclude-editable") +
                         _PIP_GENERAL_BOOL + _PIP_GENERAL_BOOL_SAFE_CACHE,
                    value=dict({"-r": "any", "--requirement": "any",
@@ -1682,7 +1682,7 @@ HEAD_SPECS["pip"] = spec(verbs={
     "inspect": spec(bool=("--local", "--user", "--exclude-editable") +
                          _PIP_GENERAL_BOOL + _PIP_GENERAL_BOOL_SAFE_CACHE,
                      value=dict({"--path": "any"}, **_PIP_GENERAL_VALUE),
-                     positional="none"),
+                     positional="none", output="content"),
     "debug": spec(bool=("--verbose",) + _PIP_GENERAL_BOOL, value=_PIP_GENERAL_VALUE,
                   positional="none"),
     "cache": spec(require_verb=True, verbs={
@@ -1693,7 +1693,7 @@ HEAD_SPECS["pip"] = spec(verbs={
     }),
     "config": spec(require_verb=True, verbs={
         "list": spec(bool=_PIP_GENERAL_BOOL, positional="none"),
-        "get": spec(bool=_PIP_GENERAL_BOOL, positional="any"),
+        "get": spec(bool=_PIP_GENERAL_BOOL, positional="any", output="content"),
         "debug": spec(bool=_PIP_GENERAL_BOOL, positional="none"),
         # "set"/"unset"/"edit" deliberately absent: write pip.conf.
     }),
@@ -1716,18 +1716,19 @@ HEAD_SPECS["npm"] = spec(verbs={
     "outdated": spec(bool=("-a", "--all", "-j", "--json", "-l", "--long",
                           "--parseable", "-g", "--global"),
                      value={"--workspace": "any"}, positional="any"),
-    "view": spec(positional="any"),
-    "info": spec(positional="any"),
-    "show": spec(positional="any"),
+    # One named object's data (borderline -> content, TK-61 §1).
+    "view": spec(positional="any", output="content"),
+    "info": spec(positional="any", output="content"),
+    "show": spec(positional="any", output="content"),
     "whoami": spec(positional="none"),
     "ping": spec(positional="none"),
     "doctor": spec(positional="none"),
-    "explain": spec(positional="any"),
+    "explain": spec(positional="any", output="content"),
     "fund": spec(bool=("--json",), positional="any"),
     "audit": spec(positional="none"),  # bare "npm audit" only; "audit fix" excluded
     "config": spec(require_verb=True, verbs={
         "list": spec(bool=("--json", "-l", "--long"), positional="none"),
-        "get": spec(positional="any"),
+        "get": spec(positional="any", output="content"),
     }),
 }, require_verb=True, output="summary")
 
@@ -1743,7 +1744,8 @@ HEAD_SPECS["pnpm"] = spec(verbs={
     "ls": spec(bool=_PNPM_LIST_BOOL, value=_PNPM_LIST_VALUE, positional="any"),
     "outdated": spec(bool=("--long", "--json", "-r", "--recursive"),
                      value={"--filter": "any"}, positional="any"),
-    "why": spec(bool=("--json", "-r", "--recursive"), positional="any"),
+    "why": spec(bool=("--json", "-r", "--recursive"), positional="any",
+                output="content"),
 }, require_verb=True, output="summary")
 
 # `uv` itself is NOT a HEAD_SPECS entry: `uv run <inner>` is a run-prefix
@@ -1959,7 +1961,7 @@ HEAD_SPECS["pod"] = spec(verbs={
                 positional="none"),
     "spec": spec(require_verb=True, verbs={
         "which": spec(bool=("--regex", "--show-all"), value={"--version": "any"},
-                       positional="any"),
+                       positional="any", output="content"),
         "cat": spec(bool=("--regex", "--show-all"), value={"--version": "any"},
                      positional="any", output="content"),
     }),
