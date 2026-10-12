@@ -10,7 +10,7 @@ $ git status        →   $ actx git status
 
 ![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB)
 ![Stdlib only](https://img.shields.io/badge/dependencies-none-brightgreen)
-![Tests](https://img.shields.io/badge/tests-1202%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1210%20passed-brightgreen)
 
 ---
 
@@ -92,8 +92,8 @@ After installation, restart the agent.
 ### Via curl (release tarball)
 
 ```bash
-curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.13.0.tar.gz | tar xz
-cd actx-2.13.0
+curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.13.1.tar.gz | tar xz
+cd actx-2.13.1
 bash install.sh
 ```
 
@@ -156,7 +156,7 @@ actx discover
 actx session
 actx tracking [on|off|status|clear]
 actx rewrite "<command>"      # pure rewriter, no security gate
-actx hook [--agent opencode|devin|pi] [--payload <json>]
+actx hook [--agent codex|opencode|devin|pi] [--payload <json>]
 actx init [--agent <name>|all] [--show] [--uninstall]
 actx --version
 actx --help
@@ -255,7 +255,7 @@ entirely — actx cannot protect an agent run under that flag.
 | Aider | `read:` instruction | `actx init --agent aider` | soft |
 | Cursor | Printed for manual UI insert | `actx init --agent cursor` | manual |
 
-¹ Codex requires the user to trust the hook once via `/hooks`.
+¹ Codex requires the user to trust the hook once via `/hooks`. With actx ≥ 2.13.1, the security gate runs first, then eligible Git mutators (`git add|commit|push|pull|fetch`) are left unrewritten so existing native permission rules match the original command. The hook returns no new allow for these commands. Trusted hook definitions are unchanged.
 
 ² These adapters call `actx hook --agent <name>` and require actx ≥ 2.13.0. Per harness:
 

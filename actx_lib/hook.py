@@ -12,19 +12,20 @@ ADDITIONAL_CONTEXT = "Command rewritten by actx for output compression."
 _AGY_DEFER_REASON = "actx: command outside actx policy — deferred to user confirmation"
 
 # Per-agent policy for the Claude/Codex schema (TK-65, `actx hook --agent
-# <name>`); None = no --agent, today's behaviour. The gate runs first for
-# every agent.
+# <name>`); a Codex turn_id selects codex when no agent is specified.
+# None = the default policy. The gate runs first for every agent.
 #   ask_as_deny: the agent has no confirmation channel - a gate "ask" is
 #                emitted as "deny" with the gate's reason.
 #   mutator:     a rewritable git mutator (rewriter.is_mutator):
 #                "rewrite" - allow + updatedInput, like any other rewrite;
 #                "none"    - no output: the harness's own rules see the
-#                            command as typed (OpenCode);
+#                            command as typed (Codex, OpenCode);
 #                "allow"   - allow without updatedInput: auto-allowed as
 #                            today, rules see the typed string (Devin, whose
 #                            empty response would prompt; `-p` rejects).
 AGENT_POLICIES = {
     None: {"ask_as_deny": False, "mutator": "rewrite"},
+    "codex": {"ask_as_deny": False, "mutator": "none"},
     "opencode": {"ask_as_deny": True, "mutator": "none"},
     "devin": {"ask_as_deny": False, "mutator": "allow"},
     "pi": {"ask_as_deny": True, "mutator": "rewrite"},
@@ -129,6 +130,9 @@ def process(text, agent=None):
         # Fail-open guarantee: defer to native harness permissions on gate error
         return None
 
+    turn_id = data.get("turn_id")
+    if agent is None and isinstance(turn_id, str) and turn_id:
+        agent = "codex"
     policy = AGENT_POLICIES.get(agent, AGENT_POLICIES[None])
 
     if sec_res is not None:
@@ -212,7 +216,7 @@ def process(text, agent=None):
 def _parse_args(argv):
     """(agent, payload) from `hook` argv, parsed by hand in any order.
     `--agent <name>` selects AGENT_POLICIES; an unknown name, a trailing
-    `--agent` or any unknown token -> agent None (today's behaviour).
+    `--agent` or any unknown token -> agent None (payload-selected policy).
     `--payload <json>` replaces stdin; a trailing `--payload` -> "" (not
     JSON -> no output). payload None = read stdin."""
     agent = None

@@ -650,5 +650,138 @@ class HookAgentPolicyTests(unittest.TestCase):
                 self.assertEqual(out.getvalue(), "")
 
 
+class CodexPayloadPolicyTests(unittest.TestCase):
+    run_hook = HookAgentPolicyTests.run_hook
+    hook_stdout = HookAgentPolicyTests.hook_stdout
+
+    # Synthetic Codex marker: no captured user payload or command history.
+    def codex_payload(self, command, tool_name="Bash", **input_keys):
+        return json.dumps({
+            "turn_id": "synthetic-turn",
+            "tool_name": tool_name,
+            "tool_input": {"command": command, **input_keys},
+        })
+
+    def test_codex_all_git_mutators_defer_without_allow_or_rewrite(self):
+        for command in ("git add probe.txt", "git commit -m probe",
+                        "git push origin main", "git pull origin main",
+                        "git fetch origin"):
+            for tool_name in ("Bash", "exec"):
+                with self.subTest(command=command, tool_name=tool_name):
+                    p = self.run_hook([], stdin_text=self.codex_payload(
+                        command, tool_name, description="probe", timeout=5000,
+                        workdir="/synthetic/work", sandbox_permissions="require_escalated",
+                        prefix_rule=["git", command.split()[1]],
+                    ))
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertEqual(p.stdout, "")
+                    self.assertEqual(p.stderr, "")
+
+    def test_codex_reads_keep_complete_updated_input(self):
+        for command in ("git status", "git diff", "git log -n 5 --oneline",
+                        "git show HEAD", "ls -la"):
+            with self.subTest(command=command):
+                payload = self.codex_payload(
+                    command, "exec", description="read", timeout=5000,
+                    workdir="/synthetic/work", prefix_rule=["git"],
+                )
+                p = self.run_hook([], stdin_text=payload)
+                expected = json.loads(payload)
+                del expected["turn_id"]
+                baseline = self.run_hook([], stdin_text=json.dumps(expected))
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(p.stdout, baseline.stdout)
+                expected["tool_input"]["command"] = "actx " + command
+                self.assertEqual(
+                    json.loads(p.stdout)["hookSpecificOutput"]["updatedInput"],
+                    expected["tool_input"],
+                )
+
+    def test_only_nonempty_top_level_string_marker_selects_codex(self):
+        unmarked = json.loads(hook_input("Bash", {"command": PUSH}))
+        payloads = [unmarked]
+        for marker in (None, "", False, True, 0, 1, [], {}, ["synthetic-turn"]):
+            payloads.append({**unmarked, "turn_id": marker})
+        payloads.append({**unmarked, "model": "synthetic-model"})
+        payloads.append({**unmarked, "tool_input": {
+            "command": PUSH, "turn_id": "synthetic-turn",
+        }})
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                baseline = dict(payload)
+                baseline.pop("turn_id", None)
+                p = self.run_hook([], stdin_text=json.dumps(payload))
+                expected = self.run_hook([], stdin_text=json.dumps(baseline))
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(p.stdout, expected.stdout)
+                self.assertEqual(
+                    json.loads(p.stdout)["hookSpecificOutput"]["updatedInput"]["command"],
+                    "actx " + PUSH,
+                )
+
+    def test_explicit_agent_overrides_codex_marker(self):
+        for agent in ("opencode", "devin", "pi"):
+            for command in (PUSH, FORCE_PUSH, "git status"):
+                with self.subTest(agent=agent, command=command):
+                    args = ["--agent", agent]
+                    p = self.run_hook(args, stdin_text=self.codex_payload(command))
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertEqual(p.stdout, self.hook_stdout(args, command))
+
+    def test_explicit_codex_agent_supported_without_marker(self):
+        self.assertEqual(self.hook_stdout(["--agent", "codex"], PUSH), "")
+        for command in (FORCE_PUSH, "cat .env", "git status"):
+            with self.subTest(command=command):
+                self.assertEqual(self.hook_stdout(["--agent", "codex"], command),
+                                 self.hook_stdout([], command))
+
+    def test_codex_gate_verdicts_byte_identical(self):
+        for command in (FORCE_PUSH, "git fetch --upload-pack='touch x' .",
+                        "cat .env", "git add probe.txt && sudo rm -rf /"):
+            with self.subTest(command=command):
+                p = self.run_hook([], stdin_text=self.codex_payload(command))
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(p.stdout, self.hook_stdout([], command))
+                self.assertIn(
+                    json.loads(p.stdout)["hookSpecificOutput"]["permissionDecision"],
+                    ("ask", "deny"),
+                )
+
+    def test_gate_runs_before_codex_mutator_deferral(self):
+        from actx_lib import hook, security_gate
+
+        # A rewritable mutator must still emit a gate veto. This catches
+        # moving deferral ahead of the gate even for ordinary git commits.
+        payload = self.codex_payload("git commit -m probe")
+        for decision in ("deny", "ask"):
+            with self.subTest(decision=decision):
+                verdict = security_gate.SecurityDecision(decision, "probe reason", "T_PROBE")
+                with mock.patch.object(security_gate, "evaluate_security", return_value=verdict) as gate:
+                    result = hook.process(payload)
+                gate.assert_called_once_with("git commit -m probe")
+                reason = ("actx security gate violation [T_PROBE]: probe reason"
+                          if decision == "deny" else
+                          "actx security gate confirmation required: probe reason")
+                self.assertEqual(result, {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": decision,
+                    "permissionDecisionReason": reason,
+                }})
+
+    def test_codex_gate_exception_defers_before_rewriter(self):
+        from actx_lib import hook
+
+        out = io.StringIO()
+        with mock.patch("actx_lib.security_gate.evaluate_security",
+                        side_effect=RuntimeError("probe failure")), \
+             mock.patch("actx_lib.rewriter.rewrite") as rewrite, \
+             mock.patch("sys.stdin", io.StringIO(self.codex_payload(PUSH))), \
+             mock.patch("sys.stdout", out):
+            rc = hook.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue(), "")
+        rewrite.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
