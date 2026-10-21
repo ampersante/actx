@@ -19,7 +19,6 @@ AGENTS = (
     "cursor",
     "cline",
     "windsurf",
-    "aider",
     "gemini",
     "copilot",
     "devin",
@@ -72,15 +71,9 @@ _AGENT_PATHS = {
     "cursor": {},
     "cline": {"instructions": "~/.cline/rules/actx.md"},
     "windsurf": {"instructions": "~/.codeium/windsurf/memories/global_rules.md"},
-    "aider": {
-        "instructions": "~/.config/actx/instructions.md",
-        "conf": "~/.aider.conf.yml",
-    },
     "gemini": {"hook": "~/.gemini/config/hooks.json"},
     "copilot": {"hook": "~/.copilot/settings.json"},
 }
-
-_AIDER_READ_PATH = "~/.config/actx/instructions.md"
 
 _ADAPTERS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "adapters"
@@ -724,127 +717,6 @@ def _install_cursor():
     print("Insert the section above in Cursor → Settings → Rules → User Rules.")
 
 
-def _split_read_block(lines):
-    """Locate and remove the ``read:`` key, returning (value, remaining_lines)."""
-    value = None
-    out = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-        if not stripped.startswith("read:"):
-            out.append(line)
-            i += 1
-            continue
-
-        rest = line.split(":", 1)[1].strip()
-        if not rest:
-            # A read: key followed by indented list items.
-            items = []
-            i += 1
-            while i < len(lines) and lines[i].startswith(" ") and lines[i].strip().startswith("- "):
-                item = lines[i].strip()[2:].strip()
-                if item:
-                    items.append(item)
-                i += 1
-            value = items
-        elif rest.startswith("[") and rest.endswith("]"):
-            inner = rest[1:-1].strip()
-            if inner:
-                value = [part.strip() for part in inner.split(",") if part.strip()]
-            else:
-                value = []
-        else:
-            value = rest
-        i += 1
-
-    return value, out
-
-
-def _read_line_for(value):
-    if isinstance(value, list):
-        if len(value) == 0:
-            return "read: []\n"
-        if len(value) == 1:
-            return "read: %s\n" % value[0]
-        return "read: [%s]\n" % ", ".join(value)
-    return "read: %s\n" % value
-
-
-def _aider_set_read(path, actx_read_path):
-    """Merge the actx path into an existing scalar or list ``read:`` key."""
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as handle:
-            original = handle.read()
-    else:
-        original = ""
-
-    existing, rest = _split_read_block(original.split("\n"))
-    if existing is None:
-        value = actx_read_path
-    elif isinstance(existing, list):
-        value = list(existing)
-        if actx_read_path not in value:
-            value.append(actx_read_path)
-    elif existing == actx_read_path:
-        value = actx_read_path
-    else:
-        value = [existing, actx_read_path]
-
-    rest = [line for line in rest if line.strip() != ""]
-    result = "\n".join(rest).rstrip("\n")
-    if result:
-        result += "\n\n"
-    result += _read_line_for(value)
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(result)
-    return True
-
-
-def _install_aider(paths, abs_actx):
-    instructions_path = os.path.expanduser(paths["instructions"])
-    conf_path = os.path.expanduser(paths["conf"])
-    os.makedirs(os.path.dirname(conf_path), exist_ok=True)
-    _install_instructions(instructions_path)
-    _aider_set_read(conf_path, _AIDER_READ_PATH)
-    return True
-
-
-def _uninstall_aider(paths):
-    instructions_path = os.path.expanduser(paths["instructions"])
-    conf_path = os.path.expanduser(paths["conf"])
-    changed = _uninstall_instructions(instructions_path)
-    if not os.path.exists(conf_path):
-        return changed
-
-    with open(conf_path, "r", encoding="utf-8") as handle:
-        original = handle.read()
-    existing, rest = _split_read_block(original.split("\n"))
-    if existing is None:
-        return changed
-
-    value = existing
-    if isinstance(value, list):
-        value = [item for item in value if item != _AIDER_READ_PATH]
-    elif value == _AIDER_READ_PATH:
-        value = None
-    else:
-        return changed
-
-    rest = [line for line in rest if line.strip() != ""]
-    result = "\n".join(rest).rstrip("\n")
-    if result:
-        result += "\n\n"
-    if value is not None:
-        result += _read_line_for(value)
-    result = result.rstrip("\n") + "\n"
-    with open(conf_path, "w", encoding="utf-8") as handle:
-        handle.write(result)
-    return True
-
-
 def _agent_config(agent):
     if agent == "opencode":
         return {"plugin": os.path.join(_config_home(), "opencode", "plugins", "actx.ts")}
@@ -871,8 +743,6 @@ def _detect_existing(agent):
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["instructions"])))
     if agent == "windsurf":
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["instructions"])))
-    if agent == "aider":
-        return os.path.exists(os.path.expanduser(paths["conf"]))
     return False
 
 
@@ -958,7 +828,7 @@ def _installed(agent):
         return os.path.exists(os.path.expanduser(paths["plugin"]))
     if agent == "devin":
         return _devin_installed(os.path.expanduser(paths["hook"]))
-    if agent in ("grok", "cline", "windsurf", "aider"):
+    if agent in ("grok", "cline", "windsurf"):
         text = _read_instructions(os.path.expanduser(paths["instructions"]))
         return _contains_section(text)
     return False
@@ -1024,9 +894,6 @@ def install(agent, abs_actx):
         path = os.path.expanduser(paths["instructions"])
         _install_instructions(path)
         return 0
-    if agent == "aider":
-        _install_aider(paths, abs_actx)
-        return 0
     print("unknown agent", file=sys.stderr)
     return 1
 
@@ -1079,9 +946,6 @@ def uninstall(agent, abs_actx):
         return 0
     if agent in ("grok", "cline", "windsurf"):
         _uninstall_instructions(os.path.expanduser(paths["instructions"]))
-        return 0
-    if agent == "aider":
-        _uninstall_aider(paths)
         return 0
     print("unknown agent", file=sys.stderr)
     return 1

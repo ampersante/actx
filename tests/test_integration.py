@@ -39,7 +39,6 @@ class IntegrationTests(unittest.TestCase):
                     home, ".codeium", "windsurf", "memories", "global_rules.md"
                 ),
                 os.path.join(home, ".config", "actx", "instructions.md"),
-                os.path.join(home, ".aider.conf.yml"),
             ):
                 self.assertFalse(os.path.exists(path), path)
 

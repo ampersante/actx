@@ -12,8 +12,6 @@ from actx_lib.installer import INSTRUCTION_SECTION
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACTX = os.path.realpath(os.path.join(ROOT, "actx"))
 
-AIDER_READ = "~/.config/actx/instructions.md"
-
 _STALE_SECTION = """## Output compression (actx)
 
 To reduce context noise, prefix read-only commands with `actx`:
@@ -327,68 +325,6 @@ class InitTests(unittest.TestCase):
         self.assertTrue(INSTRUCTION_SECTION.strip())
         self.assertIn("## Output compression (actx)", INSTRUCTION_SECTION)
 
-
-        with tempfile.TemporaryDirectory() as home:
-            conf = os.path.join(home, ".aider.conf.yml")
-            os.makedirs(os.path.dirname(conf), exist_ok=True)
-            with open(conf, "w", encoding="utf-8") as handle:
-                handle.write("read: ~/other.md\n")
-
-            p = self.run_actx(["init", "--agent", "aider"], home)
-            self.assertEqual(p.returncode, 0, p.stderr)
-            p = self.run_actx(["init", "--agent", "aider"], home)
-            self.assertEqual(p.returncode, 0, p.stderr)
-
-            with open(conf, encoding="utf-8") as handle:
-                content = handle.read()
-            self.assertIn("~/other.md", content)
-            self.assertIn(AIDER_READ, content)
-            self.assertEqual(content.count(AIDER_READ), 1)
-
-            instructions = os.path.join(home, ".config", "actx", "instructions.md")
-            with open(instructions, encoding="utf-8") as handle:
-                self.assertIn(INSTRUCTION_SECTION, handle.read())
-
-    def test_aider_list_form_deduped(self):
-        with tempfile.TemporaryDirectory() as home:
-            conf = os.path.join(home, ".aider.conf.yml")
-            os.makedirs(os.path.dirname(conf), exist_ok=True)
-            with open(conf, "w", encoding="utf-8") as handle:
-                handle.write("read: [%s, ~/other.md]\n" % AIDER_READ)
-
-            p = self.run_actx(["init", "--agent", "aider"], home)
-            self.assertEqual(p.returncode, 0, p.stderr)
-            with open(conf, encoding="utf-8") as handle:
-                content = handle.read()
-            self.assertEqual(content.count(AIDER_READ), 1)
-            self.assertIn("~/other.md", content)
-
-            p = self.run_actx(["init", "--agent", "aider", "--uninstall"], home)
-            self.assertEqual(p.returncode, 0, p.stderr)
-            with open(conf, encoding="utf-8") as handle:
-                content = handle.read()
-            self.assertNotIn(AIDER_READ, content)
-            self.assertIn("~/other.md", content)
-
-    def test_aider_scalar_own_deduped_and_uninstall_removes_key(self):
-        with tempfile.TemporaryDirectory() as home:
-            conf = os.path.join(home, ".aider.conf.yml")
-            os.makedirs(os.path.dirname(conf), exist_ok=True)
-            with open(conf, "w", encoding="utf-8") as handle:
-                handle.write("read: %s\n" % AIDER_READ)
-
-            p = self.run_actx(["init", "--agent", "aider"], home)
-            self.assertEqual(p.returncode, 0, p.stderr)
-            with open(conf, encoding="utf-8") as handle:
-                content = handle.read()
-            self.assertEqual(content.count(AIDER_READ), 1)
-
-            p = self.run_actx(["init", "--agent", "aider", "--uninstall"], home)
-            self.assertEqual(p.returncode, 0, p.stderr)
-            with open(conf, encoding="utf-8") as handle:
-                content = handle.read()
-            self.assertNotIn("read:", content)
-
     def test_cursor_writes_nothing_and_prints_section(self):
         with tempfile.TemporaryDirectory() as home:
             p = self.run_actx(["init", "--agent", "cursor"], home)
@@ -446,8 +382,6 @@ class InitTests(unittest.TestCase):
                 os.path.join(home, ".grok", "rules", "actx.md"),
                 os.path.join(home, ".cline", "rules", "actx.md"),
                 os.path.join(home, ".codeium", "windsurf", "memories", "global_rules.md"),
-                os.path.join(home, ".config", "actx", "instructions.md"),
-                os.path.join(home, ".aider.conf.yml"),
                 os.path.join(home, ".gemini", "config", "hooks.json"),
                 os.path.join(home, ".config", "devin", "config.json"),
                 os.path.join(home, ".pi", "agent", "extensions", "actx.ts"),
@@ -462,7 +396,6 @@ class InitTests(unittest.TestCase):
                 "grok",
                 "cline",
                 "windsurf",
-                "aider",
                 "gemini",
                 "devin",
                 "pi",

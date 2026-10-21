@@ -61,7 +61,7 @@ M (3):
 - **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent on an error (the OpenCode plugin's deliberate throw on a security-gate deny is OpenCode's only way to block a command); on any error they pass the command through unchanged and the output through with secret values masked (if masking itself fails, lines that may carry a secret are withheld and a marker line says how many).
 - **Escape hatch** — `ACTX_BYPASS=1` or a `bypass_commands` entry runs the matching command unfiltered (byte-for-byte except masked secret values), preserving the exit code.
 - **Stdlib only** — Python 3.14 standard library. No pip, no brew, no network, no telemetry.
-- **Multi-agent** — deterministic hooks and plugins for Claude Code, Codex, Gemini/Antigravity, GitHub Copilot CLI, OpenCode, Devin CLI, and pi; rule-based instructions for Grok, Cline, Windsurf, Aider, and Cursor.
+- **Multi-agent** — deterministic hooks and plugins for Claude Code, Codex, Gemini/Antigravity, GitHub Copilot CLI, OpenCode, Devin CLI, and pi; rule-based instructions for Grok, Cline, Windsurf, and Cursor.
 
 ## Installation
 
@@ -252,7 +252,6 @@ entirely — actx cannot protect an agent run under that flag.
 | Grok Build | Rules instruction | `actx init --agent grok` | soft (~70–85%) |
 | Cline / Roo | Rules file | `actx init --agent cline` | soft |
 | Windsurf | Rules file | `actx init --agent windsurf` | soft |
-| Aider | `read:` instruction | `actx init --agent aider` | soft |
 | Cursor | Printed for manual UI insert | `actx init --agent cursor` | manual |
 
 ¹ Codex requires the user to trust the hook once via `/hooks`. With actx ≥ 2.13.1, the security gate runs first, then eligible Git mutators (`git add|commit|push|pull|fetch`) are left unrewritten so existing native permission rules match the original command. The hook returns no new allow for these commands. Trusted hook definitions are unchanged.
