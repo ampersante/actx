@@ -155,14 +155,35 @@ _GIT_CLEAN_DRY_RUN_TOKENS = frozenset({"-n", "--dry-run", "-d", "-x", "-X", "-q"
 _RE_GIT_CLEAN_CLUSTER = re.compile(r"-[ndxXq]+")
 
 
-def _git_clean_dry_run(sub_args: list[str]) -> bool:
-    toks = [_strip_redirection(tok) for tok in sub_args]
-    if not all(t in _GIT_CLEAN_DRY_RUN_TOKENS or _RE_GIT_CLEAN_CLUSTER.fullmatch(t) for t in toks):
+def _git_clean_dry_run(words: list[str] | None) -> bool:
+    """`words`: the shell words of a single command inside the engine's
+    closed grammar (None: no exemption); `clean` directly after `git`."""
+    if words is None or len(words) < 2 or words[0] != "git" or words[1] != "clean":
         return False
-    return any(t == "--dry-run" or (not t.startswith("--") and "n" in t) for t in toks)
+    args = words[2:]
+    if not all(t in _GIT_CLEAN_DRY_RUN_TOKENS or _RE_GIT_CLEAN_CLUSTER.fullmatch(t) for t in args):
+        return False
+    return any(t == "--dry-run" or (not t.startswith("--") and "n" in t) for t in args)
 
 
-def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
+def _git_no_pager_values(words: list[str] | None) -> set:
+    """The `-c` values `core.pager=cat` / `core.pager=` (key case-insensitive,
+    separate `-c` word) before the subcommand of a single command inside
+    the engine's closed grammar; empty when `words` is None."""
+    out = set()
+    if words is None or words[0] != "git":
+        return out
+    i = 1
+    while i + 1 < len(words) and words[i] == "-c":
+        kv = words[i + 1]
+        key = kv.split("=", 1)[0]
+        if key.casefold() == "core.pager" and kv[len(key):] in ("=cat", "="):
+            out.add(kv)
+        i += 2
+    return out
+
+
+def _check_high_risk_git(command: str, raw_tokens: list[str], words: list[str] | None = None) -> SecurityDecision | None:
     tokens = _unwrap_tokens(raw_tokens)
     if not tokens or os.path.basename(tokens[0]) != "git":
         return None
@@ -200,6 +221,7 @@ def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecisio
     # git's own global flags - a subcommand-level '-c' (e.g. `git log -c`,
     # the combined-diff flag) is not this class.
     scan_upto = subcmd_idx if subcmd_idx != -1 else len(tokens)
+    no_pager_values = _git_no_pager_values(words)
     for idx_c in range(1, scan_upto):
         tok_c = tokens[idx_c]
         kv = None
@@ -214,9 +236,10 @@ def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecisio
         if kv is None:
             continue
         key = kv.split("=", 1)[0]
-        if tok_c == "-c" and key.casefold() == "core.pager" and kv[len(key):] in ("=cat", "="):
+        if tok_c == "-c" and kv in no_pager_values:
             # TK-63: an empty or `cat` pager is git's own no-pager setting
-            # (git-config(1) core.pager) - the same as `git --no-pager`.
+            # (git-config(1) core.pager) - the same as `git --no-pager`;
+            # only for a single command inside the closed grammar.
             continue
         if _is_git_ask_config_key(key) or (
             ("alias." in kv or "alias " in kv) and ("force" in kv or "reset" in kv or "clean" in kv or "+" in kv)
@@ -283,7 +306,7 @@ def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecisio
                 )
 
     # git clean with -x / -X (removing ignored files)
-    if subcmd == "clean" and not _git_clean_dry_run(sub_args):
+    if subcmd == "clean" and not _git_clean_dry_run(words):
         for tok in sub_args:
             clean_tok = _strip_redirection(tok)
             if clean_tok in ("-x", "-X", "-fx", "-xf", "-fdx", "-dxf", "-fxd") or (
