@@ -216,6 +216,12 @@ ALLOW = (
     "export PATH=/synthetic/bin 2>&1",
     "jq . env.json",
     "awk '{print $1}' data.txt",
+    # Word-only markers: ordinary inline code mentioning similar words.
+    "python3 -c \"import json; print(json.load(open('environment.json'))['name'])\"",
+    "python3 -c \"print('environment ok')\"",
+    "python3 -c \"import sys; print(vars(sys.flags))\"",
+    "node -e \"console.log(require('./config/ENV_defaults.json'))\"",
+    "awk '/ENVIRONMENT/ {print $2}' deploy.log",
 )
 
 # Not denied by T1 (T5 asks for installs, which is unrelated to this task).

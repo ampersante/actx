@@ -429,7 +429,7 @@ _RE_SECRET_VAR_NAME = re.compile(
 _VARIABLE_LISTING_BUILTINS = frozenset({"export", "declare", "typeset", "readonly", "local"})
 
 # awk / jq program text naming the environment.
-_RE_PROGRAM_ENV = re.compile(r"ENVIRON|\$ENV\b")
+_RE_PROGRAM_ENV = re.compile(r"\bENVIRON\b|\$ENV\b")
 
 # Per interpreter: (last letters of a single-dash flag cluster that takes the
 # inline code as its value, flags with a separate value that is not the
@@ -455,11 +455,14 @@ _RE_REDIRECTION = re.compile(r"[0-9]*[<>]+&?")
 _PS_VALUE_FLAG_LETTERS = "CpqstuUgGoO"
 
 # Inline interpreter code that can reach the process environment. Plain
-# substring rules, no per-language parsing: `environ` (os.environ, environb,
-# from os import environ, /proc/self/environ), `__dict__` / vars() (module
-# namespace of os), ENV (ruby, perl, php), a quoted "env" (process["env"]),
-# getenv() without a name. Rare false denials inside inline code are accepted.
-_RE_INLINE_ENV_DUMP = re.compile(r"environ|__dict__|\bvars\s*\(|ENV|[\"']env[\"']|getenv\s*\(\s*\)")
+# word rules, no per-language parsing: `environ`/`environb` as a whole word
+# (os.environ, from os import environ, /proc/self/environ; not "environment"),
+# `__dict__`, vars() / vars(os) (module namespace of os), ENV as a whole word
+# (ruby, perl, php; not ENV_NAME) and php $_ENV, a quoted "env" (process["env"]), getenv()
+# without a name. Rare false denials inside inline code are accepted.
+_RE_INLINE_ENV_DUMP = re.compile(
+    r"\benvironb?\b|__dict__|\bvars\s*\(\s*(?:os|posix)?\s*\)|\bENV\b|\$_ENV\b|[\"']env[\"']|getenv\s*\(\s*\)"
+)
 
 def _drop_redirections(tokens: list[str]) -> list[str]:
     """Tokens without redirections (`2>&1`, `> out`, `>> out`, `< in`): a
