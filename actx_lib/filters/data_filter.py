@@ -189,8 +189,6 @@ def run_dbt(args, config):
         return runner.run_passthrough(["dbt"])
     if args[0] in ("run", "test", "build"):
         result = runner.execute(["dbt"] + args)
-        if result is None:
-            return 1
         return runner.compacted_result(
             ["dbt"] + args,
             result,

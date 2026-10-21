@@ -43,7 +43,7 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
     def _run(self, result, config=CONFIG):
         out = io.StringIO()
         err = io.StringIO()
-        with mock.patch("actx_lib.runner.subprocess.run", return_value=result):
+        with mock.patch("actx_lib.runner._spawn", return_value=result):
             with redirect_stdout(out), redirect_stderr(err):
                 rc = runner.run(["tool", "get"], config)
         return rc, out.getvalue(), err.getvalue()
@@ -221,19 +221,25 @@ class GenericRunJsonAutoDetectTests(unittest.TestCase):
             self.assertNotIn("[actx] hint:", err)
             self.assertIn("[exit: 1]", err)
 
-        with mock.patch("actx_lib.runner._session_hints", side_effect=broken):
+        # The errors/digest legs spawn the mocked sample too (they used to
+        # spawn a missing "tool", whose exec-failure code was 1, now 127).
+        with mock.patch("actx_lib.runner._spawn", return_value=sample), mock.patch(
+            "actx_lib.runner._session_hints", side_effect=broken
+        ):
             out_e, err_e = io.StringIO(), io.StringIO()
             with redirect_stdout(out_e), redirect_stderr(err_e):
                 rc_e = runner.run_errors(["tool", "get"])
             self.assertEqual(rc_e, 1)
 
-        with mock.patch("actx_lib.runner._session_hints", side_effect=broken):
+        with mock.patch("actx_lib.runner._spawn", return_value=sample), mock.patch(
+            "actx_lib.runner._session_hints", side_effect=broken
+        ):
             out_d, err_d = io.StringIO(), io.StringIO()
             with redirect_stdout(out_d), redirect_stderr(err_d):
                 rc_d = runner.run_digest(["tool", "get"])
             self.assertEqual(rc_d, 1)
 
-        with mock.patch("actx_lib.runner.subprocess.run", return_value=sample):
+        with mock.patch("actx_lib.runner._spawn", return_value=sample):
             with mock.patch("actx_lib.runner._session_hints", side_effect=broken):
                 out_c, err_c = io.StringIO(), io.StringIO()
                 with redirect_stdout(out_c), redirect_stderr(err_c):

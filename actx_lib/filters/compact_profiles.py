@@ -11,8 +11,9 @@ Profile kinds:
 
 - "test_runner": return a {"failures", "failed", "passed"} dict composed of:
 
-  * ``section``: (start_literal, end_literal) — literal slice between the
-    markers (pytest FAILURES block, cargo "failures:" dump);
+  * ``section``: (start, end) — slice between the markers, each a literal
+    or a compiled regex (pytest's width-padded FAILURES block, cargo
+    "failures:" dump);
   * ``failure_start`` + ``failure_continue``: line block machine — a line
     matching failure_start opens a kept block; following lines survive only
     while they match failure_continue; any other line closes it (progress
@@ -35,17 +36,27 @@ imported only inside filter modules, never by the hook/rewrite paths (RK-02).
 import re
 
 
+def _find(text, marker, pos=0):
+    """(start, end) of marker (a literal or a compiled regex) at/after pos;
+    None when absent."""
+    if isinstance(marker, re.Pattern):
+        match = marker.search(text, pos)
+        return match.span() if match else None
+    index = text.find(marker, pos)
+    return None if index == -1 else (index, index + len(marker))
+
+
 def _strip_section(text, start, end=None):
-    index = text.find(start)
-    if index == -1:
+    span = _find(text, start)
+    if span is None:
         return ""
-    index += len(start)
+    index = span[1]
     if end is None:
         return text[index:]
-    end_index = text.find(end, index)
-    if end_index == -1:
+    end_span = _find(text, end, index)
+    if end_span is None:
         return text[index:]
-    return text[index:end_index]
+    return text[index:end_span[0]]
 
 
 def _counter(text, specs):
@@ -142,7 +153,11 @@ PROFILES = {
     # --- test-runner class ---
     "pytest": {
         "kind": "test_runner",
-        "section": ("=== FAILURES ===\n", "\n=== short test summary info ==="),
+        # pytest pads its section headers with "=" to the terminal width.
+        "section": (
+            re.compile(r"^=+ FAILURES =+\n", re.MULTILINE),
+            re.compile(r"\n=+ short test summary info =+$", re.MULTILINE),
+        ),
         "summary_after": "=== short test summary info ===",
         "summary_line": r"FAILED\s+(\S+)\s+-\s+(.*)",
         "summary_format": "%s - %s",

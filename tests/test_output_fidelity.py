@@ -1,7 +1,7 @@
 """TK-61 C3: output classes, dispatch and fidelity, generated from data.
 
 Red on cdd4f68 (C2), green after C3. In-process `cli.main` with a mocked
-`subprocess.run`; no real program runs.
+`runner._spawn`; no real program runs.
 
 1. Fidelity: every argv of the union of HEAD_SPECS verb paths (generated
    family leaves included), every rewritten entry of typical_usage.json and
@@ -211,7 +211,7 @@ class _Harness(unittest.TestCase):
 
     def dispatch(self, argv, rc=0, text=RAW_TEXT, data=RAW_BYTES,
                  err_text=ERR_TEXT, err_data=ERR_BYTES, raise_exc=None):
-        """cli.main(['actx'] + argv) with subprocess.run mocked: text-mode
+        """cli.main(['actx'] + argv) with runner._spawn mocked: text-mode
         calls get str streams, bytes-mode calls bytes. Returns (rc, stdout
         bytes, stderr bytes, executed argvs)."""
         calls = []
@@ -227,7 +227,7 @@ class _Harness(unittest.TestCase):
         out_b, err_b = io.BytesIO(), io.BytesIO()
         out = io.TextIOWrapper(out_b, encoding="utf-8", newline="")
         err = io.TextIOWrapper(err_b, encoding="utf-8", newline="")
-        with mock.patch("subprocess.run", side_effect=fake), mock.patch(
+        with mock.patch("actx_lib.runner._spawn", side_effect=fake), mock.patch(
             "sys.stdout", out
         ), mock.patch("sys.stderr", err):
             code = cli.main(["actx"] + list(argv))

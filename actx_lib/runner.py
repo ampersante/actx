@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -16,6 +17,104 @@ _TEE_DIR = "~/.local/share/actx/tee"
 NEVER_WRAP_EXIT_CODE = 125
 # actx-internal timeout (subprocess.TimeoutExpired).
 TIMEOUT_EXIT_CODE = 124
+
+# Grace between SIGTERM and SIGKILL to a timed-out command's group.
+_KILL_GRACE_S = 2
+# Signals actx forwards to the command's process group while it runs.
+_FORWARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+class _SpawnState:
+    """Per-process spawn record read by cli's error boundary: started is
+    set right before the first spawn, result holds the first command's
+    CompletedProcess (a filter's helper spawns never replace it)."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.started = False
+        self.result = None
+
+
+_STATE = _SpawnState()
+
+
+def _signal_group(proc, signum):
+    try:
+        os.killpg(proc.pid, signum)
+    except OSError:
+        pass
+
+
+def _install_forwarding(proc):
+    """Forward SIGINT/SIGTERM/SIGHUP to the command's group while actx
+    waits; returns the previous handlers (empty off the main thread)."""
+
+    def forward(signum, frame):
+        _signal_group(proc, signum)
+
+    previous = {}
+    for signum in _FORWARDED_SIGNALS:
+        try:
+            previous[signum] = signal.signal(signum, forward)
+        except (ValueError, OSError):
+            break
+    return previous
+
+
+def _restore_handlers(previous):
+    for signum, handler in previous.items():
+        if handler is not None:
+            signal.signal(signum, handler)
+
+
+def _kill_group(proc):
+    """Timeout: SIGTERM the whole group, then SIGKILL after a grace."""
+    _signal_group(proc, signal.SIGTERM)
+    try:
+        proc.wait(timeout=_KILL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        pass
+    _signal_group(proc, signal.SIGKILL)
+    proc.wait()
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            stream.close()
+
+
+def _spawn(cmd, timeout, text):
+    """The single exec seam: run cmd in its own session, capture both
+    streams, stdin from /dev/null.
+
+    text=True decodes UTF-8 with errors="replace" (an undecodable byte
+    becomes U+FFFD, never an exception); text=False keeps bytes. On timeout
+    the whole process group is killed and TimeoutExpired is raised. Death
+    by signal N is reported as 128+N, like a shell. A forwarded signal the
+    command handles leaves its own exit code.
+    """
+    kwargs = {"encoding": "utf-8", "errors": "replace"} if text else {}
+    _STATE.started = True
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True, **kwargs,
+    )
+    previous = _install_forwarding(proc)
+    try:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            raise subprocess.TimeoutExpired(cmd, timeout)
+    finally:
+        _restore_handlers(previous)
+    code = proc.returncode
+    if code < 0:
+        code = 128 - code
+    result = subprocess.CompletedProcess(cmd, code, stdout, stderr)
+    if _STATE.result is None:
+        _STATE.result = result
+    return result
 
 
 def _timeout_seconds(config, timeout_class):
@@ -40,7 +139,8 @@ def _refused(cmd, code, passthrough=False):
         file=sys.stderr,
     )
     if passthrough:
-        tracking.record(
+        _after_print(
+            tracking.record,
             cmd, cmd[0], 0, 0, code, passthrough=1, strategy="passthrough",
         )
     return code
@@ -59,7 +159,8 @@ def _synthetic_result(cmd, code, message):
 def _timed_out(cmd, seconds, passthrough=False):
     print(_timed_out_message(cmd, seconds), file=sys.stderr)
     if passthrough:
-        tracking.record(
+        _after_print(
+            tracking.record,
             cmd, cmd[0], 0, 0, TIMEOUT_EXIT_CODE,
             passthrough=1, strategy="passthrough",
         )
@@ -108,23 +209,31 @@ def _secret_bearing_result(result):
 
 
 def record_raw(cmd, result, strategy, passthrough=0):
-    raw = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-    tracking.record(
-        cmd, cmd[0], raw, raw, result.returncode,
-        passthrough=passthrough, strategy=strategy,
-        store_text=not _secret_bearing_result(result),
-    )
+    """Tracking after printing; never raises (see _after_print)."""
+    try:
+        raw = _text_bytes(result.stdout) + _text_bytes(result.stderr)
+        tracking.record(
+            cmd, cmd[0], raw, raw, result.returncode,
+            passthrough=passthrough, strategy=strategy,
+            store_text=not _secret_bearing_result(result),
+        )
+    except Exception:
+        pass
 
 
 def record_compacted(cmd, result, out_text, strategy, newline=True, extra_bytes=0):
-    raw = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-    emitted = _text_bytes(out_text) + extra_bytes
-    if newline and out_text and not out_text.endswith("\n"):
-        emitted += 1
-    tracking.record(
-        cmd, cmd[0], raw, emitted, result.returncode, strategy=strategy,
-        store_text=not _secret_bearing_result(result),
-    )
+    """Tracking after printing; never raises (see _after_print)."""
+    try:
+        raw = _text_bytes(result.stdout) + _text_bytes(result.stderr)
+        emitted = _text_bytes(out_text) + extra_bytes
+        if newline and out_text and not out_text.endswith("\n"):
+            emitted += 1
+        tracking.record(
+            cmd, cmd[0], raw, emitted, result.returncode, strategy=strategy,
+            store_text=not _secret_bearing_result(result),
+        )
+    except Exception:
+        pass
 
 
 def _tee_min_bytes(config):
@@ -310,7 +419,10 @@ def _write_tee(cmd, stdout, stderr, exit_code, tee_dir):
     except Exception:
         return None
     tee_dir = os.path.expanduser(tee_dir)
-    os.makedirs(tee_dir, exist_ok=True)
+    # Tee records hold command output: owner-only dir (also an existing
+    # one) and owner-only files.
+    os.makedirs(tee_dir, mode=0o700, exist_ok=True)
+    os.chmod(tee_dir, 0o700)
     command_hash = hashlib.sha1(_join_cmd(cmd).encode("utf-8")).hexdigest()
     timestamp = int(time.time())
     name = "%d_%s.log" % (timestamp, command_hash[:8])
@@ -333,7 +445,9 @@ def _write_tee(cmd, stdout, stderr, exit_code, tee_dir):
         "exit_code": exit_code,
     }
     path = os.path.join(tee_dir, name)
-    with open(path, "w", encoding="utf-8") as handle:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
         json.dump(record, handle)
     _retain(tee_dir)
     return path
@@ -423,7 +537,7 @@ def run_passthrough(cmd):
 
     timeout = _timeout_seconds(_load_config(), timeout_class)
     try:
-        result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout)
+        result = _spawn(cmd, timeout=timeout, text=False)
     except subprocess.TimeoutExpired:
         return _timed_out(cmd, timeout, passthrough=True)
     except OSError as exc:
@@ -432,24 +546,38 @@ def run_passthrough(cmd):
         return code
     _write_masked_bytes(result)
     raw_bytes = len(result.stdout) + len(result.stderr)
-    tracking.record(
+    _after_print(
+        tracking.record,
         cmd, cmd[0], raw_bytes, raw_bytes, result.returncode,
         passthrough=1, strategy="passthrough",
         store_text=not _secret_bearing_result(result),
     )
+    _print_session_hints(result)
+    return result.returncode
+
+
+def _after_print(step, *args, **kwargs):
+    """Run a step that follows printing (tracking, tee); an error in it
+    never reaches a fallback that would print the output a second time."""
+    try:
+        return step(*args, **kwargs)
+    except Exception:
+        return None
+
+
+def _print_session_hints(result):
     try:
         for hint in _session_hints(result):
             print(hint, file=sys.stderr)
     except Exception:
         pass
-    return result.returncode
 
 
 def _exec_failure(cmd, exc):
     """Shell-style (exit code, message) for an exec failure (TK-61).
 
-    One mapping for run_content and run_lossless: a missing program is 127,
-    a program that cannot be executed is 126 — not execute()'s None -> 1.
+    One mapping for every exec path: a missing program is 127, a program
+    that cannot be executed is 126.
     """
     head = cmd[0] if cmd else ""
     if isinstance(exc, FileNotFoundError):
@@ -520,9 +648,7 @@ def run_content(cmd, config):
 
     timeout = _timeout_seconds(config, timeout_class)
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout
-        )
+        result = _spawn(cmd, timeout=timeout, text=False)
     except subprocess.TimeoutExpired:
         return _timed_out(cmd, timeout, passthrough=True)
     except OSError as exc:
@@ -530,7 +656,8 @@ def run_content(cmd, config):
         print(message, file=sys.stderr)
         return code
     stdout, stderr = _write_masked_bytes(result)
-    tracking.record(
+    _after_print(
+        tracking.record,
         cmd, cmd[0],
         len(result.stdout or b"") + len(result.stderr or b""),
         len(stdout or b"") + len(stderr or b""),
@@ -550,9 +677,7 @@ def run_lossless(cmd, config, strategy="lossless", cap=True, stderr=True):
     stderr off the screen (the tee keeps it). An exec failure maps like a
     shell (127/126).
     """
-    result = execute(cmd, shell_codes=True)
-    if result is None:
-        return 1
+    result = execute(cmd)
     try:
         streams = [(result.stdout or "", redaction.redact_text(result.stdout or ""))]
         if stderr:
@@ -561,23 +686,20 @@ def run_lossless(cmd, config, strategy="lossless", cap=True, stderr=True):
         texts, cut, path = _lossless_streams(cmd, result, config, streams, cap)
         out_text = texts[0]
         err_text = texts[1] if stderr else ""
-        _print_transformed(out_text, err_text)
-        raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-        emitted = _text_bytes(out_text) + _text_bytes(err_text)
-        tracking.record(
-            cmd, cmd[0], raw_bytes, emitted, result.returncode,
-            strategy=strategy,
-            store_text=not _secret_bearing_result(result),
-        )
-        _finish_tee(cmd, result, config, cut, path)
-        try:
-            for hint in _session_hints(result):
-                print(hint, file=sys.stderr)
-        except Exception:
-            pass
-        return result.returncode
     except Exception:
         return raw_fallback(result)
+    _print_transformed(out_text, err_text)
+    raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
+    emitted = _text_bytes(out_text) + _text_bytes(err_text)
+    _after_print(
+        tracking.record,
+        cmd, cmd[0], raw_bytes, emitted, result.returncode,
+        strategy=strategy,
+        store_text=not _secret_bearing_result(result),
+    )
+    _after_print(_finish_tee, cmd, result, config, cut, path)
+    _print_session_hints(result)
+    return result.returncode
 
 
 def run(cmd, config):
@@ -590,16 +712,14 @@ def run(cmd, config):
 
     timeout = _timeout_seconds(config, timeout_class)
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=timeout,
-        )
+        result = _spawn(cmd, timeout=timeout, text=True)
     except subprocess.TimeoutExpired:
         print(_timed_out_message(cmd, timeout), file=sys.stderr)
         return TIMEOUT_EXIT_CODE
     except OSError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        code, message = _exec_failure(cmd, exc)
+        print(message, file=sys.stderr)
+        return code
 
     try:
         combined = (result.stdout or "") + (result.stderr or "")
@@ -618,7 +738,8 @@ def run(cmd, config):
     masked = _redact_result(result)
     if masked is None:
         print_raw(result)
-        tracking.record(
+        _after_print(
+            tracking.record,
             cmd, cmd[0], 0, 0, result.returncode, strategy="generic",
             store_text=False,
         )
@@ -657,25 +778,21 @@ def run(cmd, config):
         print("[exit: %d]" % result.returncode, file=sys.stderr)
         emitted += _text_bytes("[exit: %d]\n" % result.returncode)
 
-    tracking.record(
+    _after_print(
+        tracking.record,
         cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="generic",
         store_text=not _secret_bearing_result(result),
     )
-    _finish_tee(cmd, result, config, cut, path)
-
-    try:
-        for hint in _session_hints(result):
-            print(hint, file=sys.stderr)
-    except Exception:
-        pass
+    _after_print(_finish_tee, cmd, result, config, cut, path)
+    _print_session_hints(result)
     return result.returncode
 
 
-def execute(cmd, shell_codes=False):
-    """Execute an exec-array, returning CompletedProcess or None on OSError.
+def execute(cmd):
+    """Execute an exec-array in text mode; always a CompletedProcess.
 
-    shell_codes=True maps an exec failure like a shell instead
-    (_exec_failure: 127/126) and returns it as a synthetic result.
+    Refusal, timeout and exec failure (shell-style 127/126) come back as a
+    synthetic result whose stderr is actx's own message.
     """
     try:
         timeout_class = hang_policy.classify(cmd)
@@ -691,18 +808,54 @@ def execute(cmd, shell_codes=False):
 
     timeout = _timeout_seconds(_load_config(), timeout_class)
     try:
-        return subprocess.run(
-            cmd, capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=timeout,
-        )
+        return _spawn(cmd, timeout=timeout, text=True)
     except subprocess.TimeoutExpired:
         return _synthetic_result(cmd, TIMEOUT_EXIT_CODE, _timed_out_message(cmd, timeout))
     except OSError as exc:
-        if shell_codes:
-            code, message = _exec_failure(cmd, exc)
-            return _synthetic_result(cmd, code, message)
-        print(str(exc), file=sys.stderr)
-        return None
+        code, message = _exec_failure(cmd, exc)
+        return _synthetic_result(cmd, code, message)
+
+
+def recover(cmd):
+    """cli's error boundary after an actx internal error (never raises
+    further than its caller's guard).
+
+    Not started: run cmd once in bytes mode and write its masked output.
+    Started with a captured result: emit that result once through the
+    writer of its type. Started without a result: 1.
+    """
+    if _STATE.started:
+        result = _STATE.result
+        if result is None:
+            return 1
+        if isinstance(result.stdout, (bytes, bytearray)) or isinstance(
+            result.stderr, (bytes, bytearray)
+        ):
+            _write_masked_bytes(result)
+        else:
+            print_raw(result)
+        return result.returncode
+    try:
+        timeout_class = hang_policy.classify(cmd)
+    except Exception:
+        timeout_class = "default"
+    if timeout_class == "never_wrap":
+        return _refused(cmd, NEVER_WRAP_EXIT_CODE)
+    try:
+        timeout = _timeout_seconds(_load_config(), timeout_class)
+    except Exception:
+        timeout = 600
+    try:
+        result = _spawn(cmd, timeout=timeout, text=False)
+    except subprocess.TimeoutExpired:
+        print(_timed_out_message(cmd, timeout), file=sys.stderr)
+        return TIMEOUT_EXIT_CODE
+    except OSError as exc:
+        code, message = _exec_failure(cmd, exc)
+        print(message, file=sys.stderr)
+        return code
+    _write_masked_bytes(result)
+    return result.returncode
 
 
 def mask_text(text):
@@ -732,9 +885,7 @@ def raw_fallback(result):
     return result.returncode
 
 
-def tee_decision(config, tee_policy, returncode, grep_no_match=False):
-    if grep_no_match:
-        return False
+def tee_decision(config, tee_policy, returncode):
     if tee_policy == "always":
         return True
     tee = config.get("tee", {})
@@ -813,23 +964,73 @@ def print_lossless_stdout(cmd, result, config):
             print()
     if stderr:
         print(stderr, end="", file=sys.stderr)
-    _finish_tee(cmd, result, config, cut, path)
+    _after_print(_finish_tee, cmd, result, config, cut, path)
     return stdout
+
+
+# Exit-0 stderr of a compacted command: up to this many lines are shown
+# whole; longer stderr keeps its significant lines plus one hint line
+# naming the tee file that holds all of it.
+_STDERR_WHOLE_LINES = 20
+_SIGNIFICANT_RE = re.compile(
+    r"warn|error|fail|fatal|deprecat|panic|exception|traceback|denied"
+    r"|not found|cannot|unable|invalid|refused|timed out|no such file"
+    r"|abort|https?://",
+    re.IGNORECASE,
+)
+
+
+def _stderr_block(cmd, result, config, never_empty, path):
+    """(text, hint, tee_path) of the masked stderr printed after compacted
+    stdout. Exit != 0: whole. Exit 0: nothing in --failures mode
+    (never_empty=False); whole up to _STDERR_WHOLE_LINES lines; longer ->
+    significant lines + a hint, only when a tee holds the complete stderr
+    (path: the cut's tee, else one forced tee); otherwise whole."""
+    err = mask_text(result.stderr or "")
+    if not err or result.returncode != 0:
+        return err, None, None
+    if not never_empty:
+        return "", None, None
+    lines = _split_lines(err)
+    if len(lines) <= _STDERR_WHOLE_LINES or _text_bytes(err) > _STREAM_LIMIT:
+        return err, None, None
+    kept = [line for line in lines if _SIGNIFICANT_RE.search(line)]
+    hidden = len(lines) - len(kept)
+    if not hidden:
+        return err, None, None
+    tee_path = path or _tee_file(cmd, result, config)
+    if not tee_path:
+        return err, None, None
+    hint = "[actx] %d stderr lines hidden; full output: %s" % (hidden, tee_path)
+    return "".join(line + "\n" for line in kept), hint, tee_path
+
+
+def _write_line_block(text, stream):
+    """Write text, ending it with a newline; returns the bytes written."""
+    if not text:
+        return 0
+    stream.write(text)
+    written = _text_bytes(text)
+    if not text.endswith("\n"):
+        stream.write("\n")
+        written += 1
+    return written
 
 
 def compacted_result(cmd, result, config, compact_fn, tee_policy="auto",
                      strategy="compact", never_empty=True):
-    """Compact stdout for any exit code; fall back to raw output on error.
+    """Compact stdout for any exit code, then the masked stderr block
+    (_stderr_block); fall back to raw output on a build error.
 
     Never empty (TK-61): when the compactor yields only whitespace while raw
     stdout is not empty, the run_lossless form of stdout is printed instead.
     never_empty=False is the user-chosen `actx run --failures` mode, where
-    an empty result is the answer (green run -> silent).
+    an empty result is the answer (green run -> silent). The compactor sees
+    ANSI-free stdout. All text is built before anything is printed; steps
+    after printing never fall back, so output is never printed twice.
     """
-    if result is None:
-        return 1
     try:
-        out = compact_fn(result)
+        out = compact_fn(_ansi_free(result))
         if out is None:
             return raw_fallback(result)
         cut, path = False, None
@@ -847,25 +1048,32 @@ def compacted_result(cmd, result, config, compact_fn, tee_policy="auto",
         # Compactors keep raw lines: mask before printing (idempotent on
         # the already-masked lossless form).
         out = mask_text(out)
-        if out:
-            print(out, end="")
-            if not out.endswith("\n"):
-                print()
-        emitted = _text_bytes(out) + (1 if out and not out.endswith("\n") else 0)
-        raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-        tracking.record(
-            cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy=strategy,
-            store_text=not _secret_bearing_result(result),
-        )
-        _finish_tee(cmd, result, config, cut, path, tee_policy)
-        try:
-            for hint in _session_hints(result):
-                print(hint, file=sys.stderr)
-        except Exception:
-            pass
-        return result.returncode
+        err, hint, err_tee = _stderr_block(cmd, result, config, never_empty, path)
     except Exception:
         return raw_fallback(result)
+    emitted = _write_line_block(out, sys.stdout)
+    emitted += _write_line_block(err, sys.stderr)
+    emitted += _write_line_block(hint, sys.stderr)
+    raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
+    _after_print(
+        tracking.record,
+        cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy=strategy,
+        store_text=not _secret_bearing_result(result),
+    )
+    if err_tee:
+        # The hint already named the tee holding the whole result.
+        _after_print(_finish_tee, cmd, result, config, True, None)
+    else:
+        _after_print(_finish_tee, cmd, result, config, cut, path, tee_policy)
+    _print_session_hints(result)
+    return result.returncode
+
+
+def _ansi_free(result):
+    """A copy of result with ANSI escapes stripped from stdout."""
+    return subprocess.CompletedProcess(
+        result.args, result.returncode, _strip_ansi(result.stdout), result.stderr
+    )
 
 
 def stdout_compactor(parser):
@@ -881,8 +1089,6 @@ def stdout_compactor(parser):
 
 def run_errors(cmd):
     result = execute(cmd)
-    if result is None:
-        return 1
     err = mask_text(result.stderr or "")
     if err:
         print(err, end="", file=sys.stderr)
@@ -891,15 +1097,12 @@ def run_errors(cmd):
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
     emitted = _text_bytes(err)
     emitted += 1 if err and not err.endswith("\n") else 0
-    tracking.record(
+    _after_print(
+        tracking.record,
         cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="errors",
         store_text=not _secret_bearing_result(result),
     )
-    try:
-        for hint in _session_hints(result):
-            print(hint, file=sys.stderr)
-    except Exception:
-        pass
+    _print_session_hints(result)
     return result.returncode
 
 
@@ -922,8 +1125,6 @@ def digest_text(text, n=10):
 
 def run_digest(cmd, n=10):
     result = execute(cmd)
-    if result is None:
-        return 1
     if result.stdout:
         out = digest_text(mask_text(result.stdout), n)
         print(out, end="")
@@ -939,13 +1140,10 @@ def run_digest(cmd, n=10):
     emitted += _text_bytes(err)
     emitted += 1 if err and not err.endswith("\n") else 0
     raw_bytes = _text_bytes(result.stdout) + _text_bytes(result.stderr)
-    tracking.record(
+    _after_print(
+        tracking.record,
         cmd, cmd[0], raw_bytes, emitted, result.returncode, strategy="digest",
         store_text=not _secret_bearing_result(result),
     )
-    try:
-        for hint in _session_hints(result):
-            print(hint, file=sys.stderr)
-    except Exception:
-        pass
+    _print_session_hints(result)
     return result.returncode

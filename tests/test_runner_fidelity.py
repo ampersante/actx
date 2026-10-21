@@ -63,7 +63,7 @@ class _Base(unittest.TestCase):
 
     def run_mocked(self, completed, fn, *args, **kwargs):
         with mock.patch(
-            "actx_lib.runner.subprocess.run", return_value=completed
+            "actx_lib.runner._spawn", return_value=completed
         ) as spawn:
             result = self.capture(fn, *args, **kwargs)
         self.spawn = spawn
@@ -98,13 +98,13 @@ class RunContentTests(_Base):
     )
 
     def capture_bytes(self, completed, cmd):
-        """completed: a CompletedProcess, or an exception subprocess.run raises."""
+        """completed: a CompletedProcess, or an exception runner._spawn raises."""
         out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
         err = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
         if isinstance(completed, BaseException):
-            spawn = mock.patch("actx_lib.runner.subprocess.run", side_effect=completed)
+            spawn = mock.patch("actx_lib.runner._spawn", side_effect=completed)
         else:
-            spawn = mock.patch("actx_lib.runner.subprocess.run", return_value=completed)
+            spawn = mock.patch("actx_lib.runner._spawn", return_value=completed)
         with spawn:
             with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
                 rc = runner.run_content(cmd, self.config)
@@ -163,7 +163,7 @@ class RunLosslessTests(_Base):
         # nothing to recover, so no tee file either.
         self.config["tee"]["enabled"] = True
         with mock.patch(
-            "actx_lib.runner.subprocess.run",
+            "actx_lib.runner._spawn",
             side_effect=FileNotFoundError(2, "No such file"),
         ):
             rc, out, err = self.capture(
@@ -174,7 +174,7 @@ class RunLosslessTests(_Base):
         self.assertEqual(err, "tree: command not found\n")
         self.assertEqual(self.tee_files(), [])
         with mock.patch(
-            "actx_lib.runner.subprocess.run",
+            "actx_lib.runner._spawn",
             side_effect=PermissionError(13, "denied"),
         ):
             rc, out, err = self.capture(
@@ -495,7 +495,7 @@ class TreeBinaryTests(_Base):
 
     def test_missing_tree_binary_is_127(self):
         with mock.patch(
-            "actx_lib.runner.subprocess.run",
+            "actx_lib.runner._spawn",
             side_effect=FileNotFoundError(2, "No such file"),
         ):
             rc, out, err = self.capture(tree_filter.run, ["-L", "2"], self.config)

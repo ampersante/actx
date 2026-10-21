@@ -136,7 +136,7 @@ class GenericRunRedactionTests(unittest.TestCase):
         result = subprocess.CompletedProcess(
             ["python3", "-c", "x"], 0, "API_KEY=sk-abc123\nnormal line\n", ""
         )
-        with mock.patch("actx_lib.runner.subprocess.run", return_value=result):
+        with mock.patch("actx_lib.runner._spawn", return_value=result):
             with redirect_stdout(out), redirect_stderr(err):
                 rc = runner.run(["python3", "-c", "x"], TEE_ALWAYS_CONFIG)
         self.assertEqual(rc, 0)
@@ -156,7 +156,7 @@ class GenericRunRedactionTests(unittest.TestCase):
             ["python3", "-c", "x"], 0,
             '{"api_key": "z"}\n{"name": "keepme"}\n', "",
         )
-        with mock.patch("actx_lib.runner.subprocess.run", return_value=result):
+        with mock.patch("actx_lib.runner._spawn", return_value=result):
             with redirect_stdout(out), redirect_stderr(err):
                 rc = runner.run(["python3", "-c", "x"], CONFIG)
         self.assertEqual(rc, 0)
@@ -171,7 +171,7 @@ class GenericRunRedactionTests(unittest.TestCase):
         result = subprocess.CompletedProcess(
             ["python3", "-c", "x"], 0, "API_KEY=sk-abc123\n", ""
         )
-        with mock.patch("actx_lib.runner.subprocess.run", return_value=result):
+        with mock.patch("actx_lib.runner._spawn", return_value=result):
             with redirect_stdout(out), redirect_stderr(err):
                 rc = runner.run(["python3", "-c", "x"], CONFIG)
         self.assertEqual(rc, 0)
@@ -183,7 +183,7 @@ class GenericRunRedactionTests(unittest.TestCase):
         result = subprocess.CompletedProcess(
             ["python3", "-c", "x"], 0, "hello\n", ""
         )
-        with mock.patch("actx_lib.runner.subprocess.run", return_value=result):
+        with mock.patch("actx_lib.runner._spawn", return_value=result):
             with redirect_stdout(out), redirect_stderr(err):
                 rc = runner.run(["python3", "-c", "x"], CONFIG)
         self.assertEqual(rc, 0)
@@ -196,7 +196,7 @@ class GenericRunRedactionTests(unittest.TestCase):
         result = subprocess.CompletedProcess(
             ["python3", "-c", "x"], 0, "API_KEY=sk-abc123\n", ""
         )
-        with mock.patch("actx_lib.runner.subprocess.run", return_value=result):
+        with mock.patch("actx_lib.runner._spawn", return_value=result):
             with mock.patch(
                 "actx_lib.runner.redaction.redact_text",
                 side_effect=RuntimeError("boom"),
@@ -214,7 +214,7 @@ class GenericRunRedactionTests(unittest.TestCase):
         )
         out_sink = _BufferSink()
         err_sink = _BufferSink()
-        with mock.patch("actx_lib.runner.subprocess.run", return_value=result):
+        with mock.patch("actx_lib.runner._spawn", return_value=result):
             with redirect_stdout(out_sink), redirect_stderr(err_sink):
                 rc = runner.run_passthrough(["python3", "-c", "x"])
         self.assertEqual(rc, 0)

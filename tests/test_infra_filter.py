@@ -556,7 +556,7 @@ class InfraFailOpenTests(unittest.TestCase):
         out = io.StringIO()
         err = io.StringIO()
         with mock.patch(
-            "actx_lib.runner.subprocess.run", return_value=result
+            "actx_lib.runner._spawn", return_value=result
         ), mock.patch(
             "actx_lib.runner._redact_result", return_value=None
         ):
@@ -576,7 +576,7 @@ class AwsRawTextTests(unittest.TestCase):
         )
         out = io.StringIO()
         err = io.StringIO()
-        with mock.patch("actx_lib.runner.subprocess.run", return_value=result):
+        with mock.patch("actx_lib.runner._spawn", return_value=result):
             with redirect_stdout(out), redirect_stderr(err):
                 rc = infra_filter.run_aws(["sts", "get-caller-identity"], CONFIG)
         return rc, out.getvalue()

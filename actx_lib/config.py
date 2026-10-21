@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 
 DEFAULT_CONFIG = {
     "tee": {
@@ -32,17 +33,56 @@ def _config_path():
     return os.path.expanduser("~/.config/actx/config.json")
 
 
-def _merge(defaults, loaded):
+# Keys whose default is an int but which accept any number (consumed by
+# float()); every other int default is strict (slices, counts).
+_NUMBER_KEYS = frozenset({"timeouts.default_s", "timeouts.generous_s"})
+
+# Dotted keys already warned about in this process.
+_WARNED = set()
+
+
+def _copy(value):
+    return json.loads(json.dumps(value))
+
+
+def _type_ok(dotted, default, value):
+    # bool is checked first: a bool is never a number and vice versa.
+    if isinstance(default, bool) or isinstance(value, bool):
+        return isinstance(default, bool) and isinstance(value, bool)
+    if dotted in _NUMBER_KEYS:
+        return isinstance(value, (int, float))
+    return isinstance(value, type(default))
+
+
+def _wrong_type(dotted):
+    if dotted not in _WARNED:
+        _WARNED.add(dotted)
+        print(
+            "[actx] config: '%s' has wrong type, using default" % dotted,
+            file=sys.stderr,
+        )
+
+
+def _merge(defaults, loaded, prefix=""):
+    """defaults overlaid with loaded, recursively; a value whose type
+    differs from its default's falls back to the default with one warning
+    per process. Keys absent from defaults pass through unchanged."""
     if not isinstance(loaded, dict):
-        return json.loads(json.dumps(defaults))
+        return _copy(defaults)
     merged = dict(loaded)
-    for key, value in defaults.items():
-        loaded_value = loaded.get(key)
-        if isinstance(value, dict) and isinstance(loaded_value, dict):
-            merged[key] = dict(value)
-            merged[key].update(loaded_value)
-        elif key not in loaded:
-            merged[key] = value
+    for key, default in defaults.items():
+        dotted = prefix + key
+        if key not in loaded:
+            merged[key] = _copy(default)
+        elif isinstance(default, dict):
+            if isinstance(loaded[key], dict):
+                merged[key] = _merge(default, loaded[key], dotted + ".")
+            else:
+                _wrong_type(dotted)
+                merged[key] = _copy(default)
+        elif not _type_ok(dotted, default, loaded[key]):
+            _wrong_type(dotted)
+            merged[key] = _copy(default)
     return merged
 
 

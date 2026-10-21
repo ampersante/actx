@@ -1,3 +1,17 @@
+_____________________________ test_name ______________________________________
+
+    def test_name():
+>       assert False
+E       assert False
+
+test_foo.py:5: AssertionError
+_____________________________ test_other ______________________________________
+
+    def test_other():
+>       assert 1 == 2
+E       assert 1 == 2
+
+test_bar.py:8: AssertionError
 test_bar.py:
   test_bar.py::test_other - assert 1 == 2
 test_foo.py:

@@ -7,8 +7,6 @@ from actx_lib.filters import compact_profiles
 def _run_compact(args, config, parser):
     cmd = list(args)
     result = runner.execute(cmd)
-    if result is None:
-        return 1
     return runner.compacted_result(
         cmd, result, config, runner.stdout_compactor(parser), strategy="linter"
     )

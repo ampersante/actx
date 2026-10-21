@@ -1,3 +1,4 @@
+import os
 import sys
 
 import actx_lib.rewriter as rewriter
@@ -101,14 +102,18 @@ def _has_class(head):
         return False
 
 
+# Reserved custom heads already warned about in this process.
+_WARNED_RESERVED = set()
+
+
 def _custom_head_requested(command, config, registry):
     """True when command is a user-declared custom head (TK-39).
 
     Validation: only a list of non-empty strings counts; names reserved for
     builtin commands, REGISTRY heads or heads with an output class (TK-61:
     cat/grep/... are dispatched by class before custom heads) are ignored
-    with a stderr warning (they keep their native semantics). custom_heads
-    never extends the §7
+    with a stderr warning, at most once per process per head (they keep
+    their native semantics). custom_heads never extends the §7
     rewriter whitelist - it only gives `actx <head> args` the semantics of
     `actx run <head> args`."""
     heads = config.get("custom_heads", [])
@@ -118,10 +123,12 @@ def _custom_head_requested(command, config, registry):
         if not isinstance(head, str) or not head:
             continue
         if head in _BUILTIN_COMMANDS or head in registry or _has_class(head):
-            print(
-                "actx: ignoring reserved custom head: %s" % head,
-                file=sys.stderr,
-            )
+            if head not in _WARNED_RESERVED:
+                _WARNED_RESERVED.add(head)
+                print(
+                    "actx: ignoring reserved custom head: %s" % head,
+                    file=sys.stderr,
+                )
             continue
         if head == command:
             return True
@@ -187,9 +194,6 @@ def main(argv):
             print(rewritten)
         return 0
 
-    if command == "run":
-        return _run(args, raw)
-
     if command == "gain":
         try:
             from actx_lib import gain
@@ -234,6 +238,61 @@ def main(argv):
             return 1
         return tracking_cli.main(args)
 
+    return _guarded_dispatch(command, args, raw, ultra)
+
+
+def _discard_stdout():
+    """After EPIPE: point fd 1 at /dev/null so the interpreter's exit-time
+    flush of buffered output cannot fail a second time."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+
+
+def _command_argv(command, args):
+    """The user's command argv for the boundary's recovery spawn."""
+    if command == "run":
+        return _parse_run_args(args)[1] or None
+    return [command] + args
+
+
+def _guarded_dispatch(command, args, raw, ultra):
+    """The one error boundary around every command-running path.
+
+    BrokenPipe on stdout -> the command's exit code (141 when none ran);
+    any other internal error -> one `[actx] internal error: <Type>` line,
+    then runner.recover: a command not yet started is run once, a captured
+    result is emitted once; a command is never started twice. Steps after
+    printing are guarded where they run, so they never reach here.
+    """
+    from actx_lib import runner
+
+    runner._STATE.reset()
+    try:
+        code = _dispatch_command(command, args, raw, ultra)
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        _discard_stdout()
+        result = runner._STATE.result
+        return result.returncode if result is not None else 141
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:
+        try:
+            print("[actx] internal error: %s" % type(exc).__name__, file=sys.stderr)
+            cmd = _command_argv(command, args)
+            return runner.recover(cmd) if cmd else 1
+        except Exception:
+            return 1
+
+
+def _dispatch_command(command, args, raw, ultra):
+    if command == "run":
+        return _run(args, raw)
+
     from actx_lib import config
     from actx_lib import runner
     from actx_lib import tracking
@@ -275,7 +334,7 @@ def main(argv):
         return runner.run_lossless(argv, cfg)
 
     # Order is fixed (TK-39): raw/bypass -> classes/REGISTRY ->
-    # custom_heads -> unknown. cfg is already loaded in main; calling
+    # custom_heads -> unknown. cfg is already loaded above; calling
     # runner.run directly (not _run) avoids a second config load.
     # raw/bypass for custom heads are handled by the shared branches above.
     if _custom_head_requested(command, cfg, REGISTRY):

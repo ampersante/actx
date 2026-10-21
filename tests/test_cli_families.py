@@ -6,6 +6,7 @@ shim executables (tmp dir, PATH injection, no network) - the precedents are
 test_run_modes.py and test_hook.py.
 """
 
+import io
 import json
 import os
 import stat
@@ -14,8 +15,10 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
 
-from actx_lib import cli_families, hang_policy, rewriter, security_gate
+from actx_lib import cli, cli_families, hang_policy, rewriter, security_gate
+from actx_lib.filters import REGISTRY
 from actx_lib.installer import INSTRUCTION_SECTION
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1203,6 +1206,17 @@ class CustomHeadsTests(_ShimTestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("ok", p.stdout)
         self.assertIn("ignoring reserved custom head: cat", p.stderr)
+        # At most once per process, even when the check runs twice (TK-58).
+        cli._WARNED_RESERVED.clear()
+        self.addCleanup(cli._WARNED_RESERVED.clear)
+        cfg = {"custom_heads": ["cat", "mytool"]}
+        err = io.StringIO()
+        with redirect_stderr(err):
+            cli._custom_head_requested("mytool", cfg, REGISTRY)
+            cli._custom_head_requested("mytool", cfg, REGISTRY)
+        self.assertEqual(
+            err.getvalue().count("ignoring reserved custom head: cat"), 1
+        )
 
     def test_undeclared_head_error_mentions_run(self):
         self.write_config({"custom_heads": ["mytool"]})

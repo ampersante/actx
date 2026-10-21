@@ -4,8 +4,6 @@ from actx_lib import runner
 def _run_compact(args, config, parser):
     cmd = list(args)
     result = runner.execute(cmd)
-    if result is None:
-        return 1
     return runner.compacted_result(
         cmd, result, config, runner.stdout_compactor(parser), strategy="package"
     )
