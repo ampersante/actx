@@ -36,6 +36,10 @@ _WRAPPER_COMMANDS = {
     "systemd-run",
 }
 
+# `env` options that take the next token as their value (that token is not
+# the command). -S is absent on purpose: its value is a command string.
+_ENV_VALUE_OPTIONS = {"-u", "-C", "-P", "--unset", "--chdir"}
+
 # Pre-compiled fast regexes
 _RE_STRIP_REDIRECTION = re.compile(r"^[0-9]*[<>]>?&?|[&;]+$")
 _RE_PIPE_TO_SHELL = re.compile(
@@ -48,7 +52,7 @@ _RE_EXFIL_VARS = re.compile(
     re.IGNORECASE,
 )
 _RE_SENSITIVE_QUICK_CHECK = re.compile(
-    r"(?:\.env|\benv\b|\.e[\w?*]{2}|\.ssh|id_|credentials|shadow|gshadow|sudoers|passwd|password|token|key|cert|\.pem|\.pfx|\.p12|\.pkcs12|\.kdbx|\.netrc|\.npmrc|\.pypirc|\.codex-global-state|\.kube|~|\$|/etc|\[[a-z0-9]\]"
+    r"(?:\.env|\benv\b|\.e[\w?*]{2}|\.ssh|id_|credentials|shadow|gshadow|sudoers|passwd|password|token|key|cert|\.pem|\.pfx|\.p12|\.pkcs12|\.kdbx|\.netrc|\.npmrc|\.pypirc|\.codex-global-state|\.kube|~|\$|/etc|\[[a-z0-9]\]|/proc/"
     r"|pgpass|my\.cnf|snowsql|databrickscfg|mcp\.json|key\.properties|wrangler|gcloud|vercel|netlify|supabase|flyctl|\.fly|railway|clerk|tfstate|tfvars|auth\.json|claude_desktop_config"
     # TK-48: without these the home records above are dead code — the absolute
     # forms below match no other alternative, and _is_sensitive_path early-
@@ -145,6 +149,8 @@ def _unwrap_tokens(tokens: list[str]) -> list[str]:
                     or tokens[idx].isdigit()
                     or bool(re.match(r"^\d+[smhd]?$", tokens[idx]))
                 ):
+                    if base == "env" and tokens[idx] in _ENV_VALUE_OPTIONS:
+                        idx += 1
                     idx += 1
                 continue
             if "=" in tok and not tok.startswith("-"):

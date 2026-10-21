@@ -307,6 +307,17 @@ def _is_sensitive_path(path: str, check_secret_keywords: bool = False) -> bool:
         if any(fnmatch.fnmatch(stem, pattern) for pattern in _PROTECTED_GLOB_ENTRIES):
             return False
 
+    # Process environment: /proc/<self|thread-self|pid|$$>/environ, also
+    # through /proc/self/root, task/<tid> or a glob of the name.
+    # normpath keeps a leading '//', so the prefix is checked after collapsing
+    # it; a glob must carry a literal character (`/proc/self/*` is a listing).
+    if (
+        re.sub(r"^/+", "/", norm_path).startswith("/proc/")
+        and fnmatch.fnmatch("environ", base_lower)
+        and base_lower.strip("*?")
+    ):
+        return True
+
     # Data-driven protected-path table (basename / glob / $HOME-anchored records)
     candidate = os.path.expandvars(os.path.expanduser(norm_path))
     if _matches_protected_paths(candidate):
@@ -393,6 +404,148 @@ def _is_sensitive_path(path: str, check_secret_keywords: bool = False) -> bool:
     return False
 
 
+# Static-gate limits of the environment checks below (known, not closed
+# here): names built at runtime (`"en"+"viron"`, getattr/dir loops, a glob
+# or brace form shell-expanded to `environ`); a shell or program spawned from
+# inline code without the literal word (os.system("pri"+"ntenv"), execSync,
+# `node -p process`); wrappers before a bare `env` other than the unwrapped
+# ones; quote splitting inside a word (`cat /pr''oc/self/environ`) and cd +
+# relative `environ`; other tools that read a path or print the environment
+# (find -name environ, ipython, tsx, ts-node, docker exec, ssh); jq `env`
+# inside a longer program; `env -S '<command>'`; variable names outside the
+# credential-looking class (CI_JOB_JWT, SENTRY_DSN) and computed names
+# (`printenv "$X"`, `declare -p $(compgen -v)`).
+
+# Credential-looking variable names, for reading ONE variable by name
+# (`printenv NAME`, `declare -p NAME`, inline `getenv(NAME)`). AUTHOR and
+# AWS_REGION are ordinary names; SSH_AUTH_SOCK, GITHUB_PAT, DATABASE_URL are not.
+_RE_SECRET_VAR_NAME = re.compile(
+    r"KEY|SECRET|TOKEN|PASS|CREDENTIAL|AUTH(?!OR)|OPENAI|ANTHROPIC|GITHUB|STRIPE|DATABASE_URL",
+    re.IGNORECASE,
+)
+
+# Builtins that print shell variables (the exported ones are the process
+# environment) when called without an operand that sets or declares one.
+_VARIABLE_LISTING_BUILTINS = frozenset({"export", "declare", "typeset", "readonly", "local"})
+
+# awk / jq program text naming the environment.
+_RE_PROGRAM_ENV = re.compile(r"ENVIRON|\$ENV\b")
+
+# Per interpreter: (last letters of a single-dash flag cluster that takes the
+# inline code as its value, flags with a separate value that is not the
+# script). `python -E`, `ruby -E enc`, `perl -C` are not code flags.
+_NODE_VALUE_FLAGS = frozenset({
+    "-r", "-C", "--require", "--import", "--loader", "--experimental-loader",
+    "--env-file", "--conditions", "--title", "--stack-size", "--disable-warning",
+})
+_INTERPRETER_FLAGS = {
+    "python": ("c", frozenset({"-W", "-X", "-m"})),
+    "node": ("ep", _NODE_VALUE_FLAGS),
+    "nodejs": ("ep", _NODE_VALUE_FLAGS),
+    "bun": ("ep", frozenset({"-r", "--preload", "--require", "--import"})),
+    "deno": ("", frozenset()),
+    "ruby": ("e", frozenset({"-I", "-r", "-C", "-E"})),
+    "perl": ("eE", frozenset({"-I"})),
+    "php": ("r", frozenset({"-d", "-c", "-f"})),
+    "lua": ("e", frozenset({"-l"})),
+}
+
+_RE_REDIRECTION = re.compile(r"[0-9]*[<>]+&?")
+# ps flags whose next token is a value, not a BSD option cluster.
+_PS_VALUE_FLAG_LETTERS = "CpqstuUgGoO"
+
+# Inline interpreter code that can reach the process environment. Plain
+# substring rules, no per-language parsing: `environ` (os.environ, environb,
+# from os import environ, /proc/self/environ), `__dict__` / vars() (module
+# namespace of os), ENV (ruby, perl, php), a quoted "env" (process["env"]),
+# getenv() without a name. Rare false denials inside inline code are accepted.
+_RE_INLINE_ENV_DUMP = re.compile(r"environ|__dict__|\bvars\s*\(|ENV|[\"']env[\"']|getenv\s*\(\s*\)")
+
+def _drop_redirections(tokens: list[str]) -> list[str]:
+    """Tokens without redirections (`2>&1`, `> out`, `>> out`, `< in`): a
+    redirect suffix must not count as an operand or argument. The tokenizer
+    splits `>>` and `2>>` into separate operator tokens, so operator tokens
+    keep skipping until the target word."""
+    words = []
+    skip_target = False
+    for tok in tokens:
+        m = _RE_REDIRECTION.match(tok)
+        is_bare_operator = bool(m) and m.end() == len(tok)
+        if skip_target and not is_bare_operator:
+            skip_target = False
+            continue
+        if m:
+            skip_target = is_bare_operator
+            continue
+        words.append(tok)
+    return words
+
+
+def _inline_code(head: str, args: list[str]) -> str | None:
+    """Code passed on an interpreter command line, or None. Only the
+    interpreter's own flags are scanned: the first operand (script, `deno
+    run|test`) ends them, so script arguments never count."""
+    letters, value_flags = _INTERPRETER_FLAGS["python" if head.startswith("python") else head]
+    i = 0
+    while i < len(args):
+        t = args[i]
+        if head == "deno" and t == "eval":
+            return " ".join(args[i + 1:])
+        if t == "--" or not t.startswith("-"):
+            if head == "bun" and t == "run":
+                i += 1
+                continue
+            return None
+        if t.startswith(("--eval=", "--print=")):
+            return t.split("=", 1)[1]
+        if head.startswith("python") and t.startswith("-c") and len(t) > 2:
+            return t[2:]
+        if t in ("--print", "--eval") or (len(t) > 1 and t[0] == "-" and t[1] != "-" and t[-1] in letters):
+            if t == "-p" and i + 1 < len(args) and args[i + 1].startswith("-"):
+                i += 1  # `node -p -e CODE`: -p has no code of its own
+                continue
+            return args[i + 1] if i + 1 < len(args) else ""
+        i += 2 if t in value_flags else 1
+    return None
+
+
+def _lists_shell_variables(head: str, args: list[str]) -> bool:
+    """True for `set`, `export -p`, `declare -px`, `typeset -g`, `typeset -m
+    'PAT'`, `declare -p SECRET_NAME`: builtins that print variable values.
+    `set -e`, `set --`, `export NAME=value`, `declare -f` (functions) only
+    set or print something else."""
+    if head == "set":
+        return not args
+    if head not in _VARIABLE_LISTING_BUILTINS:
+        return False
+    flags = [a[1:] for a in args if a.startswith("-") and not a.startswith("--")]
+    operands = [a for a in args if not a.startswith("-")]
+    if any("f" in f or "F" in f for f in flags):
+        return False
+    if not operands or any("m" in f for f in flags):
+        return True
+    return any("p" in f for f in flags) and any(_RE_SECRET_VAR_NAME.search(o) for o in operands)
+
+
+def _ps_prints_environment(args: list[str]) -> bool:
+    """True for the BSD `e` modifier (`ps eww`, `ps auxe`: a bare-letter
+    argument with `e` that is not an option value), macOS `-E` / `-Eww`, and
+    any `environ` format field."""
+    prev = ""
+    for a in args:
+        if "environ" in a.lower():
+            return True
+        if a.startswith("-"):
+            if not a.startswith("--") and "E" in a:
+                return True
+        elif a.isalpha() and "e" in a:
+            takes_value = prev.startswith("--") or (prev.startswith("-") and prev[-1] in _PS_VALUE_FLAG_LETTERS)
+            if not takes_value:
+                return True
+        prev = a
+    return False
+
+
 def _env_is_effective_head(raw_tokens: list[str]) -> bool:
     """True when `env` is the effective command head - directly or behind an
     actx prefix (`env ...`, `actx run env ...`)."""
@@ -417,13 +570,14 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
                     pass
 
     tokens = _unwrap_tokens(raw_tokens)
+    words = _drop_redirections(tokens)
     excluded_src = None
 
     # Special case: 'env' or assignments alone without a subsequent command.
     # Parity behind an actx prefix (TK-39): `actx run env` / `actx --raw run
     # env` must deny exactly like bare `env` - an empty remainder after the
     # full strip is decided on the original tokens, never silently allowed.
-    if not tokens and _env_is_effective_head(raw_tokens):
+    if not words and _env_is_effective_head(raw_tokens):
         return SecurityDecision(
             decision="deny",
             reason="Dumping or setting process environment via 'env' without a command is prohibited",
@@ -475,64 +629,70 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
         head.startswith("python")
         or head in ("node", "nodejs", "ruby", "perl", "php", "lua", "bun", "deno")
     ) and len(tokens) >= 2:
-        eval_idx = -1
-        for i, t in enumerate(tokens[1:], 1):
-            if t in ("-c", "-e", "-r", "--eval") or (t.startswith("-c") and len(t) > 2):
-                eval_idx = i
-                break
-        if eval_idx != -1:
-            target_idx = eval_idx + 1
-            if tokens[eval_idx].startswith("-c") and len(tokens[eval_idx]) > 2:
-                script_body = tokens[eval_idx][2:]
-            elif target_idx < len(tokens):
-                script_body = tokens[target_idx]
-            else:
-                script_body = ""
-
-            if script_body:
-                # Check for sensitive path tokens or exfiltration in inline script
-                for bad_token in (
-                    ".env",
-                    "id_rsa",
-                    "id_ed25519",
-                    "credentials",
-                    "/etc/shadow",
-                    "authorized_keys",
-                    "known_hosts",
-                    "/etc/sudoers",
-                    ".codex-global-state",
-                    ".netrc",
-                    ".kube",
-                ):
-                    if bad_token in script_body:
-                        return SecurityDecision(
-                            decision="deny",
-                            reason=f"Inline {head} script accesses sensitive path '{bad_token}'",
-                            category="T1_CREDENTIAL_ACCESS",
-                        )
-                # Check for env dumping in inline script
-                if any(dump in script_body for dump in ("os.environ", "process.env", "ENV.to_h", "ENV[")):
+        script_body = _inline_code(head, tokens[1:])
+        if script_body:
+            # Check for sensitive path tokens or exfiltration in inline script
+            for bad_token in (
+                ".env",
+                "id_rsa",
+                "id_ed25519",
+                "credentials",
+                "/etc/shadow",
+                "authorized_keys",
+                "known_hosts",
+                "/etc/sudoers",
+                ".codex-global-state",
+                ".netrc",
+                ".kube",
+            ):
+                if bad_token in script_body:
                     return SecurityDecision(
                         decision="deny",
-                        reason=f"Inline {head} script dumps process environment secrets",
+                        reason=f"Inline {head} script accesses sensitive path '{bad_token}'",
                         category="T1_CREDENTIAL_ACCESS",
                     )
-                # Check for socket connections in inline script
-                if any(net_mod in script_body for net_mod in ("socket", "net.connect", "TCPSocket", "fsockopen", "urllib.request", "requests")):
-                    return SecurityDecision(
-                        decision="deny",
-                        reason=f"Inline {head} script establishes network connections",
-                        category="T3_OBFUSCATION_EVAL",
-                    )
+            # Check for env dumping in inline script
+            if _RE_INLINE_ENV_DUMP.search(script_body) or (
+                "getenv" in script_body and _RE_SECRET_VAR_NAME.search(script_body)
+            ):
+                return SecurityDecision(
+                    decision="deny",
+                    reason=f"Inline {head} script dumps process environment secrets",
+                    category="T1_CREDENTIAL_ACCESS",
+                )
+            # Check for socket connections in inline script
+            if any(net_mod in script_body for net_mod in ("socket", "net.connect", "TCPSocket", "fsockopen", "urllib.request", "requests")):
+                return SecurityDecision(
+                    decision="deny",
+                    reason=f"Inline {head} script establishes network connections",
+                    category="T3_OBFUSCATION_EVAL",
+                )
 
-    # Special case: environment variable dumping (printenv, env)
-    if head == "printenv" and (not tokens[1:] or any(tok.startswith("-") for tok in tokens[1:])):
+    # Special case: environment variable dumping (printenv, env, builtins,
+    # ps, awk/jq program text). Argument tests run on `words` - redirections
+    # (`2>&1`, `> out`) are not arguments.
+    whead = os.path.basename(words[0]) if words else ""
+    wargs = words[1:]
+    if whead == "printenv" and (
+        not wargs or any(tok.startswith("-") or _RE_SECRET_VAR_NAME.search(tok) for tok in wargs)
+    ):
         return SecurityDecision(
             decision="deny",
             reason="Dumping entire process environment is prohibited (credential leakage)",
             category="T1_CREDENTIAL_ACCESS",
         )
-    if head == "env" and not tokens[1:]:
+    if (
+        _lists_shell_variables(whead, wargs)
+        or (whead == "ps" and _ps_prints_environment(wargs))
+        or (whead in ("awk", "gawk", "mawk", "nawk", "jq") and any(_RE_PROGRAM_ENV.search(a) for a in wargs))
+        or (whead == "jq" and "env" in wargs)
+    ):
+        return SecurityDecision(
+            decision="deny",
+            reason=f"Printing shell variables or process environment via '{whead}' is prohibited (credential leakage)",
+            category="T1_CREDENTIAL_ACCESS",
+        )
+    if whead == "env" and not wargs:
         return SecurityDecision(
             decision="deny",
             reason="Dumping entire process environment is prohibited (credential leakage)",
