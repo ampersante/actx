@@ -35,10 +35,31 @@ _RE_PROCESS_SUBST = re.compile(
     r"(?:sh|bash|zsh|dash|ksh|source|\.|\btemp\b|\btee\b)\s+(?:-[a-zA-Z0-9_\-]+\s+)*(?:<\s*)?[<>]?\(\s*(?:curl|wget|fetch|base64|xxd|echo|printf|cat|head|tail|gzip|gunzip|tar|openssl)",
     re.IGNORECASE,
 )
-_RE_INLINE_SOCKET = re.compile(
-    r"(python|python3|perl|ruby|node|nodejs|php)\s+.*(-c|-e|-r|--eval)\s+.*(socket|subprocess\.Popen|pty\.spawn|connect\(|fsockopen)",
+# TK-63: the former single regex
+#   (interp)\s+.*(flag)\s+.*(target)
+# backtracked quadratically-to-cubically on long commands. Three stages
+# searched left to right with `pos` accept the same strings: no interpreter
+# or flag name occurs inside another at a non-zero offset, so the leftmost
+# stage match also has the smallest end, and later stages only need to start
+# from there.
+_RE_INLINE_SOCKET_INTERP = re.compile(
+    r"(python|python3|perl|ruby|node|nodejs|php)\s", re.IGNORECASE | re.DOTALL
+)
+_RE_INLINE_SOCKET_FLAG = re.compile(r"(-c|-e|-r|--eval)\s", re.IGNORECASE | re.DOTALL)
+_RE_INLINE_SOCKET_TARGET = re.compile(
+    r"(socket|subprocess\.Popen|pty\.spawn|connect\(|fsockopen)",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+def _inline_socket_search(command: str) -> bool:
+    interp = _RE_INLINE_SOCKET_INTERP.search(command)
+    if interp is None:
+        return False
+    flag = _RE_INLINE_SOCKET_FLAG.search(command, interp.end())
+    if flag is None:
+        return False
+    return _RE_INLINE_SOCKET_TARGET.search(command, flag.end()) is not None
 
 
 # ----------------------------------------------------------------------
@@ -187,7 +208,7 @@ def _check_obfuscation_and_eval(command: str, raw_tokens: list[str]) -> Security
                 )
 
     # 4. Inline runtime socket connection
-    if ("-c" in command or "-e" in command or "--eval" in command or "-r" in command) and _RE_INLINE_SOCKET.search(command):
+    if ("-c" in command or "-e" in command or "--eval" in command or "-r" in command) and _inline_socket_search(command):
         return SecurityDecision(
             decision="deny",
             reason="Inline script establishes raw network socket connection",

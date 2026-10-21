@@ -6,6 +6,11 @@ command against the CURRENT actx_lib.security_gate under the same fixed
 environment recorded in the fixture. REQ-01: decision, category and reason
 must be byte-identical - a passing run here is the mechanical proof that the
 TK-59 package split changed no gate behavior.
+
+Later intentional changes update only their own entries, each classified in
+the task's plan: TK-63 changed 3 entries (`cargo publish --dry-run` and
+`pg_restore --list dump.bin` lost their ask; the `os.environ` inline entry
+kept its deny with the environment reason instead of the `.env` path reason).
 """
 
 import json

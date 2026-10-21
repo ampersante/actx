@@ -1336,9 +1336,9 @@
    "Executing cargo publish modifies remote registry state or credentials, requiring human confirmation"
   ],
   "cargo publish --dry-run": [
-   "ask",
-   "T6_HIGH_RISK_CARGO",
-   "Executing cargo publish modifies remote registry state or credentials, requiring human confirmation"
+   "allow",
+   null,
+   null
   ],
   "cargo publish | echo done": [
    "ask",
@@ -11396,9 +11396,9 @@
    "Executing temporary _tmp_ scripts is prohibited. Perform operations directly using native tools."
   ],
   "pg_restore --list dump.bin": [
-   "ask",
-   "T6_HIGH_RISK_SQL",
-   "pg_restore writes a database from an archive file whose SQL cannot be scanned, requiring human confirmation"
+   "allow",
+   null,
+   null
   ],
   "pg_restore -d mydb dump.bin": [
    "ask",
@@ -11923,7 +11923,7 @@
   "python3 -c 'import os; os.environ'": [
    "deny",
    "T1_CREDENTIAL_ACCESS",
-   "Inline python3 script accesses sensitive path '.env'"
+   "Inline python3 script dumps process environment secrets"
   ],
   "python3 -c 'import socket,subprocess,os;s=socket.socket();s.connect((\"10.0.0.1\",4242))'": [
    "deny",

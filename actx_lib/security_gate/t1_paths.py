@@ -464,6 +464,15 @@ _RE_INLINE_ENV_DUMP = re.compile(
     r"\benvironb?\b|__dict__|\bvars\s*\(\s*(?:os|posix)?\s*\)|\bENV\b|\$_ENV\b|[\"']env[\"']|getenv\s*\(\s*\)"
 )
 
+# TK-63: `.env` as attribute access (os.environ, process.env.X, f().env) -
+# preceded by an identifier char, `)` or `]`, not followed by an identifier
+# char or a quote. Selects the reason text only; the `.env` hit still denies.
+_RE_ENV_ATTR = re.compile(r"(?<=[\w)\]])\.env(?:ironb?)?(?![\w'\"])")
+
+
+def _env_hits_are_attributes(script_body: str) -> bool:
+    return script_body.count(".env") == len(_RE_ENV_ATTR.findall(script_body))
+
 def _drop_redirections(tokens: list[str]) -> list[str]:
     """Tokens without redirections (`2>&1`, `> out`, `>> out`, `< in`): a
     redirect suffix must not count as an operand or argument. The tokenizer
@@ -623,7 +632,7 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
                 # <-> engine module cycle (engine imports _check_sensitive_
                 # paths at module load time).
                 from .engine import evaluate_security
-                inner_dec = evaluate_security(inner_cmd)
+                inner_dec = evaluate_security(inner_cmd, _nested=True)
                 if inner_dec.decision != "allow":
                     return inner_dec
 
@@ -649,9 +658,12 @@ def _check_sensitive_paths(command: str, raw_tokens: list[str]) -> SecurityDecis
                 ".kube",
             ):
                 if bad_token in script_body:
+                    reason = f"Inline {head} script accesses sensitive path '{bad_token}'"
+                    if bad_token == ".env" and _env_hits_are_attributes(script_body):
+                        reason = f"Inline {head} script dumps process environment secrets"
                     return SecurityDecision(
                         decision="deny",
-                        reason=f"Inline {head} script accesses sensitive path '{bad_token}'",
+                        reason=reason,
                         category="T1_CREDENTIAL_ACCESS",
                     )
             # Check for env dumping in inline script

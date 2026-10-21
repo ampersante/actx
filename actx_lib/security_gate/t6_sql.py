@@ -33,6 +33,41 @@ def _sql_ask(reason: str) -> SecurityDecision:
     )
 
 
+# TK-63: `pg_restore -l` prints the archive's table of contents to stdout and
+# connects to no database (https://www.postgresql.org/docs/current/app-pgrestore.html,
+# "-l --list"). Closed grammar: only list/format/verbose flags plus exactly one
+# archive operand; -d/--dbname, -f/--file, clusters, abbreviations and every
+# other flag keep the ask.
+_PG_RESTORE_FORMATS = frozenset({"c", "d", "t", "custom", "directory", "tar"})
+_PG_RESTORE_BOOL_FLAGS = frozenset({"-l", "--list", "-v", "--verbose"})
+
+
+def _pg_restore_list_only(args: list[str]) -> bool:
+    listed = False
+    operands = 0
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in _PG_RESTORE_BOOL_FLAGS:
+            listed = listed or tok in ("-l", "--list")
+        elif tok == "-F":
+            if i + 1 >= len(args) or args[i + 1] not in _PG_RESTORE_FORMATS:
+                return False
+            i += 1
+        elif tok.startswith("--format="):
+            if tok[len("--format="):] not in _PG_RESTORE_FORMATS:
+                return False
+        elif tok.startswith("-F"):
+            if tok[2:] not in _PG_RESTORE_FORMATS:
+                return False
+        elif tok.startswith("-"):
+            return False
+        else:
+            operands += 1
+        i += 1
+    return listed and operands == 1
+
+
 def _check_sql(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
     """T6_HIGH_RISK_SQL (TK-43, REQ-03): full SQL payload gating for
     psql/sqlite3/duckdb plus pg_restore.
@@ -68,6 +103,8 @@ def _check_sql(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
             return None
         head = os.path.basename(tokens[0])
         if head == "pg_restore":
+            if _pg_restore_list_only(tokens[1:]):
+                return None
             return _sql_ask(
                 "pg_restore writes a database from an archive file whose SQL cannot be scanned, requiring human confirmation"
             )

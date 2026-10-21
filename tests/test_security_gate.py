@@ -642,7 +642,9 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_ask("env cargo clean", "T6_HIGH_RISK_CARGO")
         self.assert_ask("cargo check && cargo clean", "T6_HIGH_RISK_CARGO")
         self.assert_ask("cargo publish", "T6_HIGH_RISK_CARGO")
-        self.assert_ask("cargo publish --dry-run", "T6_HIGH_RISK_CARGO")
+        # TK-63: the closed dry-run grammar is local-only -> no decision.
+        self.assertEqual(security_gate.evaluate_security("cargo publish --dry-run").decision, "allow")
+        self.assert_ask("cargo publish --dry-run --token x", "T6_HIGH_RISK_CARGO")
         self.assert_ask("cargo yank --version 1.0.0", "T6_HIGH_RISK_CARGO")
         self.assert_ask("cargo owner --add user", "T6_HIGH_RISK_CARGO")
         self.assert_ask("cargo login token123", "T6_HIGH_RISK_CARGO")

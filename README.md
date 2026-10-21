@@ -237,8 +237,9 @@ Known limitations on the Antigravity (gemini) schema: no `additionalContext`
 field (agents rely on the Tier-2 block only), and no true "defer" verdict —
 `decision` is required, so commands with no actx verdict and no rewrite return
 `ask` (the documented defer primitive; it prompts but honors the "Always Allow"
-cache). Note that `--dangerously-skip-permissions` bypasses the hook layer
-entirely — actx cannot protect an agent run under that flag.
+cache). Under `--dangerously-skip-permissions` Antigravity still honours a hook
+`deny`, but it auto-approves `ask` and `force_ask`, so a gate confirmation
+(e.g. `git push --force`) runs without a prompt.
 
 | Agent | Mechanism | Install | Auto-rewrite |
 |---|---|---|---|
@@ -263,6 +264,15 @@ entirely — actx cannot protect an agent run under that flag.
 - **Devin** also checks its rules after the hook. Git mutators are allowed without being rewritten, so a matching `deny` rule of yours still wins. A gate `ask` prompts; `devin -p` rejects it. Mutator forms actx does not rewrite (`git -C dir push`) get Devin's default prompt, which `-p` rejects. `~/.config/devin/config.json` (or `$XDG_CONFIG_HOME/devin/config.json`) is merged in place and keeps mode 0600; if it contains comments or an unexpected shape, `actx init` leaves it untouched, exits 1 and prints the entry to add by hand.
 - **pi** never asks the human: a gate `ask` becomes a deny with the reason `actx security gate (pi: no confirmation channel) …`, so the agent sees why and continues. The extension goes to `$PI_CODING_AGENT_DIR/extensions/actx.ts` (default `~/.pi/agent/extensions/actx.ts`). Not covered: user-typed `!cmd`.
 - In OpenCode and Devin, a rule of yours on an observational command (e.g. `git log*`) no longer matches once actx rewrites it to `actx git log …`.
+- Devin with the Tier-2 rules file only (no hook): `devin -p` rejects a rewritten `actx git status` as "requires confirmation"; add an allow rule for `actx *`. Since actx 2.13.0 Devin is wired as a Tier-1 hook instead.
+
+### Headless runs
+
+- A blocked command does not fail the run: Claude `-p`, Codex `exec` and `agy -p` all exit 0 and report success. The denial is visible only in `permission_denials[]` (Claude JSON output), in `denied_actions` and stderr (agy), or in the model's reply (Codex).
+- Codex silently runs `exec` without the hook after the hook definition changes, until you trust it again via `/hooks`.
+- `agy -p` with `--dangerously-skip-permissions` auto-approves a gate `ask`/`force_ask`; a `deny` still blocks.
+- `agy -p` without that flag turns a command that actx neither rewrites nor decides into a soft refusal unless an allow rule of yours covers it. A control run without actx was not made: it needs edits under `~/.gemini/`.
+- OpenCode: a user-typed `!cmd` bypasses plugins, so actx neither rewrites nor gates it.
 
 `actx init` merges — it never overwrites your configuration files. `actx init --show` lists status, and `actx init --uninstall` removes only the actx entry.
 

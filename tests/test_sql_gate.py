@@ -82,10 +82,16 @@ class SqlGateAskTests(unittest.TestCase):
     def test_pg_restore_asks(self):
         for command in (
             "pg_restore -d mydb dump.bin",
-            "pg_restore --list dump.bin",
+            "pg_restore --list -f out.txt dump.bin",
         ):
             with self.subTest(command=command):
                 self.assert_ask(command)
+
+    def test_pg_restore_list_to_stdout_has_no_decision(self):
+        # TK-63: `--list` alone prints the archive TOC and touches no database.
+        self.assertEqual(
+            security_gate.evaluate_security("pg_restore --list dump.bin").decision, "allow"
+        )
 
     def test_default_deny_asks(self):
         # Red-gate 15: no explicit RO class.

@@ -337,17 +337,40 @@ FAMILIES = {
 }
 
 
-def effective_verbs(argv):
+# Hang-policy-only global option tables (TK-63). FAMILIES stays unchanged,
+# so rewriting is unchanged; hang_policy uses these to find the verb behind
+# global options.
+# `docker --help` "Global Options" (https://docs.docker.com/reference/cli/docker/):
+# value-taking ...
+DOCKER_GLOBAL_VALUE_FLAGS = (
+    "-H", "--host", "-c", "--context", "--config", "-l", "--log-level",
+    "--tlscacert", "--tlscert", "--tlskey",
+)
+# ... and boolean.
+DOCKER_GLOBAL_BOOL_FLAGS = ("-D", "--debug", "--tls", "--tlsverify")
+# `kubectl options` valued globals not already in FAMILIES["kubectl"]
+# ["value_flags"] (https://kubernetes.io/docs/reference/kubectl/generated/kubectl_options/).
+KUBECTL_HANG_VALUE_FLAGS = (
+    "-s", "--server", "--user", "--username", "--password", "--as",
+    "--as-group", "--as-uid", "--token", "--request-timeout",
+    "--certificate-authority", "--client-certificate", "--client-key",
+    "--tls-server-name", "--cache-dir", "--profile", "--profile-output",
+    "--log-flush-frequency", "--vmodule", "-v", "--v",
+)
+
+
+def effective_verbs(argv, extra_value_flags=()):
     """Effective verb tokens of an argv: everything after the head with the
     family's boolean global_flags skipped (exact token equality) and its
     value_flags skipped together with their value token; `=`-forms
     (`--namespace=prod`) are skipped whole by the part before `=`, so a flag
     value can never impersonate a verb. Returns None when the head is not a
-    declared family; [] for a bare family head. Pure: no imports, no I/O."""
+    declared family; [] for a bare family head. `extra_value_flags` (hang
+    policy, TK-63) are skipped like value_flags. Pure: no imports, no I/O."""
     spec = FAMILIES.get(argv[0]) if argv else None
     if spec is None:
         return None
-    value_flags = spec.get("value_flags", ())
+    value_flags = tuple(spec.get("value_flags", ())) + tuple(extra_value_flags)
     out = []
     i = 1
     n = len(argv)
