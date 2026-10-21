@@ -180,33 +180,38 @@ class HangPolicyIntegrationTests(unittest.TestCase):
         config = dict(CONFIG)
         config["timeouts"] = {"default_s": 1, "generous_s": 30}
 
-        def fake_run(cmd, **kwargs):
-            captured["timeout"] = kwargs.get("timeout")
-            captured["stdin"] = kwargs.get("stdin")
+        def fake_spawn(cmd, timeout, text):
+            captured["timeout"] = timeout
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        with mock.patch("actx_lib.runner.subprocess.run", side_effect=fake_run):
+        with mock.patch("actx_lib.runner._spawn", side_effect=fake_spawn):
             rc = runner.run(["flutter", "build", "apk"], config)
         self.assertEqual(rc, 0)
         self.assertEqual(captured["timeout"], 30)
-        self.assertIs(captured["stdin"], subprocess.DEVNULL)
 
         captured.clear()
-        with mock.patch("actx_lib.runner.subprocess.run", side_effect=fake_run):
+        with mock.patch("actx_lib.runner._spawn", side_effect=fake_spawn):
             runner.run(["echo", "hi"], config)
         self.assertEqual(captured["timeout"], 1)
 
     def test_run_and_execute_pass_devnull_stdin(self):
+        # Every exec path goes through runner._spawn, which always passes
+        # stdin=DEVNULL to Popen.
         config = dict(CONFIG)
+        proc = mock.MagicMock()
+        proc.returncode = 0
+        proc.communicate.side_effect = lambda timeout: (
+            ("", "") if popen.call_args.kwargs.get("encoding") else (b"", b"")
+        )
 
-        def fake_run(cmd, **kwargs):
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-        with mock.patch("actx_lib.runner.subprocess.run", side_effect=fake_run) as m:
+        with mock.patch(
+            "actx_lib.runner.subprocess.Popen", return_value=proc
+        ) as popen:
             runner.run(["echo", "hi"], config)
             runner.run_passthrough(["echo", "hi"])
             runner.execute(["echo", "hi"])
-        for call in m.call_args_list:
+        self.assertEqual(popen.call_count, 3)
+        for call in popen.call_args_list:
             self.assertIs(call.kwargs.get("stdin"), subprocess.DEVNULL)
 
     def test_timeout_seconds_fail_open_to_defaults(self):

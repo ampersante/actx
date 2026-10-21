@@ -152,12 +152,10 @@ def run(args, config):
         return 0
 
     cmd = ["cat", file]
-    try:
-        result = runner.execute(cmd)
-    except UnicodeDecodeError:
+    result = runner.execute(cmd)
+    if "�" in (result.stdout or ""):
+        # Undecodable (binary) content: the file's bytes 1:1 instead.
         return runner.run_passthrough(cmd)
-    if result is None:
-        return 1
     if result.returncode != 0:
         # stdout survives a failing exit (TK-61), then stderr.
         runner.print_lossless_stdout(cmd, result, config)

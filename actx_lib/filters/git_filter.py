@@ -19,7 +19,7 @@ def _failure(cmd, result, config):
 
 def _branch_name():
     result = runner.execute(["git", "symbolic-ref", "--short", "HEAD"])
-    if result is None or result.returncode != 0:
+    if result.returncode != 0:
         return None
     return result.stdout.strip()
 
@@ -44,8 +44,6 @@ def _status(rest, config):
         return runner.run_passthrough(["git", "status"] + rest)
     cmd = ["git", "status", "--porcelain=v1"]
     result = runner.execute(cmd)
-    if result is None:
-        return 1
     if result.returncode != 0:
         return _failure(cmd, result, config)
 
@@ -93,12 +91,11 @@ def _log(rest, config):
     rest = [arg for arg in rest if arg != "--oneline"]
     cmd = ["git", "log", "--oneline"] + rest
     result = runner.execute(cmd)
-    if result is None:
-        return 1
     if result.returncode != 0:
         return _failure(cmd, result, config)
     try:
-        text = runner.mask_text(result.stdout or "")
+        # --color=always output: no ANSI escapes reach the agent.
+        text = runner.mask_text(runner._strip_ansi(result.stdout or ""))
         if text:
             print(text, end="")
             if not text.endswith("\n"):
@@ -114,8 +111,6 @@ def _branch(rest, config):
         return runner.run_passthrough(["git", "branch"] + rest)
     cmd = ["git", "branch"] + rest
     result = runner.execute(cmd)
-    if result is None:
-        return 1
     if result.returncode != 0:
         return _failure(cmd, result, config)
     try:
@@ -129,14 +124,12 @@ def _branch(rest, config):
 def _mutating(sub, rest, config):
     cmd = ["git", sub] + rest
     result = runner.execute(cmd)
-    if result is None:
-        return 1
     if result.returncode != 0:
         return _failure(cmd, result, config)
     try:
         if sub == "commit":
             rev = runner.execute(["git", "rev-parse", "--short", "HEAD"])
-            if rev is not None and rev.returncode == 0:
+            if rev.returncode == 0:
                 text = "ok %s" % rev.stdout.strip()
                 print(text)
                 runner.record_compacted(cmd, result, text, "git.mutating")

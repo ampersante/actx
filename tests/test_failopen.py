@@ -38,7 +38,7 @@ class ExistingFilterFailOpenTests(unittest.TestCase):
         out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
         err = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
         with mock.patch(
-            "actx_lib.runner.subprocess.run", return_value=result
+            "actx_lib.runner._spawn", return_value=result
         ), mock.patch(
             patch_target, side_effect=RuntimeError("boom")
         ), mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):

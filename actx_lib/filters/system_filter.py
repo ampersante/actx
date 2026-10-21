@@ -9,7 +9,7 @@ from actx_lib import runner
 
 _FIND_PASSTHROUGH = {
     "-print0", "-printf", "-ls", "-delete", "-exec", "-execdir",
-    "-ok", "-okdir", "-fprint", "-fprintf", "-fls",
+    "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls",
 }
 
 
@@ -34,9 +34,7 @@ def run_ls(args, config, head="ls"):
     cmd = [head, "-1"] + args
     # A missing binary is rc 127 like a shell (TK-61); a synthetic result
     # (exec failure, refusal, timeout) carries only actx's own message.
-    result = runner.execute(cmd, shell_codes=True)
-    if result is None:
-        return 1
+    result = runner.execute(cmd)
     if getattr(result, "actx_synthetic", False):
         print(result.stderr, file=sys.stderr)
         return result.returncode
@@ -101,8 +99,6 @@ def run_find(args, config):
         return runner.run_passthrough(["find"] + args)
     cmd = ["find"] + args
     result = runner.execute(cmd)
-    if result is None:
-        return 1
     if result.returncode != 0:
         # Partial results survive a failing exit (TK-61).
         runner.print_lossless_stdout(cmd, result, config)

@@ -144,8 +144,6 @@ def detect(args):
 
 def _run_tool(tool, cmd, config, failures_only=False):
     result = runner.execute(cmd)
-    if result is None:
-        return 1
 
     def compact_fn(result):
         if not result.stdout:
