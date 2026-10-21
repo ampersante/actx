@@ -124,17 +124,25 @@ class InitTests(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr)
             with open(hooks_file, encoding="utf-8") as handle:
                 data = json.load(handle)
-            hooks = data["hooks"]["PreToolUse"][0]["hooks"]
-            self.assertEqual(len(hooks), 2)
-            self.assertIn(self.handler(), hooks)
+            # TK-58: the user's entry is never mutated; actx owns its own
+            # entry, found by handler command.
+            entries = data["hooks"]["PreToolUse"]
+            self.assertEqual(entries[0]["matcher"], "Bash")
+            self.assertEqual(len(entries[0]["hooks"]), 1)
+            self.assertNotIn(self.handler(), entries[0]["hooks"])
+            self.assertEqual(len(entries), 2)
+            self.assertEqual(entries[1]["matcher"], "Bash|shell|bash|exec")
+            self.assertEqual(entries[1]["hooks"], [self.handler()])
 
             p = self.run_actx(["init", "--agent", "codex", "--uninstall"], home)
             self.assertEqual(p.returncode, 0, p.stderr)
             with open(hooks_file, encoding="utf-8") as handle:
                 data = json.load(handle)
-            hooks = data["hooks"]["PreToolUse"][0]["hooks"]
-            self.assertEqual(len(hooks), 1)
-            self.assertNotIn(self.handler(), hooks)
+            entries = data["hooks"]["PreToolUse"]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["matcher"], "Bash")
+            self.assertEqual(len(entries[0]["hooks"]), 1)
+            self.assertNotIn(self.handler(), entries[0]["hooks"])
 
     def test_claude_non_json_settings_exit_1_unchanged(self):
         with tempfile.TemporaryDirectory() as home:
