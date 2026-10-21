@@ -1,3 +1,10 @@
+_____________________________ test_half ________________________________________
+
+    def test_half():
+>       assert 1 == 2
+E       assert 1 == 2
+
+test_foo.py:4: AssertionError
 test_foo.py:
   test_foo.py::test_half - assert 1 == 2
 2 failed, 8 passed
