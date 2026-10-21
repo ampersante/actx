@@ -6,6 +6,7 @@ Body unchanged from the pre-split monolith - see tools/ast_identity_check.py.
 
 import fnmatch
 import os
+import re
 
 from actx_lib import cli_families
 
@@ -145,6 +146,22 @@ def _has_git_exec_argv_flag(verb: str, sub_args: list[str]) -> bool:
     return any(cli_families.git_exec_flag_match(verb, tok) for tok in sub_args)
 
 
+# TK-63 §2.4: `git clean` dry run (`git clean -h`: -n, --[no-]dry-run,
+# -d, -x, -X, -q) only lists what would be removed. Closed grammar: every
+# token is one of these or a short cluster of the letters n d x X q, and a
+# dry run is present. Anything else (-f, -e, -i, --no-dry-run, --, a
+# pathspec, an abbreviation) keeps today's verdict; no values are parsed.
+_GIT_CLEAN_DRY_RUN_TOKENS = frozenset({"-n", "--dry-run", "-d", "-x", "-X", "-q", "--quiet"})
+_RE_GIT_CLEAN_CLUSTER = re.compile(r"-[ndxXq]+")
+
+
+def _git_clean_dry_run(sub_args: list[str]) -> bool:
+    toks = [_strip_redirection(tok) for tok in sub_args]
+    if not all(t in _GIT_CLEAN_DRY_RUN_TOKENS or _RE_GIT_CLEAN_CLUSTER.fullmatch(t) for t in toks):
+        return False
+    return any(t == "--dry-run" or (not t.startswith("--") and "n" in t) for t in toks)
+
+
 def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
     tokens = _unwrap_tokens(raw_tokens)
     if not tokens or os.path.basename(tokens[0]) != "git":
@@ -197,6 +214,10 @@ def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecisio
         if kv is None:
             continue
         key = kv.split("=", 1)[0]
+        if tok_c == "-c" and key.casefold() == "core.pager" and kv[len(key):] in ("=cat", "="):
+            # TK-63: an empty or `cat` pager is git's own no-pager setting
+            # (git-config(1) core.pager) - the same as `git --no-pager`.
+            continue
         if _is_git_ask_config_key(key) or (
             ("alias." in kv or "alias " in kv) and ("force" in kv or "reset" in kv or "clean" in kv or "+" in kv)
         ):
@@ -262,7 +283,7 @@ def _check_high_risk_git(command: str, raw_tokens: list[str]) -> SecurityDecisio
                 )
 
     # git clean with -x / -X (removing ignored files)
-    if subcmd == "clean":
+    if subcmd == "clean" and not _git_clean_dry_run(sub_args):
         for tok in sub_args:
             clean_tok = _strip_redirection(tok)
             if clean_tok in ("-x", "-X", "-fx", "-xf", "-fdx", "-dxf", "-fxd") or (

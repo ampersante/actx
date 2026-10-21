@@ -44,43 +44,65 @@ class PerfTests(unittest.TestCase):
         samples = [_time_command([ACTX] + args, env=self.env, **kwargs) for _ in range(5)]
         return _median(samples)
 
-    def test_security_gate_in_memory_under_1ms(self):
+    @staticmethod
+    def _gate_ms(command, batch):
+        """Per-op ms of the in-memory gate (TK-63): min of 5 batch means of
+        process CPU time. CPU time leaves out the time this process waits
+        for a core on a loaded machine, and the minimum drops a batch hit by
+        cache or frequency noise; the threshold itself is unchanged."""
         from actx_lib import security_gate
 
-        # 1000 in-memory evaluations of baseline command
-        start = time.perf_counter()
-        for _ in range(1000):
-            security_gate.evaluate_security("git status")
-        elapsed = time.perf_counter() - start
-        per_op_ms = (elapsed / 1000.0) * 1000.0
-        self.assertLess(per_op_ms, 1.0, "security_gate evaluation %.4fms per op" % per_op_ms)
+        best = None
+        for _ in range(5):
+            start = time.process_time()
+            for _ in range(batch):
+                security_gate.evaluate_security(command)
+            per_op_ms = (time.process_time() - start) / batch * 1000.0
+            best = per_op_ms if best is None else min(best, per_op_ms)
+        return best
 
-        # 200 in-memory evaluations of large 4005-char command
-        large_cmd = "echo " + ("a" * 4000)
-        start = time.perf_counter()
-        for _ in range(200):
-            security_gate.evaluate_security(large_cmd)
-        elapsed = time.perf_counter() - start
-        large_ms = (elapsed / 200.0) * 1000.0
-        self.assertLess(large_ms, 1.0, "large command evaluation %.4fms per op" % large_ms)
+    def test_security_gate_in_memory_under_1ms(self):
+        cases = (
+            ("baseline", "git status", 1000),
+            ("large 4005-char", "echo " + ("a" * 4000), 200),
+            ("compound 90-chunk", ";".join(["true" for _ in range(90)]), 200),
+            (
+                "wide 150-file",
+                "grep -rn 'TODO' " + " ".join([f"src/m{i}/f{i}.py" for i in range(150)]),
+                200,
+            ),
+        )
+        for name, command, batch in cases:
+            ms = self._gate_ms(command, batch)
+            self.assertLess(ms, 1.0, "%s command evaluation %.4fms per op" % (name, ms))
 
-        # 200 in-memory evaluations of compound 90-chunk command
-        compound_cmd = ";".join(["true" for _ in range(90)])
-        start = time.perf_counter()
-        for _ in range(200):
-            security_gate.evaluate_security(compound_cmd)
-        elapsed = time.perf_counter() - start
-        compound_ms = (elapsed / 200.0) * 1000.0
-        self.assertLess(compound_ms, 1.0, "compound command evaluation %.4fms per op" % compound_ms)
+    def test_security_gate_adversarial_inline_socket_under_1ms(self):
+        """TK-63: repeated interpreter/flag words once took 46 ms - 3 s in
+        the single backtracking socket regex. Each case contains '/' (no
+        >200-char fast path) and stays <= 4096 chars (no length guard), and
+        a counter proves the staged socket search is reached."""
+        from unittest import mock
 
-        # 200 in-memory evaluations of 150-file wide argument command (~2000 chars)
-        wide_cmd = "grep -rn 'TODO' " + " ".join([f"src/m{i}/f{i}.py" for i in range(150)])
-        start = time.perf_counter()
-        for _ in range(200):
-            security_gate.evaluate_security(wide_cmd)
-        elapsed = time.perf_counter() - start
-        wide_ms = (elapsed / 200.0) * 1000.0
-        self.assertLess(wide_ms, 1.0, "wide 150-file command evaluation %.4fms per op" % wide_ms)
+        from actx_lib.security_gate import t2_t3
+
+        def adversarial(unit):
+            command = "/x "
+            while len(command) + len(unit) <= 4096:
+                command += unit
+            return command
+
+        for unit in ("python3 -c x ", "python -c ", "node -e "):
+            command = adversarial(unit)
+            self.assertLessEqual(len(command), 4096)
+            with mock.patch.object(
+                t2_t3, "_inline_socket_search", wraps=t2_t3._inline_socket_search
+            ) as staged:
+                from actx_lib import security_gate
+
+                security_gate.evaluate_security(command)
+            self.assertGreaterEqual(staged.call_count, 1, unit)
+            ms = self._gate_ms(command, 50)
+            self.assertLess(ms, 1.0, "adversarial %r evaluation %.4fms per op" % (unit, ms))
 
     def test_hook_under_30ms(self):
         _time_command([ACTX, "hook"], input=HOOK_JSON, env=self.env)  # warm-up

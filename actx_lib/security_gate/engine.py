@@ -56,7 +56,11 @@ def _fast_tokenize(chunk: str) -> list[str]:
     return shlex.split(norm_chunk, posix=True)
 
 
-def _evaluate_chunk(chunk: str) -> SecurityDecision:
+def _evaluate_chunk(chunk: str, tainted: bool = True) -> SecurityDecision:
+    # tainted (TK-63): the whole command failed the literal-target
+    # precondition, or this is a nested evaluation - T4 then gives every
+    # target today's verdict. Defaults to True so any internal caller that
+    # does not pass it (find -exec re-evaluation) stays tainted.
     # Fast path for simple safe commands without redirection or special symbols (<0.001ms)
     if not any(c in chunk for c in ("<", ">", "$", "`", "/", "@", "-", ".", "~", ":", "(", ")", "\"", "'")):
         words = chunk.split()
@@ -69,7 +73,7 @@ def _evaluate_chunk(chunk: str) -> SecurityDecision:
         return _DECISION_ALLOW
 
     # 1. T4: Destructive OS mutations & Persistence (Top Priority)
-    t4 = _check_destructive_and_persistence(chunk, tokens)
+    t4 = _check_destructive_and_persistence(chunk, tokens, tainted)
     if t4:
         return t4
 
@@ -162,6 +166,10 @@ _CHUNK_SEMI_SENTINEL = "\x00ACTX_SEMI\x00"
 
 
 def _mask_literal_semicolons(text: str) -> str:
+    if ";" not in text:
+        # TK-63 (perf): only ';' is ever replaced; every other char is
+        # copied as is, so a text without ';' is returned unchanged.
+        return text
     out = []
     i = 0
     n = len(text)
@@ -267,11 +275,47 @@ def _split_into_chunks(command: str) -> list[str]:
     return [_unmask_literal_semicolons(c) for c in chunks]
 
 
-def evaluate_security(command: str, cwd: str | None = None) -> SecurityDecision:
+# TK-63 §2.1 step 3: closed precondition on the RAW whole command for the
+# T4 literal-target exemptions. A command that fails it is tainted: every
+# T4 target gets today's verdict. `$HOME` must not continue as a name.
+_RE_HOME_ANCHOR = re.compile(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])")
+# find's placeholder as a whole word (quotes, `\;` and `;` may touch it).
+_RE_FIND_PLACEHOLDER = re.compile(r"(?<![^\s'\"])\{\}(?![^\s'\";\\])")
+_RE_SOURCE_WORD = re.compile(r"(?<![\w./-])(?:source|eval|\.)(?![\w./-])")
+# Heads whose T4 branches read `tainted` (t4_destructive).
+_T4_LITERAL_HEADS = ("rm", "find", "chmod", "chown", "chgrp")
+
+
+def _literal_target_precondition(command: str) -> bool:
+    """True when the command can carry literal T4 targets: (a) every
+    backslash is `\\;`, (b) no backtick, (c) every `$` starts `$HOME` /
+    `${HOME}`, (d) every brace belongs to `${HOME}` or a whole `{}` word,
+    (e) on the quote-stripped text HOME occurs only in those anchors and no
+    `source`/`eval`/standalone `.` word occurs."""
+    if "\\" in command and command.count("\\") != command.count("\\;"):
+        return False
+    if "`" in command:
+        return False
+    no_anchor = _RE_HOME_ANCHOR.sub("", command)
+    if "$" in no_anchor:
+        return False
+    if "{" in no_anchor or "}" in no_anchor:
+        rest = _RE_FIND_PLACEHOLDER.sub("", no_anchor)
+        if "{" in rest or "}" in rest:
+            return False
+    stripped = _RE_HOME_ANCHOR.sub("", command.replace("'", "").replace('"', ""))
+    if "HOME" in stripped:
+        return False
+    return not _RE_SOURCE_WORD.search(stripped)
+
+
+def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = False) -> SecurityDecision:
     """Evaluate a shell command string against the security gatekeeper policies.
 
     Returns SecurityDecision(decision="allow"|"deny"|"ask", reason=..., category=...).
     Fail-open on internal parser errors to guarantee uninterrupted developer workflow.
+    _nested: a recursive call from inside the gate (`sh -c` body); always
+    tainted for the T4 literal-target exemptions (TK-63).
     """
     if not command or not isinstance(command, str):
         return _DECISION_ALLOW
@@ -284,6 +328,8 @@ def evaluate_security(command: str, cwd: str | None = None) -> SecurityDecision:
             category="T4_DESTRUCTIVE_MUTATION",
         )
 
+    raw_command = command
+
     # Shell IFS separator obfuscation normalization
     if "IFS" in command:
         command = re.sub(r"\$\{?IFS\}?", " ", command)
@@ -294,6 +340,13 @@ def evaluate_security(command: str, cwd: str | None = None) -> SecurityDecision:
             first_word = command.split(None, 1)[0] if command.strip() else ""
             if first_word in ("echo", "printf", "true", "false", "pwd", "whoami"):
                 return _DECISION_ALLOW
+
+        # The precondition only matters to the T4 heads that read `tainted`;
+        # a command naming none of them stays tainted (today's verdict).
+        tainted = _nested or not (
+            any(h in raw_command for h in _T4_LITERAL_HEADS)
+            and _literal_target_precondition(raw_command)
+        )
 
         # Fast global check for fork bombs
         if ":" in command and "{" in command and _RE_FORK_BOMB.search(command):
@@ -344,7 +397,7 @@ def evaluate_security(command: str, cwd: str | None = None) -> SecurityDecision:
             if not chunk:
                 continue
             try:
-                dec = _evaluate_chunk(chunk)
+                dec = _evaluate_chunk(chunk, tainted)
                 if dec.decision == "deny":
                     return dec
                 if dec.decision == "ask":

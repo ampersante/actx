@@ -1,9 +1,11 @@
 """actx security gate - T4: destructive OS mutations & persistence hijacking,
-including find -exec/-execdir/-ok/-okdir subcommand recursion (TK-59 split).
-
-Body unchanged from the pre-split monolith - see tools/ast_identity_check.py.
+including find -exec/-execdir/-ok/-okdir subcommand recursion (TK-59 split)
+and the TK-63 literal-target zone classifier for rm / chmod-chown-chgrp -R /
+find.
 """
 
+import fnmatch
+import functools
 import os
 import posixpath
 import re
@@ -13,6 +15,7 @@ from .common import (
     SecurityDecision, _strip_redirection, _unwrap_tokens, _RE_FORK_BOMB,
     _WRAPPER_COMMANDS,
 )
+from .t1_paths import _protected_home_entries
 
 
 _PERSISTENCE_FILES = {
@@ -100,7 +103,379 @@ def _is_critical_system_target(norm_t: str, raw_target: str) -> bool:
     return False
 
 
-def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
+def _today_normalised(token: str) -> str:
+    norm_t = re.sub(r"/+", "/", token)
+    try:
+        norm_t = posixpath.normpath(norm_t)
+    except Exception:
+        pass
+    return norm_t
+
+
+# ----------------------------------------------------------------------
+# TK-63: literal-target grammar and zone classifier
+# ----------------------------------------------------------------------
+# An exemption from today's prefix verdict exists only for a target the
+# closed grammar below fully describes: an anchor (`~`, `$HOME`, `${HOME}`
+# followed by end or `/`, or `/`), then components from a literal charset,
+# with an exact `*` allowed only as the final component. Anything else -
+# and every target of a command that failed the engine's raw-text
+# precondition (`tainted`) - keeps today's verdict
+# (_is_critical_system_target). Classification is lexical and
+# case-insensitive (APFS default); symlinks are not resolved.
+_RE_LITERAL_COMPONENT = re.compile(r"[A-Za-z0-9._ +@%,=:-]+")
+
+# Protected stores (home-relative; owner-confirmed list B, TK-63):
+# C = credentials, D = data. Deny at any depth, ancestors included. The T1
+# home records (t1_paths._PROTECTED_PATHS) join as class C at use.
+_PROTECTED_STORES = (
+    ("C", ".ssh"), ("C", ".gnupg"), ("C", ".aws"), ("C", ".azure"),
+    ("C", ".kube"), ("C", ".docker"), ("C", ".config"),
+    ("C", ".password-store"), ("C", ".local/share/keyrings"),
+    ("C", ".netrc"), ("C", "Library/Keychains"), ("C", "Library/Cookies"),
+    ("D", ".claude"), ("D", ".codex"), ("D", "Library/Mobile Documents"),
+    ("D", "Library/Mail"), ("D", "Library/Messages"),
+    ("D", "Library/Application Support"), ("D", "Library/Containers"),
+    ("D", "Library/Group Containers"), ("D", "Library/Preferences"),
+    ("D", "Library/Safari"),
+)
+_SYSTEM_ROOTS = frozenset(r.casefold() for r in (
+    "etc", "usr", "bin", "sbin", "var", "opt", "System", "Library",
+    "private", "boot", "dev", "sys", "proc", "root",
+))
+_HOME_PARENTS = ("users", "home")
+
+
+def _components(path: str) -> list[str]:
+    return [c for c in path.split("/") if c not in ("", ".")]
+
+
+def _is_glob(pattern: str) -> bool:
+    return any(ch in pattern for ch in "*?[")
+
+
+@functools.lru_cache(maxsize=16)
+def _store_patterns(home: str) -> tuple:
+    """Home-relative protected stores of list B plus the T1 home records
+    (one source: _protected_home_entries), casefolded, as
+    (by_first, globbed_first, all_classes): stores indexed by their literal
+    first component, stores whose first component is a glob, and the set
+    of every store class (an ancestor of the home reaches all of them)."""
+    stores = [(cls, tuple(c.casefold() for c in _components(rel))) for cls, rel in _PROTECTED_STORES]
+    for _abs_p, rel_p, _deep in _protected_home_entries(home):
+        if not rel_p.startswith("/"):
+            stores.append(("C", tuple(c.casefold() for c in _components(rel_p))))
+    by_first: dict[str, list] = {}
+    globbed = []
+    for cls, store in stores:
+        if not store:
+            continue
+        if _is_glob(store[0]):
+            globbed.append((cls, store))
+        else:
+            by_first.setdefault(store[0], []).append((cls, store))
+    return by_first, tuple(globbed), frozenset(cls for cls, _store in stores)
+
+
+def _component_match(comp: str, pattern: str) -> bool:
+    if _is_glob(pattern):
+        return fnmatch.fnmatchcase(comp, pattern)
+    return comp == pattern
+
+
+def _intersects(path: list[str], store: tuple) -> bool:
+    """path equals, is inside, or is an ancestor of store."""
+    return all(_component_match(p, q) for p, q in zip(path, store))
+
+
+def _store_classes(path: list[str], home: list[str], stores: tuple) -> set:
+    """Classes of the stores below `home` that `path` equals, is inside, or
+    is an ancestor of."""
+    if len(path) <= len(home):
+        return set(stores[2]) if path == home[:len(path)] else set()
+    if path[:len(home)] != home:
+        return set()
+    rel = path[len(home):]
+    by_first, globbed, _all = stores
+    return {
+        cls
+        for cls, store in (*by_first.get(rel[0], ()), *globbed)
+        if _intersects(rel, store)
+    }
+
+
+def _temp_root_len(path: list[str]) -> int:
+    """Component count of the temp root `path` starts with, or 0: /tmp,
+    /var/tmp, /var/folders/<a>/<b>/T, each also under /private."""
+    off = 1 if path[:1] == ["private"] else 0
+    rest = path[off:]
+    if rest[:1] == ["tmp"]:
+        return off + 1
+    if rest[:2] == ["var", "tmp"]:
+        return off + 2
+    if len(rest) >= 5 and rest[:2] == ["var", "folders"] and rest[4] == "t":
+        return off + 5
+    return 0
+
+
+def _path_zones(path: list[str], home: list[str] | None, home_str: str) -> set:
+    """Deny zones of an absolute, casefolded component list (§2.1 table).
+    A protected user dir is a direct child of a home, so the home row
+    already covers it. `/tmp` is a temp root, not a shallow zone: both
+    deny for rm, but for find a temp root is class K (§2.3)."""
+    zones = set()
+    temp = _temp_root_len(path)
+    if temp and len(path) == temp:
+        zones.add("temp")
+    elif len(path) <= 1:
+        zones.add("shallow")
+    homes = [home] if home is not None else []
+    if len(path) >= 2 and path[0] in _HOME_PARENTS and path[:2] != home:
+        homes.append(path[:2])
+    stores = _store_patterns(home_str)
+    for h in homes:
+        if path[:len(h)] == h and len(path) - len(h) <= 1:
+            zones.add("home")
+        zones |= _store_classes(path, h, stores)
+    if path and path[0] in _SYSTEM_ROOTS and not (temp and len(path) > temp):
+        zones.add("system")
+    return zones
+
+
+def classify_target(token: str, tainted: bool) -> set | None:
+    """Deny zones of a literal target (§2.1), or None when the token is
+    outside the grammar (the caller then applies today's verdict). An empty
+    set means no deny zone; "dotdot" marks a `..` component (always deny).
+    A final `*` stands for the children of its parent and gets the parent's
+    zones: every deny zone a child can be in is a zone the parent already
+    carries (home child, store ancestor, temp root, system root)."""
+    if tainted:
+        return None
+    home_anchor = True
+    if token == "~" or token.startswith("~/"):
+        rest = token[1:]
+    elif token == "$HOME" or token.startswith("$HOME/"):
+        rest = token[5:]
+    elif token == "${HOME}" or token.startswith("${HOME}/"):
+        rest = token[7:]
+    elif token.startswith("/"):
+        rest, home_anchor = token, False
+    else:
+        return None
+    comps = _components(rest)
+    if comps and comps[-1] == "*":
+        comps = comps[:-1]
+    if not all(_RE_LITERAL_COMPONENT.fullmatch(c) for c in comps):
+        return None
+    if ".." in comps:
+        return {"dotdot"}
+    home_str = os.path.expanduser("~")
+    if not home_str.startswith("/"):
+        if home_anchor:
+            return None
+        return _path_zones([c.casefold() for c in comps], None, home_str)
+    home = [c.casefold() for c in _components(home_str)]
+    path = (home if home_anchor else []) + [c.casefold() for c in comps]
+    return _path_zones(path, home, home_str)
+
+
+def _denied_target(targets: list[str], tainted: bool) -> tuple[str, bool] | None:
+    """(token named in the reason, by_dotdot) when one rm / chmod-chown-
+    chgrp target is denied - literal grammar: zone verdict; otherwise:
+    today's verdict - or None. The reason names today's first critical
+    target whenever today's code denies too, so an unchanged verdict keeps
+    today's text; by_dotdot marks a deny the `..` rule alone produced."""
+    new_hit = None
+    for tok in targets:
+        zones = classify_target(tok, tainted)
+        if zones is None:
+            zones = {"today"} if _is_critical_system_target(_today_normalised(tok), tok) else set()
+        if zones:
+            new_hit = (tok, zones)
+            break
+    if new_hit is None:
+        return None
+    for tok in targets:
+        if _is_critical_system_target(_today_normalised(tok), tok):
+            return tok, False
+    return new_hit[0], "dotdot" in new_hit[1]
+
+
+def _shell_words_match(command: str, raw_tokens: list[str]) -> bool:
+    """The grammar classifies shell words; the fast tokenizer splits a word
+    with an inner quote (`~/Library/Keych"ains"`) in two, so a quoted
+    command qualifies only when its tokens equal the shlex words."""
+    if '"' not in command and "'" not in command:
+        return True
+    # Back-edge: local import, as for _evaluate_chunk below.
+    from .engine import _RE_NORM_ATTACHED_REDIR
+    try:
+        return shlex.split(_RE_NORM_ATTACHED_REDIR.sub(r" \1 ", command), posix=True) == raw_tokens
+    except ValueError:
+        return False
+
+
+# find (§2.3): the closed expression grammar, BSD find(1) and GNU findutils.
+_FIND_OPERATORS = frozenset({"!", "-not", "(", ")", "-a", "-and", "-o", "-or", ","})
+_FIND_LEADING_OPTIONS = frozenset({"-H", "-L", "-P", "-E", "-X", "-s", "-x", "-d"})
+_FIND_ARITY0 = _FIND_LEADING_OPTIONS | frozenset({
+    "-depth", "-empty", "-sparse", "-nouser", "-nogroup", "-mount", "-xdev",
+    "-follow", "-noleaf", "-daystart", "-ignore_readdir_race",
+    "-noignore_readdir_race", "-readable", "-writable", "-executable",
+    "-nowarn", "-warn", "-acl", "-xattr", "-true", "-false", "-prune",
+    "-quit", "-print", "-print0", "-ls",
+})
+# The next token is consumed whatever it looks like (`-mtime -7`).
+_FIND_ARITY1 = frozenset({
+    "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+    "-regex", "-iregex", "-lname", "-ilname", "-type", "-xtype", "-size",
+    "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-Btime",
+    "-Bmin", "-newer", "-anewer", "-cnewer", "-mnewer", "-Bnewer", "-perm",
+    "-user", "-group", "-uid", "-gid", "-links", "-inum", "-samefile",
+    "-flags", "-fstype", "-xattrname", "-maxdepth", "-mindepth",
+    "-regextype", "-used", "-printf",
+})
+_RE_FIND_NEWERXY = re.compile(r"-newer[aBcmt][aBcmt]")
+# Read-only exec programs: metadata printers (classes D, K, N) and content
+# printers (classes K, N only). `file` is excluded: `file -C` writes.
+_FIND_METADATA_PROGRAMS = frozenset({"stat", "ls"})
+_FIND_CONTENT_PROGRAMS = frozenset({
+    "cat", "head", "grep", "egrep", "fgrep", "wc", "md5", "md5sum",
+    "shasum", "sha1sum", "sha256sum", "tail",
+})
+_RE_TAIL_COUNT = re.compile(r"\+?\d+")
+_RE_TAIL_ATTACHED = re.compile(r"-[nc]\+?\d+|-\d+|\+\d+")
+_FIND_CLASS_RANK = {"N": 0, "K": 1, "D": 2, "C": 3, "T": 3}
+
+
+def _find_exec_clauses(tokens: list[str]) -> list[tuple[int, list[str]]] | None:
+    """[(program index, clause argv)] when every token after the starting
+    points is inside the closed find grammar; None otherwise."""
+    i, n = 1, len(tokens)
+    while i < n and tokens[i] in _FIND_LEADING_OPTIONS:
+        i += 1
+    while i < n and not tokens[i].startswith("-") and tokens[i] not in _FIND_OPERATORS:
+        i += 1
+    clauses = []
+    while i < n:
+        tok = tokens[i]
+        if tok in _FIND_OPERATORS or tok in _FIND_ARITY0:
+            i += 1
+        elif tok in _FIND_ARITY1 or _RE_FIND_NEWERXY.fullmatch(tok):
+            if i + 1 >= n:
+                return None
+            i += 2
+        elif tok in ("-exec", "-execdir"):
+            # Clause ends at the first `;`, or at a `+` right after `{}`.
+            j = i + 1
+            while j < n and tokens[j] != ";" and not (
+                tokens[j] == "+" and j > i + 1 and tokens[j - 1] == "{}"
+            ):
+                j += 1
+            if j >= n or j == i + 1:
+                return None
+            clauses.append((i + 1, tokens[i + 1:j]))
+            i = j + 1
+        else:
+            return None
+    return clauses
+
+
+def _find_program(token: str) -> str | None:
+    """Program name of a bare or /bin, /usr/bin exec token; None for any
+    other path (`./cat`, `/usr/local/bin/cat` are other programs)."""
+    if "/" not in token:
+        return token
+    parent, _, name = token.rpartition("/")
+    return name if parent in ("/bin", "/usr/bin") and name else None
+
+
+def _tail_read_only(args: list[str]) -> bool:
+    """Closed tail option set: -n N, -c N, -nN, -cN, -q, -v, -N, +N; every
+    other token is `{}` or a literal operand."""
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-n", "-c"):
+            if i + 1 >= len(args) or not _RE_TAIL_COUNT.fullmatch(args[i + 1]):
+                return False
+            i += 2
+            continue
+        if arg in ("-q", "-v") or _RE_TAIL_ATTACHED.fullmatch(arg):
+            i += 1
+            continue
+        if arg.startswith("-"):
+            return False
+        i += 1
+    return True
+
+
+def _find_class(zones: set) -> str:
+    if zones & {"dotdot", "shallow", "system"}:
+        return "T"
+    if "C" in zones:
+        return "C"
+    if "D" in zones:
+        return "D"
+    if zones & {"home", "temp"}:
+        return "K"
+    return "N"
+
+
+def _find_deny(norm_t: str) -> SecurityDecision:
+    return SecurityDecision(
+        decision="deny",
+        reason=f"Destructive find deletion of critical directory '{norm_t}' is prohibited",
+        category="T4_DESTRUCTIVE_MUTATION",
+    )
+
+
+def _find_today(tokens: list[str]) -> SecurityDecision | None:
+    for tok in tokens[1:]:
+        norm_t = _today_normalised(tok)
+        if _is_critical_system_target(norm_t, tok):
+            return _find_deny(norm_t)
+    return None
+
+
+def _check_find_targets(tokens: list[str], tainted: bool) -> SecurityDecision | None:
+    """§2.3: the worst class over every token after `find` (the program
+    token of a grammar-conforming exec clause excepted). T and C deny; D, K
+    and N lose today's deny only for an expression inside the find grammar
+    whose every exec program is read-only for that class; anything else
+    gets today's verdict."""
+    clauses = _find_exec_clauses(tokens)
+    skip = set()
+    if clauses is not None:
+        skip = {idx for idx, args in clauses if _find_program(args[0]) is not None}
+    worst, worst_tok = "N", None
+    for idx in range(1, len(tokens)):
+        if idx in skip:
+            continue
+        tok = tokens[idx]
+        zones = classify_target(tok, tainted)
+        if zones is None:
+            cls = "T" if _is_critical_system_target(_today_normalised(tok), tok) else "N"
+        else:
+            cls = _find_class(zones)
+        if _FIND_CLASS_RANK[cls] > _FIND_CLASS_RANK[worst]:
+            worst, worst_tok = cls, tok
+    if worst in ("T", "C"):
+        return _find_today(tokens) or _find_deny(_today_normalised(worst_tok))
+    allowed = _FIND_METADATA_PROGRAMS
+    if worst != "D":
+        allowed = allowed | _FIND_CONTENT_PROGRAMS
+    if clauses and all(_find_read_only(args, allowed) for _idx, args in clauses):
+        return None
+    return _find_today(tokens)
+
+
+def _find_read_only(args: list[str], allowed: frozenset) -> bool:
+    name = _find_program(args[0])
+    return name in allowed and (name != "tail" or _tail_read_only(args[1:]))
+
+
+def _check_destructive_and_persistence(command: str, raw_tokens: list[str], tainted: bool = True) -> SecurityDecision | None:
     # Fork bomb
     if ":" in command and "{" in command and _RE_FORK_BOMB.search(command):
         return SecurityDecision(
@@ -114,6 +489,8 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> S
         return None
 
     head = os.path.basename(tokens[0])
+    if not tainted and head in ("rm", "find", "chmod", "chown", "chgrp"):
+        tainted = not _shell_words_match(command, raw_tokens)
 
     # Root / home destruction: rm -rf / or rm --recursive --force / or rm -rf ~
     if head == "rm":
@@ -134,34 +511,26 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> S
                 targets.append(clean_arg)
 
         if has_r or has_f:
-            for t in targets:
-                norm_t = re.sub(r"/+", "/", t)
-                try:
-                    norm_t = posixpath.normpath(norm_t)
-                except Exception:
-                    pass
-                if _is_critical_system_target(norm_t, t):
-                    return SecurityDecision(
-                        decision="deny",
-                        reason=f"Destructive recursive deletion of critical target '{norm_t}' is prohibited",
-                        category="T4_DESTRUCTIVE_MUTATION",
-                    )
+            hit = _denied_target(targets, tainted)
+            if hit and hit[1]:
+                return SecurityDecision(
+                    decision="deny",
+                    reason=f"Destructive recursive deletion of a target with a '..' component '{hit[0]}' is prohibited",
+                    category="T4_DESTRUCTIVE_MUTATION",
+                )
+            if hit:
+                return SecurityDecision(
+                    decision="deny",
+                    reason=f"Destructive recursive deletion of critical target '{_today_normalised(hit[0])}' is prohibited",
+                    category="T4_DESTRUCTIVE_MUTATION",
+                )
 
     # find / -delete or find / -exec rm
     if head == "find":
         if any(tok in ("-delete", "-exec", "-execdir", "-ok", "-okdir") for tok in tokens[1:]):
-            for tok in tokens[1:]:
-                norm_t = re.sub(r"/+", "/", tok)
-                try:
-                    norm_t = posixpath.normpath(norm_t)
-                except Exception:
-                    pass
-                if _is_critical_system_target(norm_t, tok):
-                    return SecurityDecision(
-                        decision="deny",
-                        reason=f"Destructive find deletion of critical directory '{norm_t}' is prohibited",
-                        category="T4_DESTRUCTIVE_MUTATION",
-                    )
+            find_dec = _check_find_targets(tokens, tainted)
+            if find_dec:
+                return find_dec
 
     # crontab modification
     if head == "crontab":
@@ -176,18 +545,19 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str]) -> S
     if head in ("chmod", "chown", "chgrp"):
         has_R = any(tok in ("-R", "--recursive") or (tok.startswith("-") and not tok.startswith("--") and "R" in tok) for tok in tokens[1:])
         if has_R:
-            for tok in tokens[1:]:
-                norm_t = re.sub(r"/+", "/", tok)
-                try:
-                    norm_t = posixpath.normpath(norm_t)
-                except Exception:
-                    pass
-                if _is_critical_system_target(norm_t, tok):
-                    return SecurityDecision(
-                        decision="deny",
-                        reason=f"Recursive permission/ownership alteration on critical directory '{norm_t}' is prohibited",
-                        category="T4_DESTRUCTIVE_MUTATION",
-                    )
+            hit = _denied_target(tokens[1:], tainted)
+            if hit and hit[1]:
+                return SecurityDecision(
+                    decision="deny",
+                    reason=f"Recursive permission/ownership alteration on a target with a '..' component '{hit[0]}' is prohibited",
+                    category="T4_DESTRUCTIVE_MUTATION",
+                )
+            if hit:
+                return SecurityDecision(
+                    decision="deny",
+                    reason=f"Recursive permission/ownership alteration on critical directory '{_today_normalised(hit[0])}' is prohibited",
+                    category="T4_DESTRUCTIVE_MUTATION",
+                )
 
     # Disk formatting / raw writing: mkfs, mke2fs, mkswap, parted, sfdisk, diskutil, dd
     if (
@@ -494,7 +864,8 @@ def _check_find_exec_subcommands(raw_tokens: list[str]) -> SecurityDecision | No
             # <-> engine module cycle (engine imports _check_find_exec_
             # subcommands at module load time).
             from .engine import _evaluate_chunk
-            sub_dec = _evaluate_chunk(shlex.join(sub_tokens))
+            # Nested evaluation is always tainted (TK-63 §2.1 step 3).
+            sub_dec = _evaluate_chunk(shlex.join(sub_tokens), True)
             if sub_dec.decision == "deny":
                 return sub_dec
             if sub_dec.decision == "ask":

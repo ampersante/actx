@@ -5,6 +5,7 @@ Body unchanged from the pre-split monolith - see tools/ast_identity_check.py.
 """
 
 import os
+import re
 
 from actx_lib import cli_families
 
@@ -60,6 +61,41 @@ def _parse_cargo_subcommand(raw_tokens: list[str]):
     return None, []
 
 
+# TK-63 §2.4: `cargo publish -n|--dry-run` performs every check without
+# uploading (`cargo publish --help`). Closed grammar: `publish` directly
+# after `cargo`, every other token from these sets; a -n/--dry-run consumed
+# as an option value does not count. Anything else keeps the ask.
+_CARGO_PUBLISH_DRY_RUN_FLAGS = frozenset({"-n", "--dry-run"})
+_CARGO_PUBLISH_BOOL_FLAGS = frozenset({
+    "--allow-dirty", "--no-verify", "--locked", "--offline", "--frozen",
+    "-q", "--quiet", "-v", "--verbose", "--all-features",
+    "--no-default-features", "--keep-going",
+})
+_CARGO_PUBLISH_VALUE_FLAGS = frozenset({"--registry", "-p", "--package"})
+
+
+def _cargo_publish_dry_run(raw_tokens: list[str]) -> bool:
+    tokens = _unwrap_tokens(raw_tokens)
+    if len(tokens) < 2 or tokens[1] != "publish":
+        return False
+    dry_run = False
+    i = 2
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _CARGO_PUBLISH_DRY_RUN_FLAGS:
+            dry_run = True
+        elif tok in _CARGO_PUBLISH_VALUE_FLAGS:
+            if i + 1 >= len(tokens):
+                return False
+            i += 1  # the value token, whatever it looks like
+        elif tok in _CARGO_PUBLISH_BOOL_FLAGS:
+            pass
+        elif not ("=" in tok and tok.split("=", 1)[0] in _CARGO_PUBLISH_VALUE_FLAGS):
+            return False
+        i += 1
+    return dry_run
+
+
 def _check_high_risk_cargo(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
     subcmd, sub_args = _parse_cargo_subcommand(raw_tokens)
     if subcmd is None:
@@ -71,6 +107,8 @@ def _check_high_risk_cargo(command: str, raw_tokens: list[str]) -> SecurityDecis
             reason="Executing cargo clean deletes build artifacts and caches, requiring human confirmation",
             category="T6_HIGH_RISK_CARGO",
         )
+    if subcmd == "publish" and _cargo_publish_dry_run(raw_tokens):
+        return None
     if subcmd in _CARGO_REGISTRY_MUTATE:
         return SecurityDecision(
             decision="ask",
@@ -226,6 +264,34 @@ def _check_high_risk_tools(command: str, raw_tokens: list[str]) -> SecurityDecis
     return None
 
 
+# TK-63 §2.4: closed grammar of local-only tasks that carry an ask marker.
+# signingReport prints the signing configs (developer.android.com/studio/
+# publish/app-signing); publishToMavenLocal and
+# publish<Name>PublicationToMavenLocal write only the local Maven cache
+# (docs.gradle.org/current/userguide/publishing_maven.html, "Tasks");
+# assemble<Variant>Release / bundle<Variant>Release build local APK/AAB
+# outputs (developer.android.com/build/build-variants).
+# A marker inside the variant/publication name keeps the ask
+# (assembleSignedRelease, publishReleasePublicationToMavenLocal). Limit:
+# any gradle task can run build-script logic, as allowed assembleDebug can.
+_RE_GRADLE_MAVEN_LOCAL = re.compile(r"publish([a-z0-9]*)publicationtomavenlocal")
+
+
+def _gradle_local_task(token: str) -> bool:
+    segment = token.rsplit(":", 1)[-1].lower()
+    if segment in ("signingreport", "publishtomavenlocal"):
+        return True
+    m = _RE_GRADLE_MAVEN_LOCAL.fullmatch(segment)
+    if m:
+        middle = m.group(1)
+    else:
+        prefix = next((p for p in ("assemble", "bundle") if segment.startswith(p)), None)
+        if prefix is None or not segment.endswith("release") or len(segment) < len(prefix) + len("release"):
+            return False
+        middle = segment[len(prefix):-len("release")]
+    return not any(marker in middle for marker in cli_families.GRADLE_ASK_MARKERS)
+
+
 def _check_gradlew(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
     """T6 ask for gradlew publish-class tasks (TK-55 F5), precedent
     ``_check_high_risk_cargo``.
@@ -254,6 +320,9 @@ def _check_gradlew(command: str, raw_tokens: list[str]) -> SecurityDecision | No
             continue
         if tok.startswith("-"):
             idx += 1  # bool or unknown flag: skip, keep scanning
+            continue
+        if _gradle_local_task(tok):
+            idx += 1
             continue
         if cli_families.gradle_task_class(tok) == "ask":
             return SecurityDecision(

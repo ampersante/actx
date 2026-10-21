@@ -86,7 +86,23 @@ def _matches_new_secret_substrings(text: str) -> bool:
     return any(kw in low for kw in _NEW_SECRET_QUICK_CHECK_SUBSTRINGS)
 
 
+# TK-63 (perf): the IGNORECASE alternation above scans ~0.2 us per char and
+# is the single hot spot on 4 KB commands. For ASCII text the same pattern
+# matched case-sensitively against text.lower() accepts the same strings
+# (the pattern has no uppercase literal; lower() keeps ASCII length), and
+# `\benv\b` written as `env(?<!\wenv)\b` lets every branch start with a
+# literal. Non-ASCII text keeps the IGNORECASE regex (Unicode case folding).
+_RE_SENSITIVE_QUICK_CHECK_LOWER = re.compile(
+    _RE_SENSITIVE_QUICK_CHECK.pattern.replace(r"\benv\b", r"env(?<!\wenv)\b")
+)
+
+
 def _quick_check_hit(text: str) -> bool:
+    if text.isascii():
+        low = text.lower()
+        return bool(_RE_SENSITIVE_QUICK_CHECK_LOWER.search(low)) or any(
+            kw in low for kw in _NEW_SECRET_QUICK_CHECK_SUBSTRINGS
+        )
     return bool(_RE_SENSITIVE_QUICK_CHECK.search(text)) or _matches_new_secret_substrings(text)
 
 

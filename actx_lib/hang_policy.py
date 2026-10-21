@@ -99,20 +99,45 @@ def _is_kubectl(argv):
             return True
         if tok == "logs":
             return any(t in _STREAM_FLAGS for t in rest[idx + 1:])
-    # TK-40: effective verbs (head dropped, -n prod / --namespace=prod /
+    # TK-40: effective tokens (head dropped, -n prod / --namespace=prod /
     # -A skipped via cli_families.effective_verbs - one skip-logic source).
-    verbs = cli_families.effective_verbs(argv)
-    if not verbs:
+    # TK-63: the other valued globals of `kubectl options` are skipped too,
+    # and the verb is the first non-flag effective token, so a watch flag
+    # before the verb (`kubectl --watch get pods`) still counts.
+    tokens = cli_families.effective_verbs(
+        argv, cli_families.KUBECTL_HANG_VALUE_FLAGS
+    )
+    verb_idx = next(
+        (i for i, t in enumerate(tokens or ()) if not t.startswith("-")), None
+    )
+    if verb_idx is None:
         return False
-    if verbs[0] in ("get", "events") and any(
-        t in _KUBECTL_WATCH_FLAGS for t in verbs[1:]
-    ):
+    verb = tokens[verb_idx]
+    if verb in ("get", "events") and any(t in _KUBECTL_WATCH_FLAGS for t in tokens):
         return True  # N-F4: watch streams forever
-    if verbs[0] in ("get", "describe") and any(
-        t in _KUBECTL_SECRET_TYPES for t in verbs[1:]
+    if verb in ("get", "describe") and any(
+        t in _KUBECTL_SECRET_TYPES for t in tokens[verb_idx + 1:]
     ):
         return True  # N-F3a: base64 secrets dodge pattern redaction
     return False
+
+
+def _docker_subcommand_index(rest):
+    """Index in `rest` of the first token after docker's global options
+    (cli_families.DOCKER_GLOBAL_* tables, exact tokens and `=` forms), or
+    None when nothing follows them."""
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in cli_families.DOCKER_GLOBAL_BOOL_FLAGS:
+            i += 1
+        elif tok in cli_families.DOCKER_GLOBAL_VALUE_FLAGS:
+            i += 2
+        elif "=" in tok and tok.split("=", 1)[0] in cli_families.DOCKER_GLOBAL_VALUE_FLAGS:
+            i += 1
+        else:
+            return i
+    return None
 
 
 def _is_docker(argv):
@@ -136,11 +161,17 @@ def _is_docker(argv):
                 # `-f x.yml` before it is a file flag, not --follow.
                 return any(t in _STREAM_FLAGS for t in after[idx + 1:])
         return False
-    sub = rest[0]
+    # TK-63: the subcommand sits after docker's global options
+    # (`docker -H x logs -f c`); -f/--follow count only after `logs`.
+    sub_idx = _docker_subcommand_index(rest)
+    if sub_idx is None:
+        return False
+    sub = rest[sub_idx]
+    after = rest[sub_idx + 1:]
     if sub == "logs":
-        return any(t in _STREAM_FLAGS for t in rest[1:])
+        return any(t in _STREAM_FLAGS for t in after)
     if sub == "stats":
-        return "--no-stream" not in rest[1:]
+        return "--no-stream" not in after
     if sub == "attach":
         return True
     return False
@@ -352,9 +383,14 @@ def classify(argv):
 
     argv[0] of the internal copy is normalised by cli_families.head_key
     (TK-61) before any predicate runs, so `/usr/bin/docker logs -f`
-    classifies exactly like `docker logs -f`."""
+    classifies exactly like `docker logs -f`. A run-prefix (`uv run …`,
+    cli_families.run_prefix_split, as rewriter.output_class) is unwrapped
+    first and the inner command's class is returned (TK-63)."""
     try:
         argv = list(argv)
+        split = cli_families.run_prefix_split(argv)
+        if split is not None:
+            return classify(split[0])
         if argv:
             argv[0] = cli_families.head_key(argv[0])
         return _classify(argv)
