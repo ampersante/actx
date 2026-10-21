@@ -38,8 +38,6 @@ def _test_compact(text, profile_name):
 
 def _run_test(cmd, config, profile_name):
     result = runner.execute(cmd)
-    if result is None:
-        return 1
     return runner.compacted_result(
         cmd,
         result,
@@ -51,8 +49,6 @@ def _run_test(cmd, config, profile_name):
 
 def _run_lint(cmd, config, profile_name, strategy="lint"):
     result = runner.execute(cmd)
-    if result is None:
-        return 1
 
     def parser(text):
         return compact_profiles.parse_lint(

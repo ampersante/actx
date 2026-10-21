@@ -149,8 +149,10 @@ def _refused(cmd, code, passthrough=False):
 def _synthetic_result(cmd, code, message):
     # actx_synthetic marks refusal/timeout results (TK-47): their stderr is
     # actx's own text, not command output, so it never feeds hint matching.
+    # The message ends in a newline like print() output: the result is
+    # written verbatim (print_raw, end="").
     result = subprocess.CompletedProcess(
-        args=cmd, returncode=code, stdout="", stderr=message
+        args=cmd, returncode=code, stdout="", stderr=message + "\n"
     )
     result.actx_synthetic = True
     return result

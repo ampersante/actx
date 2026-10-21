@@ -134,6 +134,33 @@ class LinterExitCodeTests(unittest.TestCase):
         self.assertIn("F401", out.getvalue())
 
 
+class SyntheticExecFailureTests(unittest.TestCase):
+    """A missing tool on a compacted-filter path: shell-style 127 and the
+    message ends in a newline (stderr is not left mid-line)."""
+
+    def test_missing_tool_is_127_with_trailing_newline(self):
+        from actx_lib.filters import test_runner_filter
+
+        for name, run_fn, args in (
+            ("ruff", linter_filter.run_ruff, ["check", "."]),
+            ("pytest", test_runner_filter.run_pytest, ["-q"]),
+        ):
+            with self.subTest(tool=name):
+                out = io.StringIO()
+                err = io.StringIO()
+                with mock.patch(
+                    "actx_lib.runner._load_config", return_value={}
+                ), mock.patch(
+                    "actx_lib.runner._spawn",
+                    side_effect=FileNotFoundError(2, "No such file"),
+                ):
+                    with redirect_stdout(out), redirect_stderr(err):
+                        rc = run_fn(args, CONFIG)
+                self.assertEqual(rc, 127)
+                self.assertEqual(out.getvalue(), "")
+                self.assertEqual(err.getvalue(), "%s: command not found\n" % name)
+
+
 def _fail_open(run_fn, args, patch_target):
     result = subprocess.CompletedProcess(
         args, 0, "raw stdout\n", "raw stderr\n"

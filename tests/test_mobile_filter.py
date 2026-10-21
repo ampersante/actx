@@ -348,15 +348,23 @@ class MobileFailOpenTests(unittest.TestCase):
                 )
         self._assert_raw(rc, out.getvalue(), err.getvalue(), 65)
 
-    def test_execute_oserror_returns_1(self):
-        for run_fn, args in (
-            (mobile_filter.run_flutter, ["test"]),
-            (mobile_filter.run_swiftlint, ["lint"]),
-            (mobile_filter.run_xcodebuild, ["-scheme", "App", "build"]),
+    def test_missing_binary_is_127(self):
+        for run_fn, args, name in (
+            (mobile_filter.run_flutter, ["test"], "flutter"),
+            (mobile_filter.run_swiftlint, ["lint"], "swiftlint"),
+            (mobile_filter.run_xcodebuild, ["-scheme", "App", "build"], "xcodebuild"),
         ):
             with self.subTest(run_fn=run_fn.__name__):
-                with mock.patch("actx_lib.runner.execute", return_value=None):
-                    self.assertEqual(run_fn(args, CONFIG), 1)
+                err = io.StringIO()
+                with mock.patch(
+                    "actx_lib.runner._load_config", return_value={}
+                ), mock.patch(
+                    "actx_lib.runner._spawn",
+                    side_effect=FileNotFoundError(2, "No such file"),
+                ), redirect_stdout(io.StringIO()), redirect_stderr(err):
+                    rc = run_fn(args, CONFIG)
+                self.assertEqual(rc, 127)
+                self.assertEqual(err.getvalue(), "%s: command not found\n" % name)
 
 
 if __name__ == "__main__":

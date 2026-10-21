@@ -36,7 +36,7 @@ def run_ls(args, config, head="ls"):
     # (exec failure, refusal, timeout) carries only actx's own message.
     result = runner.execute(cmd)
     if getattr(result, "actx_synthetic", False):
-        print(result.stderr, file=sys.stderr)
+        print(result.stderr, end="", file=sys.stderr)
         return result.returncode
     if result.returncode != 0:
         return runner.run_passthrough([head] + args)

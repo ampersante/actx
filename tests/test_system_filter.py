@@ -1,8 +1,13 @@
+import io
 import os
 import re
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
+
+from actx_lib.filters import system_filter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ACTX = os.path.join(ROOT, "actx")
@@ -143,6 +148,23 @@ class SystemFilterTests(unittest.TestCase):
     def test_wc_missing_file_preserves_exit(self):
         p = self.run_actx("wc", "-l", "missing.txt")
         self.assertEqual(p.returncode, 1)
+
+class SystemFilterMissingBinaryTests(unittest.TestCase):
+    def test_ls_missing_binary_is_127_with_single_newline(self):
+        out = io.StringIO()
+        err = io.StringIO()
+        with mock.patch(
+            "actx_lib.runner._load_config", return_value={}
+        ), mock.patch(
+            "actx_lib.runner._spawn",
+            side_effect=FileNotFoundError(2, "No such file"),
+        ):
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = system_filter.run_ls([], {})
+        self.assertEqual(rc, 127)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), "ls: command not found\n")
+
 
 if __name__ == "__main__":
     unittest.main()
