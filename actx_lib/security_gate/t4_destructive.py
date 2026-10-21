@@ -115,14 +115,15 @@ def _today_normalised(token: str) -> str:
 # ----------------------------------------------------------------------
 # TK-63: literal-target grammar and zone classifier
 # ----------------------------------------------------------------------
-# An exemption from today's prefix verdict exists only for a target the
-# closed grammar below fully describes: an anchor (`~`, `$HOME`, `${HOME}`
-# followed by end or `/`, or `/`), then components from a literal charset,
-# with an exact `*` allowed only as the final component. Anything else -
-# and every target of a command that failed the engine's raw-text
-# precondition (`tainted`) - keeps today's verdict
-# (_is_critical_system_target). Classification is lexical and
-# case-insensitive (APFS default); symlinks are not resolved.
+# An exemption from today's prefix verdict exists only for a target word of
+# a single command inside the engine's closed grammar
+# (engine._closed_grammar_words) that the target grammar below fully
+# describes: an anchor (`~`, `$HOME/`, `${HOME}/`, or `/`), then components
+# from a literal charset, with an exact `*` allowed only as the final
+# component. Anything else - and every target of a command outside the
+# engine grammar - keeps today's verdict (_is_critical_system_target).
+# Classification is lexical and case-insensitive (APFS default); symlinks
+# are not resolved.
 _RE_LITERAL_COMPONENT = re.compile(r"[A-Za-z0-9._ +@%,=:-]+")
 
 # Protected stores (home-relative; owner-confirmed list B, TK-63):
@@ -221,8 +222,9 @@ def _temp_root_len(path: list[str]) -> int:
 def _path_zones(path: list[str], home: list[str] | None, home_str: str) -> set:
     """Deny zones of an absolute, casefolded component list (§2.1 table).
     A protected user dir is a direct child of a home, so the home row
-    already covers it. `/tmp` is a temp root, not a shallow zone: both
-    deny for rm, but for find a temp root is class K (§2.3)."""
+    already covers it. A temp root itself is the temp zone only - not
+    shallow, not system: it denies for rm, and for find it is class K
+    (§2.3)."""
     zones = set()
     temp = _temp_root_len(path)
     if temp and len(path) == temp:
@@ -237,26 +239,27 @@ def _path_zones(path: list[str], home: list[str] | None, home_str: str) -> set:
         if path[:len(h)] == h and len(path) - len(h) <= 1:
             zones.add("home")
         zones |= _store_classes(path, h, stores)
-    if path and path[0] in _SYSTEM_ROOTS and not (temp and len(path) > temp):
+    if path and path[0] in _SYSTEM_ROOTS and not temp:
         zones.add("system")
     return zones
 
 
-def classify_target(token: str, tainted: bool) -> set | None:
-    """Deny zones of a literal target (§2.1), or None when the token is
-    outside the grammar (the caller then applies today's verdict). An empty
+def classify_target(token: str) -> set | None:
+    """Deny zones of a literal target word (§2.1) of a command inside the
+    engine's closed grammar, or None when the word is no literal target
+    (the caller then applies today's verdict). An empty
     set means no deny zone; "dotdot" marks a `..` component (always deny).
     A final `*` stands for the children of its parent and gets the parent's
     zones: every deny zone a child can be in is a zone the parent already
     carries (home child, store ancestor, temp root, system root)."""
-    if tainted:
-        return None
     home_anchor = True
+    # In the closed grammar `~` is unquoted and `$HOME/` / `${HOME}/` open a
+    # double-quoted word - the two forms the shell expands to the home.
     if token == "~" or token.startswith("~/"):
         rest = token[1:]
-    elif token == "$HOME" or token.startswith("$HOME/"):
+    elif token.startswith("$HOME/"):
         rest = token[5:]
-    elif token == "${HOME}" or token.startswith("${HOME}/"):
+    elif token.startswith("${HOME}/"):
         rest = token[7:]
     elif token.startswith("/"):
         rest, home_anchor = token, False
@@ -279,15 +282,22 @@ def classify_target(token: str, tainted: bool) -> set | None:
     return _path_zones(path, home, home_str)
 
 
-def _denied_target(targets: list[str], tainted: bool) -> tuple[str, bool] | None:
+def _denied_target(targets: list[str], words: list[str] | None) -> tuple[str, bool] | None:
     """(token named in the reason, by_dotdot) when one rm / chmod-chown-
-    chgrp target is denied - literal grammar: zone verdict; otherwise:
-    today's verdict - or None. The reason names today's first critical
+    chgrp target is denied, or None. `targets` are today's tokens; `words`
+    the shell-word targets of a command inside the closed grammar, or None
+    (today's verdict). A word gets the zone verdict, a word that is no
+    literal target today's check. The reason names today's first critical
     target whenever today's code denies too, so an unchanged verdict keeps
     today's text; by_dotdot marks a deny the `..` rule alone produced."""
+    if words is None:
+        for tok in targets:
+            if _is_critical_system_target(_today_normalised(tok), tok):
+                return tok, False
+        return None
     new_hit = None
-    for tok in targets:
-        zones = classify_target(tok, tainted)
+    for tok in words:
+        zones = classify_target(tok)
         if zones is None:
             zones = {"today"} if _is_critical_system_target(_today_normalised(tok), tok) else set()
         if zones:
@@ -299,20 +309,6 @@ def _denied_target(targets: list[str], tainted: bool) -> tuple[str, bool] | None
         if _is_critical_system_target(_today_normalised(tok), tok):
             return tok, False
     return new_hit[0], "dotdot" in new_hit[1]
-
-
-def _shell_words_match(command: str, raw_tokens: list[str]) -> bool:
-    """The grammar classifies shell words; the fast tokenizer splits a word
-    with an inner quote (`~/Library/Keych"ains"`) in two, so a quoted
-    command qualifies only when its tokens equal the shlex words."""
-    if '"' not in command and "'" not in command:
-        return True
-    # Back-edge: local import, as for _evaluate_chunk below.
-    from .engine import _RE_NORM_ATTACHED_REDIR
-    try:
-        return shlex.split(_RE_NORM_ATTACHED_REDIR.sub(r" \1 ", command), posix=True) == raw_tokens
-    except ValueError:
-        return False
 
 
 # find (§2.3): the closed expression grammar, BSD find(1) and GNU findutils.
@@ -438,22 +434,26 @@ def _find_today(tokens: list[str]) -> SecurityDecision | None:
     return None
 
 
-def _check_find_targets(tokens: list[str], tainted: bool) -> SecurityDecision | None:
-    """§2.3: the worst class over every token after `find` (the program
-    token of a grammar-conforming exec clause excepted). T and C deny; D, K
-    and N lose today's deny only for an expression inside the find grammar
-    whose every exec program is read-only for that class; anything else
-    gets today's verdict."""
-    clauses = _find_exec_clauses(tokens)
+def _check_find_targets(tokens: list[str], words: list[str] | None) -> SecurityDecision | None:
+    """§2.3 over the shell words of a command inside the engine's closed
+    grammar (`words`; None: today's verdict on today's tokens): the worst
+    class over every word after `find` (the program word of a
+    grammar-conforming exec clause excepted). T and C deny; D, K and N lose
+    today's deny only for an expression inside the find grammar whose every
+    exec program is read-only for that class; anything else gets today's
+    verdict."""
+    if words is None:
+        return _find_today(tokens)
+    clauses = _find_exec_clauses(words)
     skip = set()
     if clauses is not None:
         skip = {idx for idx, args in clauses if _find_program(args[0]) is not None}
     worst, worst_tok = "N", None
-    for idx in range(1, len(tokens)):
+    for idx in range(1, len(words)):
         if idx in skip:
             continue
-        tok = tokens[idx]
-        zones = classify_target(tok, tainted)
+        tok = words[idx]
+        zones = classify_target(tok)
         if zones is None:
             cls = "T" if _is_critical_system_target(_today_normalised(tok), tok) else "N"
         else:
@@ -470,12 +470,27 @@ def _check_find_targets(tokens: list[str], tainted: bool) -> SecurityDecision | 
     return _find_today(tokens)
 
 
+def _operand_words(words: list[str]) -> list[str]:
+    """rm operands: the words after `rm` that are no option, every word
+    after `--`."""
+    out, end_of_options = [], False
+    for word in words[1:]:
+        if end_of_options or not word.startswith("-"):
+            out.append(word)
+        elif word == "--":
+            end_of_options = True
+    return out
+
+
 def _find_read_only(args: list[str], allowed: frozenset) -> bool:
     name = _find_program(args[0])
     return name in allowed and (name != "tail" or _tail_read_only(args[1:]))
 
 
-def _check_destructive_and_persistence(command: str, raw_tokens: list[str], tainted: bool = True) -> SecurityDecision | None:
+def _check_destructive_and_persistence(command: str, raw_tokens: list[str], words: list[str] | None = None) -> SecurityDecision | None:
+    # words (TK-63): the shell words of the whole command when it is a
+    # single simple command inside the engine's closed grammar, else None;
+    # only then do rm/find/chmod/chown/chgrp targets get the zone verdict.
     # Fork bomb
     if ":" in command and "{" in command and _RE_FORK_BOMB.search(command):
         return SecurityDecision(
@@ -489,8 +504,8 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str], tain
         return None
 
     head = os.path.basename(tokens[0])
-    if not tainted and head in ("rm", "find", "chmod", "chown", "chgrp"):
-        tainted = not _shell_words_match(command, raw_tokens)
+    if words is not None and words[0] != head:
+        words = None
 
     # Root / home destruction: rm -rf / or rm --recursive --force / or rm -rf ~
     if head == "rm":
@@ -511,7 +526,7 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str], tain
                 targets.append(clean_arg)
 
         if has_r or has_f:
-            hit = _denied_target(targets, tainted)
+            hit = _denied_target(targets, None if words is None else _operand_words(words))
             if hit and hit[1]:
                 return SecurityDecision(
                     decision="deny",
@@ -528,7 +543,7 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str], tain
     # find / -delete or find / -exec rm
     if head == "find":
         if any(tok in ("-delete", "-exec", "-execdir", "-ok", "-okdir") for tok in tokens[1:]):
-            find_dec = _check_find_targets(tokens, tainted)
+            find_dec = _check_find_targets(tokens, words)
             if find_dec:
                 return find_dec
 
@@ -545,7 +560,7 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str], tain
     if head in ("chmod", "chown", "chgrp"):
         has_R = any(tok in ("-R", "--recursive") or (tok.startswith("-") and not tok.startswith("--") and "R" in tok) for tok in tokens[1:])
         if has_R:
-            hit = _denied_target(tokens[1:], tainted)
+            hit = _denied_target(tokens[1:], None if words is None else words[1:])
             if hit and hit[1]:
                 return SecurityDecision(
                     decision="deny",
@@ -864,8 +879,8 @@ def _check_find_exec_subcommands(raw_tokens: list[str]) -> SecurityDecision | No
             # <-> engine module cycle (engine imports _check_find_exec_
             # subcommands at module load time).
             from .engine import _evaluate_chunk
-            # Nested evaluation is always tainted (TK-63 §2.1 step 3).
-            sub_dec = _evaluate_chunk(shlex.join(sub_tokens), True)
+            # Nested evaluation never gets the TK-63 exemptions (no words).
+            sub_dec = _evaluate_chunk(shlex.join(sub_tokens))
             if sub_dec.decision == "deny":
                 return sub_dec
             if sub_dec.decision == "ask":

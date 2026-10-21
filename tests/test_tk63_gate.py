@@ -60,8 +60,6 @@ class LiteralTargetZoneTests(_FixtureHome):
         for rel, want in expected.items():
             forms = [
                 "~/" + rel,
-                "$HOME/" + rel,
-                "${HOME}/" + rel,
                 FIXTURE_HOME + "/" + rel,
                 "~//" + rel,
                 "~/./" + rel,
@@ -69,6 +67,7 @@ class LiteralTargetZoneTests(_FixtureHome):
             if not rel.endswith("*"):
                 forms.append("~/" + rel + "/")
                 forms.append('"$HOME/' + rel + '"')
+                forms.append('"${HOME}/' + rel + '"')
             for form in forms:
                 got = security_gate.evaluate_security("rm -rf " + form).decision
                 self.assertEqual(got, want, form)
@@ -77,7 +76,7 @@ class LiteralTargetZoneTests(_FixtureHome):
         for target in (
             "~/proj/build",
             "~/proj/build/*",
-            "$HOME/proj/build",
+            '"$HOME/proj/build"',
             "~/Work/product-dev/actx/build",
             "~/Documents/proj/build",
             FIXTURE_HOME + "/proj/build",
@@ -305,6 +304,65 @@ class ClosedGrammarAskTests(_FixtureHome):
             "git -ccore.pager=cat log",
         ):
             self.assertAsk(command)
+
+
+class SingleCommandGrammarTests(_FixtureHome):
+    """Every loosening needs a single simple command inside the closed
+    grammar; each negative is a passing command plus one offending element
+    and keeps today's verdict."""
+
+    def test_loosened_single_commands(self):
+        for command in (
+            "find ~/proj -name '*.py' -exec stat {} \\;",
+            "find ~/proj -exec stat {} ';'",
+            'rm -rf "$HOME/proj/build"',
+            "rm -rf ~/proj/build",
+            "git -c core.pager=cat log",
+            "git clean -n -x",
+            "./gradlew assembleRelease",
+            "cargo publish --dry-run",
+            "pg_restore -l dump.bin",
+        ):
+            self.assertEqual(_verdict(command), ("allow", None), command)
+
+    def test_space_store_through_double_quotes_denies(self):
+        self.assertT4Deny('rm -rf "$HOME/Library/Application Support/x"')
+
+    def test_each_rule_violation_keeps_todays_t4_deny(self):
+        for command in (
+            "rm -rf ~/proj/build && true",          # chain
+            "true; rm -rf ~/proj/build",            # chain
+            "rm -rf ~/proj/build\ntrue",            # newline
+            "X=1 rm -rf ~/proj/build",              # assignment prefix
+            "env rm -rf ~/proj/build",              # wrapper
+            "rm -rf $HOME/proj/build",              # unquoted $
+            'rm -rf "~/proj/build"',                # quoted ~
+            "rm -rf '$HOME/proj/build'",            # single-quoted $HOME
+            "rm -rf ~/proj/build>out",              # attached redirection
+            "find ~/proj '(' -name a ')' -exec stat {} +",  # parentheses
+            "find ~/proj ( -name a ) -exec stat {} +",      # parentheses
+            "find ~/proj -name *.py -exec stat {} \\;",     # unquoted glob in a value
+            "rm -rf =x ~/proj/build",               # leading =
+            'rm -rf ~/proj/build ";"',              # quoted operator character
+            'find ~/proj -exec stat {} ";"',        # quoted operator character
+        ):
+            self.assertT4Deny(command)
+
+    def test_each_rule_violation_keeps_todays_ask(self):
+        for command in (
+            "git -c core.pager=cat log && true",
+            'git -c core.pager=c"at" log',          # intra-word quote
+            "git clean -n -x; true",
+            "X=1 git clean -n -x",
+            "./gradlew assembleRelease && true",
+            "cargo publish --dry-run && true",
+            "pg_restore -l dump.bin && true",
+        ):
+            self.assertEqual(security_gate.evaluate_security(command).decision, "ask", command)
+
+    def test_temp_roots_are_class_k_for_find(self):
+        for root in ("/tmp", "/private/tmp", "/var/tmp"):
+            self.assertNoT4Deny("find " + root + " -exec stat {} +")
 
 
 class InlineEnvironmentReasonTests(_FixtureHome):

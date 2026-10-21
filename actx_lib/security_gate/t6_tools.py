@@ -74,9 +74,11 @@ _CARGO_PUBLISH_BOOL_FLAGS = frozenset({
 _CARGO_PUBLISH_VALUE_FLAGS = frozenset({"--registry", "-p", "--package"})
 
 
-def _cargo_publish_dry_run(raw_tokens: list[str]) -> bool:
-    tokens = _unwrap_tokens(raw_tokens)
-    if len(tokens) < 2 or tokens[1] != "publish":
+def _cargo_publish_dry_run(words: list[str] | None) -> bool:
+    """`words`: the shell words of a single command inside the engine's
+    closed grammar (None: no exemption)."""
+    tokens = words
+    if tokens is None or len(tokens) < 2 or tokens[0] != "cargo" or tokens[1] != "publish":
         return False
     dry_run = False
     i = 2
@@ -96,7 +98,7 @@ def _cargo_publish_dry_run(raw_tokens: list[str]) -> bool:
     return dry_run
 
 
-def _check_high_risk_cargo(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
+def _check_high_risk_cargo(command: str, raw_tokens: list[str], words: list[str] | None = None) -> SecurityDecision | None:
     subcmd, sub_args = _parse_cargo_subcommand(raw_tokens)
     if subcmd is None:
         return None
@@ -107,7 +109,7 @@ def _check_high_risk_cargo(command: str, raw_tokens: list[str]) -> SecurityDecis
             reason="Executing cargo clean deletes build artifacts and caches, requiring human confirmation",
             category="T6_HIGH_RISK_CARGO",
         )
-    if subcmd == "publish" and _cargo_publish_dry_run(raw_tokens):
+    if subcmd == "publish" and _cargo_publish_dry_run(words):
         return None
     if subcmd in _CARGO_REGISTRY_MUTATE:
         return SecurityDecision(
@@ -292,7 +294,26 @@ def _gradle_local_task(token: str) -> bool:
     return not any(marker in middle for marker in cli_families.GRADLE_ASK_MARKERS)
 
 
-def _check_gradlew(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
+def _gradle_local_words(words: list[str] | None) -> set:
+    """Positional task words of a single gradlew command inside the engine's
+    closed grammar that _gradle_local_task exempts; empty when `words` is
+    None. Flags are walked as in _check_gradlew."""
+    out = set()
+    if words is None or os.path.basename(words[0]) != "gradlew":
+        return out
+    idx = 1
+    while idx < len(words):
+        word = words[idx]
+        if word in cli_families.GRADLE_VALUE_FLAGS:
+            idx += 2
+            continue
+        if not word.startswith("-") and _gradle_local_task(word):
+            out.add(word)
+        idx += 1
+    return out
+
+
+def _check_gradlew(command: str, raw_tokens: list[str], words: list[str] | None = None) -> SecurityDecision | None:
     """T6 ask for gradlew publish-class tasks (TK-55 F5), precedent
     ``_check_high_risk_cargo``.
 
@@ -309,6 +330,7 @@ def _check_gradlew(command: str, raw_tokens: list[str]) -> SecurityDecision | No
     tokens = _unwrap_tokens(raw_tokens)
     if not tokens or os.path.basename(tokens[0]) != "gradlew":
         return None
+    local_tasks = _gradle_local_words(words)
     idx = 1
     while idx < len(tokens):
         tok = tokens[idx]
@@ -321,7 +343,7 @@ def _check_gradlew(command: str, raw_tokens: list[str]) -> SecurityDecision | No
         if tok.startswith("-"):
             idx += 1  # bool or unknown flag: skip, keep scanning
             continue
-        if _gradle_local_task(tok):
+        if tok in local_tasks:
             idx += 1
             continue
         if cli_families.gradle_task_class(tok) == "ask":

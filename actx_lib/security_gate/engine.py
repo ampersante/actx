@@ -56,11 +56,11 @@ def _fast_tokenize(chunk: str) -> list[str]:
     return shlex.split(norm_chunk, posix=True)
 
 
-def _evaluate_chunk(chunk: str, tainted: bool = True) -> SecurityDecision:
-    # tainted (TK-63): the whole command failed the literal-target
-    # precondition, or this is a nested evaluation - T4 then gives every
-    # target today's verdict. Defaults to True so any internal caller that
-    # does not pass it (find -exec re-evaluation) stays tainted.
+def _evaluate_chunk(chunk: str, exempt_words: list[str] | None = None) -> SecurityDecision:
+    # exempt_words (TK-63): the shell words of a whole single command inside
+    # the closed grammar (_closed_grammar_words); only then may T4 and T6
+    # loosen today's verdict. None - the default, so an internal caller such
+    # as the find -exec re-evaluation - keeps today's verdict.
     # Fast path for simple safe commands without redirection or special symbols (<0.001ms)
     if not any(c in chunk for c in ("<", ">", "$", "`", "/", "@", "-", ".", "~", ":", "(", ")", "\"", "'")):
         words = chunk.split()
@@ -73,7 +73,7 @@ def _evaluate_chunk(chunk: str, tainted: bool = True) -> SecurityDecision:
         return _DECISION_ALLOW
 
     # 1. T4: Destructive OS mutations & Persistence (Top Priority)
-    t4 = _check_destructive_and_persistence(chunk, tokens, tainted)
+    t4 = _check_destructive_and_persistence(chunk, tokens, exempt_words)
     if t4:
         return t4
 
@@ -109,12 +109,12 @@ def _evaluate_chunk(chunk: str, tainted: bool = True) -> SecurityDecision:
         return t7
 
     # 7. T6: High-Risk Git Mutations (Requires 'ask')
-    t6 = _check_high_risk_git(chunk, tokens)
+    t6 = _check_high_risk_git(chunk, tokens, exempt_words)
     if t6:
         return t6
 
     # 8. T6: High-Risk Cargo Operations (Requires 'ask')
-    t6_cargo = _check_high_risk_cargo(chunk, tokens)
+    t6_cargo = _check_high_risk_cargo(chunk, tokens, exempt_words)
     if t6_cargo:
         return t6_cargo
 
@@ -135,13 +135,13 @@ def _evaluate_chunk(chunk: str, tainted: bool = True) -> SecurityDecision:
 
     # 10b. T6: gradlew publish-class tasks (TK-55 F5) - positional task
     # tokens need the last-":"-segment class, not the exact-token table
-    t6_gradlew = _check_gradlew(chunk, tokens)
+    t6_gradlew = _check_gradlew(chunk, tokens, exempt_words)
     if t6_gradlew:
         return t6_gradlew
 
     # 11. T6: High-Risk SQL payloads (TK-43) - head-specific, runs after the
     # generic verb table (SQL payloads need the classifier, not token specs)
-    t6_sql = _check_sql(chunk, tokens)
+    t6_sql = _check_sql(chunk, tokens, exempt_words)
     if t6_sql:
         return t6_sql
 
@@ -275,38 +275,136 @@ def _split_into_chunks(command: str) -> list[str]:
     return [_unmask_literal_semicolons(c) for c in chunks]
 
 
-# TK-63 §2.1 step 3: closed precondition on the RAW whole command for the
-# T4 literal-target exemptions. A command that fails it is tainted: every
-# T4 target gets today's verdict. `$HOME` must not continue as a name.
-_RE_HOME_ANCHOR = re.compile(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])")
-# find's placeholder as a whole word (quotes, `\;` and `;` may touch it).
-_RE_FIND_PLACEHOLDER = re.compile(r"(?<![^\s'\"])\{\}(?![^\s'\";\\])")
-_RE_SOURCE_WORD = re.compile(r"(?<![\w./-])(?:source|eval|\.)(?![\w./-])")
-# Heads whose T4 branches read `tainted` (t4_destructive).
-_T4_LITERAL_HEADS = ("rm", "find", "chmod", "chown", "chgrp")
+# TK-63: the closed grammar every loosening requires (owner decision
+# 2026-10-22: single simple commands only). The gate does not model shell
+# state, so an exemption is computed only on a raw command whose every
+# character is in a closed allow-list: then its shell words are exactly
+# the shlex words, nothing expands except an anchor (`~/`, `"$HOME/…"`)
+# or a final `*` component of a target, and no earlier command or
+# assignment can change what the words mean. Anything else keeps today's
+# verdict.
+_EXEMPTION_HEADS = frozenset({
+    "rm", "find", "chmod", "chown", "chgrp", "cargo", "git", "pg_restore",
+})
+_RE_BARE_WORD = re.compile(r"[A-Za-z0-9._+@%,=:/-]+")
+_RE_DOUBLE_QUOTED_BODY = re.compile(r"[A-Za-z0-9._+@%,=:/ -]*")
+_RE_SINGLE_QUOTED_BODY = re.compile(r"[A-Za-z0-9._+@%,=:/ *?\[\]-]*")
+# Exact whole bare words outside the charset: find's placeholder, its
+# escaped terminator and negation.
+_BARE_WHOLE_WORDS = {"{}": "{}", "\\;": ";", "!": "!"}
+_FIND_LEADING_FLAGS = frozenset({"-H", "-L", "-P", "-E", "-X", "-s", "-x", "-d"})
 
 
-def _literal_target_precondition(command: str) -> bool:
-    """True when the command can carry literal T4 targets: (a) every
-    backslash is `\\;`, (b) no backtick, (c) every `$` starts `$HOME` /
-    `${HOME}`, (d) every brace belongs to `${HOME}` or a whole `{}` word,
-    (e) on the quote-stripped text HOME occurs only in those anchors and no
-    `source`/`eval`/standalone `.` word occurs."""
-    if "\\" in command and command.count("\\") != command.count("\\;"):
-        return False
-    if "`" in command:
-        return False
-    no_anchor = _RE_HOME_ANCHOR.sub("", command)
-    if "$" in no_anchor:
-        return False
-    if "{" in no_anchor or "}" in no_anchor:
-        rest = _RE_FIND_PLACEHOLDER.sub("", no_anchor)
-        if "{" in rest or "}" in rest:
-            return False
-    stripped = _RE_HOME_ANCHOR.sub("", command.replace("'", "").replace('"', ""))
-    if "HOME" in stripped:
-        return False
-    return not _RE_SOURCE_WORD.search(stripped)
+def _is_exemption_head(word: str) -> bool:
+    # gradlew: every spelling _check_gradlew accepts (basename gradlew).
+    return word in _EXEMPTION_HEADS or word.rsplit("/", 1)[-1] == "gradlew"
+
+
+def _bare_word(raw: str) -> tuple[str, bool] | None:
+    """(word, has a final `*` component) of an unquoted word inside the
+    grammar, or None."""
+    if raw in _BARE_WHOLE_WORDS:
+        return _BARE_WHOLE_WORDS[raw], False
+    if raw.startswith("="):
+        return None
+    body = raw
+    if raw.startswith("~"):
+        if raw != "~" and raw[1] != "/":
+            return None
+        body = raw[1:]
+    glob = False
+    if "*" in body:
+        if not (body == "*" or body.endswith("/*")) or body.count("*") != 1:
+            return None
+        glob, body = True, body[:-1]
+    if body and not _RE_BARE_WORD.fullmatch(body):
+        return None
+    return raw, glob
+
+
+def _quoted_word(raw: str) -> str | None:
+    body = raw[1:-1]
+    if raw[0] == "'":
+        return body if body == ";" or _RE_SINGLE_QUOTED_BODY.fullmatch(body) else None
+    rest = body
+    for anchor in ("$HOME/", "${HOME}/"):
+        if body.startswith(anchor):
+            rest = body[len(anchor):]
+            break
+    return body if _RE_DOUBLE_QUOTED_BODY.fullmatch(rest) else None
+
+
+def _glob_target_indices(words: list[str]) -> set:
+    """Word indices where a final `*` component is a T4 target or a find
+    starting point; a glob anywhere else is outside the grammar."""
+    head = words[0]
+    if head == "find":
+        out, i = set(), 1
+        while i < len(words) and words[i] in _FIND_LEADING_FLAGS:
+            i += 1
+        while i < len(words) and not words[i].startswith("-") and words[i] != "!":
+            out.add(i)
+            i += 1
+        return out
+    if head not in ("rm", "chmod", "chown", "chgrp"):
+        return set()
+    operands, end_of_options = [], False
+    for i in range(1, len(words)):
+        if end_of_options or not words[i].startswith("-"):
+            operands.append(i)
+        elif words[i] == "--":
+            end_of_options = True
+    # chmod/chown/chgrp: the first operand is the mode/owner, not a target.
+    return set(operands if head == "rm" else operands[1:])
+
+
+def _closed_grammar_words(command: str) -> list[str] | None:
+    """The shell words of a single simple command inside the closed grammar,
+    or None. Words are separated by spaces; a quoted region is a whole
+    word (single quotes: charset, space and `*?[]`, or exactly `';'`;
+    double quotes: charset and space after an optional `$HOME/` or
+    `${HOME}/`); an unquoted word uses the charset, a leading `~` before
+    `/` or the end, one final `*` component, or is exactly `{}`, `\\;`, `!`,
+    and never starts with `=`. The first word is an exemption head."""
+    first = command.lstrip(" ").split(" ", 1)[0]
+    if not _is_exemption_head(first):
+        return None
+    words, globs = [], []
+    i, n = 0, len(command)
+    while i < n:
+        if command[i] == " ":
+            i += 1
+            continue
+        if command[i] in ("'", '"'):
+            end = command.find(command[i], i + 1)
+            if end == -1 or (end + 1 < n and command[end + 1] != " "):
+                return None
+            word = _quoted_word(command[i:end + 1])
+            if word is None:
+                return None
+            words.append(word)
+            globs.append(False)
+            i = end + 1
+            continue
+        end = command.find(" ", i)
+        end = n if end == -1 else end
+        bare = _bare_word(command[i:end])
+        if bare is None:
+            return None
+        words.append(bare[0])
+        globs.append(bare[1])
+        i = end
+    if not words or not _is_exemption_head(words[0]):
+        return None
+    allowed = _glob_target_indices(words)
+    if any(g and idx not in allowed for idx, g in enumerate(globs)):
+        return None
+    try:
+        if shlex.split(command, posix=True) != words:
+            return None
+    except ValueError:
+        return None
+    return words
 
 
 def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = False) -> SecurityDecision:
@@ -314,8 +412,8 @@ def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = F
 
     Returns SecurityDecision(decision="allow"|"deny"|"ask", reason=..., category=...).
     Fail-open on internal parser errors to guarantee uninterrupted developer workflow.
-    _nested: a recursive call from inside the gate (`sh -c` body); always
-    tainted for the T4 literal-target exemptions (TK-63).
+    _nested: a recursive call from inside the gate (`sh -c` body); it never
+    gets the TK-63 exemptions.
     """
     if not command or not isinstance(command, str):
         return _DECISION_ALLOW
@@ -341,12 +439,9 @@ def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = F
             if first_word in ("echo", "printf", "true", "false", "pwd", "whoami"):
                 return _DECISION_ALLOW
 
-        # The precondition only matters to the T4 heads that read `tainted`;
-        # a command naming none of them stays tainted (today's verdict).
-        tainted = _nested or not (
-            any(h in raw_command for h in _T4_LITERAL_HEADS)
-            and _literal_target_precondition(raw_command)
-        )
+        # TK-63: words for the exemptions, or None (today's verdict) for a
+        # nested evaluation or a command outside the closed grammar.
+        exempt_words = None if _nested else _closed_grammar_words(raw_command)
 
         # Fast global check for fork bombs
         if ":" in command and "{" in command and _RE_FORK_BOMB.search(command):
@@ -391,13 +486,16 @@ def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = F
                 category="T4_DESTRUCTIVE_MUTATION",
             )
 
+        if exempt_words is not None and sum(1 for c in chunks if c.strip()) != 1:
+            exempt_words = None
+
         decisions = []
         for chunk in chunks:
             chunk = chunk.strip()
             if not chunk:
                 continue
             try:
-                dec = _evaluate_chunk(chunk, tainted)
+                dec = _evaluate_chunk(chunk, exempt_words)
                 if dec.decision == "deny":
                     return dec
                 if dec.decision == "ask":

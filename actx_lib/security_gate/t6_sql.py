@@ -68,7 +68,7 @@ def _pg_restore_list_only(args: list[str]) -> bool:
     return listed and operands == 1
 
 
-def _check_sql(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
+def _check_sql(command: str, raw_tokens: list[str], words: list[str] | None = None) -> SecurityDecision | None:
     """T6_HIGH_RISK_SQL (TK-43, REQ-03): full SQL payload gating for
     psql/sqlite3/duckdb plus pg_restore.
 
@@ -103,7 +103,9 @@ def _check_sql(command: str, raw_tokens: list[str]) -> SecurityDecision | None:
             return None
         head = os.path.basename(tokens[0])
         if head == "pg_restore":
-            if _pg_restore_list_only(tokens[1:]):
+            # TK-63: list-only is exempt only for a single command inside the
+            # engine's closed grammar (`words`); anything else keeps the ask.
+            if words is not None and words[0] == "pg_restore" and _pg_restore_list_only(words[1:]):
                 return None
             return _sql_ask(
                 "pg_restore writes a database from an archive file whose SQL cannot be scanned, requiring human confirmation"
