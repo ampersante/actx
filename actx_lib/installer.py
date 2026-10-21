@@ -322,13 +322,13 @@ def _install_codex(path, abs_actx):
         and any(not _is_actx_handler(h) for h in entry["hooks"])
     ]
     changed = _merge_pretool(path, data, _hook_handler(abs_actx), _CODEX_MATCHER)
-    if shared:
-        print(
-            "note: %s: an entry with matcher %r also holds other hooks; its "
-            "matcher was left unchanged (an earlier actx may have widened it)."
-            % (path, _CODEX_MATCHER)
-        )
     if changed:
+        if shared:
+            print(
+                "note: %s: an entry with matcher %r also holds other hooks; "
+                "its matcher was left unchanged (an earlier actx may have "
+                "widened it)." % (path, _CODEX_MATCHER)
+            )
         print("codex: hook entry written; trust it again via /hooks in Codex.")
     return changed
 
