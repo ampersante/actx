@@ -244,14 +244,16 @@ def _path_zones(path: list[str], home: list[str] | None, home_str: str) -> set:
     return zones
 
 
-def classify_target(token: str) -> set | None:
+def classify_target(token: str, glob: bool = False) -> set | None:
     """Deny zones of a literal target word (§2.1) of a command inside the
     engine's closed grammar, or None when the word is no literal target
     (the caller then applies today's verdict). An empty
     set means no deny zone; "dotdot" marks a `..` component (always deny).
     A final `*` stands for the children of its parent and gets the parent's
     zones: every deny zone a child can be in is a zone the parent already
-    carries (home child, store ancestor, temp root, system root)."""
+    carries (home child, store ancestor, temp root, system root). `glob`:
+    the engine grammar saw that final `*` UNQUOTED; a quoted `*` is a
+    literal name, no literal component, so the word gets today's verdict."""
     home_anchor = True
     # In the closed grammar `~` is unquoted and `$HOME/` / `${HOME}/` open a
     # double-quoted word - the two forms the shell expands to the home.
@@ -266,7 +268,7 @@ def classify_target(token: str) -> set | None:
     else:
         return None
     comps = _components(rest)
-    if comps and comps[-1] == "*":
+    if glob and comps and comps[-1] == "*":
         comps = comps[:-1]
     if not all(_RE_LITERAL_COMPONENT.fullmatch(c) for c in comps):
         return None
@@ -282,10 +284,11 @@ def classify_target(token: str) -> set | None:
     return _path_zones(path, home, home_str)
 
 
-def _denied_target(targets: list[str], words: list[str] | None) -> tuple[str, bool] | None:
+def _denied_target(targets: list[str], words: list[tuple[str, bool]] | None) -> tuple[str, bool] | None:
     """(token named in the reason, by_dotdot) when one rm / chmod-chown-
     chgrp target is denied, or None. `targets` are today's tokens; `words`
-    the shell-word targets of a command inside the closed grammar, or None
+    the (shell word, unquoted-glob) targets of a command inside the closed
+    grammar, or None
     (today's verdict). A word gets the zone verdict, a word that is no
     literal target today's check. The reason names today's first critical
     target whenever today's code denies too, so an unchanged verdict keeps
@@ -296,8 +299,8 @@ def _denied_target(targets: list[str], words: list[str] | None) -> tuple[str, bo
                 return tok, False
         return None
     new_hit = None
-    for tok in words:
-        zones = classify_target(tok)
+    for tok, glob in words:
+        zones = classify_target(tok, glob)
         if zones is None:
             zones = {"today"} if _is_critical_system_target(_today_normalised(tok), tok) else set()
         if zones:
@@ -434,26 +437,29 @@ def _find_today(tokens: list[str]) -> SecurityDecision | None:
     return None
 
 
-def _check_find_targets(tokens: list[str], words: list[str] | None) -> SecurityDecision | None:
+def _check_find_targets(
+    tokens: list[str], words: list[str] | None, globs: tuple[bool, ...] = ()
+) -> SecurityDecision | None:
     """§2.3 over the shell words of a command inside the engine's closed
     grammar (`words`; None: today's verdict on today's tokens): the worst
-    class over every word after `find` (the program word of a
-    grammar-conforming exec clause excepted). T and C deny; D, K and N lose
-    today's deny only for an expression inside the find grammar whose every
-    exec program is read-only for that class; anything else gets today's
-    verdict."""
+    class over every word after `find` except the program word of every
+    exec clause (a program is admitted or not by _find_read_only, never
+    classified as a target). T and C deny; D, K and N lose today's deny
+    only for an expression inside the find grammar whose every exec program
+    is read-only for that class; anything else gets today's verdict.
+    `globs[i]`: words[i] ends in an unquoted `*` component."""
     if words is None:
         return _find_today(tokens)
     clauses = _find_exec_clauses(words)
     skip = set()
     if clauses is not None:
-        skip = {idx for idx, args in clauses if _find_program(args[0]) is not None}
+        skip = {idx for idx, _args in clauses}
     worst, worst_tok = "N", None
     for idx in range(1, len(words)):
         if idx in skip:
             continue
         tok = words[idx]
-        zones = classify_target(tok)
+        zones = classify_target(tok, idx < len(globs) and globs[idx])
         if zones is None:
             cls = "T" if _is_critical_system_target(_today_normalised(tok), tok) else "N"
         else:
@@ -470,13 +476,14 @@ def _check_find_targets(tokens: list[str], words: list[str] | None) -> SecurityD
     return _find_today(tokens)
 
 
-def _operand_words(words: list[str]) -> list[str]:
-    """rm operands: the words after `rm` that are no option, every word
-    after `--`."""
+def _operand_indices(words: list[str]) -> list[int]:
+    """rm operands: indices of the words after `rm` that are no option,
+    every word after `--`."""
     out, end_of_options = [], False
-    for word in words[1:]:
+    for i in range(1, len(words)):
+        word = words[i]
         if end_of_options or not word.startswith("-"):
-            out.append(word)
+            out.append(i)
         elif word == "--":
             end_of_options = True
     return out
@@ -487,10 +494,16 @@ def _find_read_only(args: list[str], allowed: frozenset) -> bool:
     return name in allowed and (name != "tail" or _tail_read_only(args[1:]))
 
 
-def _check_destructive_and_persistence(command: str, raw_tokens: list[str], words: list[str] | None = None) -> SecurityDecision | None:
+def _check_destructive_and_persistence(
+    command: str,
+    raw_tokens: list[str],
+    words: list[str] | None = None,
+    globs: tuple[bool, ...] | None = None,
+) -> SecurityDecision | None:
     # words (TK-63): the shell words of the whole command when it is a
     # single simple command inside the engine's closed grammar, else None;
     # only then do rm/find/chmod/chown/chgrp targets get the zone verdict.
+    # globs[i]: words[i] ends in an unquoted `*` component.
     # Fork bomb
     if ":" in command and "{" in command and _RE_FORK_BOMB.search(command):
         return SecurityDecision(
@@ -506,6 +519,8 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str], word
     head = os.path.basename(tokens[0])
     if words is not None and words[0] != head:
         words = None
+    if words is not None:
+        globs = tuple(globs) if globs is not None else (False,) * len(words)
 
     # Root / home destruction: rm -rf / or rm --recursive --force / or rm -rf ~
     if head == "rm":
@@ -526,7 +541,10 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str], word
                 targets.append(clean_arg)
 
         if has_r or has_f:
-            hit = _denied_target(targets, None if words is None else _operand_words(words))
+            hit = _denied_target(
+                targets,
+                None if words is None else [(words[i], globs[i]) for i in _operand_indices(words)],
+            )
             if hit and hit[1]:
                 return SecurityDecision(
                     decision="deny",
@@ -543,7 +561,7 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str], word
     # find / -delete or find / -exec rm
     if head == "find":
         if any(tok in ("-delete", "-exec", "-execdir", "-ok", "-okdir") for tok in tokens[1:]):
-            find_dec = _check_find_targets(tokens, words)
+            find_dec = _check_find_targets(tokens, words, globs or ())
             if find_dec:
                 return find_dec
 
@@ -560,7 +578,9 @@ def _check_destructive_and_persistence(command: str, raw_tokens: list[str], word
     if head in ("chmod", "chown", "chgrp"):
         has_R = any(tok in ("-R", "--recursive") or (tok.startswith("-") and not tok.startswith("--") and "R" in tok) for tok in tokens[1:])
         if has_R:
-            hit = _denied_target(tokens[1:], None if words is None else words[1:])
+            hit = _denied_target(
+                tokens[1:], None if words is None else list(zip(words[1:], globs[1:]))
+            )
             if hit and hit[1]:
                 return SecurityDecision(
                     decision="deny",
