@@ -379,12 +379,16 @@ def _closed_grammar_words(command: str) -> GrammarWords | None:
     `${HOME}/`); an unquoted word uses the charset, a leading `~` before
     `/` or the end, one final `*` component, or is exactly `{}`, `\\;`, `!`,
     and never starts with `=`. The first word is an exemption head."""
-    # Cheap prefilter only: a head word inside the grammar is bare or one
-    # whole quoted region, so stripping its quotes yields the parsed word;
-    # the parsed first word is validated below.
-    first = command.lstrip(" ").split(" ", 1)[0]
-    if len(first) >= 2 and first[0] in ("'", '"') and first[-1] == first[0]:
-        first = first[1:-1]
+    # Cheap prefilter only: a head word inside the grammar is bare (ends at
+    # the first space) or one whole quoted region (ends at the closing
+    # quote, spaces included), so this yields the parsed first word of
+    # every command the grammar accepts; that word is validated again below.
+    start = len(command) - len(command.lstrip(" "))
+    if command[start:start + 1] in ("'", '"'):
+        end = command.find(command[start], start + 1)
+        first = command[start + 1:end] if end != -1 else ""
+    else:
+        first = command[start:].split(" ", 1)[0]
     if not _is_exemption_head(first):
         return None
     words, globs = [], []

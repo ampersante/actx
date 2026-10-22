@@ -380,6 +380,32 @@ def _find_exec_clauses(tokens: list[str]) -> list[tuple[int, list[str]]] | None:
     return clauses
 
 
+def _find_exec_program_indices(tokens: list[str]) -> set:
+    """Program word indices of every -exec/-execdir/-ok/-okdir clause, by a
+    syntactic scan that does not need the whole expression to be inside the
+    find grammar: a known one-value primary skips its value, a clause ends
+    at the first `;` or at a `+` right after `{}`. Where the grammar holds,
+    these are exactly the _find_exec_clauses program indices."""
+    out, i, n = set(), 1, len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok in _FIND_ARITY1 or _RE_FIND_NEWERXY.fullmatch(tok):
+            i += 2
+            continue
+        if tok in ("-exec", "-execdir", "-ok", "-okdir"):
+            if i + 1 < n:
+                out.add(i + 1)
+            j = i + 1
+            while j < n and tokens[j] != ";" and not (
+                tokens[j] == "+" and j > i + 1 and tokens[j - 1] == "{}"
+            ):
+                j += 1
+            i = j + 1
+            continue
+        i += 1
+    return out
+
+
 def _find_program(token: str) -> str | None:
     """Program name of a bare or /bin, /usr/bin exec token; None for any
     other path (`./cat`, `/usr/local/bin/cat` are other programs)."""
@@ -451,9 +477,7 @@ def _check_find_targets(
     if words is None:
         return _find_today(tokens)
     clauses = _find_exec_clauses(words)
-    skip = set()
-    if clauses is not None:
-        skip = {idx for idx, _args in clauses}
+    skip = _find_exec_program_indices(words)
     worst, worst_tok = "N", None
     for idx in range(1, len(words)):
         if idx in skip:
