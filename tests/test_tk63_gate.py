@@ -413,6 +413,19 @@ class GrammarWordProvenanceTests(_FixtureHome):
         self.assertNoDecision("find /tmp/x -exec /tmp/a/../tool {} \\;")
         self.assertT4Deny("find ~/.aws -exec /tmp/tool {} \\;")
 
+    def test_exec_program_is_never_a_target_outside_admission(self):
+        self.assertNoDecision("find /tmp/x -fprint out -exec /Users/other/.aws/tool {} \\;")
+        self.assertNoDecision("find /tmp/x -unknown -exec /tmp/a/../tool {} \\;")
+        self.assertNoDecision("find /tmp/x -ok /Users/other/.aws/tool {} \\;")
+        self.assertT4Deny("find /tmp/x -exec stat ~/.aws {} \\;")
+
+    def test_quoted_head_with_spaces_is_the_parsed_head(self):
+        self.assertNoDecision('"./path with space/gradlew" assembleRelease')
+        self.assertNoDecision("'./path with space/gradlew' assembleRelease")
+        self.assertEqual(
+            security_gate.evaluate_security('"./path with space/gradlew" publish').decision, "ask"
+        )
+
 
 class InlineEnvironmentReasonTests(_FixtureHome):
     """CHK-06 sample: the decision is unchanged, only the reason text."""
