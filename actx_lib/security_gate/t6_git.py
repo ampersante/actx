@@ -155,32 +155,53 @@ _GIT_CLEAN_DRY_RUN_TOKENS = frozenset({"-n", "--dry-run", "-d", "-x", "-X", "-q"
 _RE_GIT_CLEAN_CLUSTER = re.compile(r"-[ndxXq]+")
 
 
+# Global options taking the next word as their value; the same set the
+# subcommand search of _check_high_risk_git skips.
+_GIT_TWO_ARG_GLOBALS = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+    "--super-prefix", "--config-env",
+})
+
+
+def _git_global_prefix(words: list[str] | None) -> tuple[int, frozenset] | None:
+    """Walk the global options of a single `git` command inside the
+    engine's closed grammar, as _check_high_risk_git walks today's tokens:
+    a two-argument global skips its value, any other `-` word is one word,
+    the first other word is the subcommand. Returns (subcommand index or
+    -1, the separate-word `-c` values `core.pager=cat` / `core.pager=`,
+    key case-insensitive), or None when `words` is None or no git
+    command."""
+    if words is None or not words or words[0] != "git":
+        return None
+    no_pager, i = set(), 1
+    while i < len(words):
+        word = words[i]
+        if word in _GIT_TWO_ARG_GLOBALS:
+            if word == "-c" and i + 1 < len(words):
+                kv = words[i + 1]
+                key = kv.split("=", 1)[0]
+                if key.casefold() == "core.pager" and kv[len(key):] in ("=cat", "="):
+                    no_pager.add(kv)
+            i += 2
+            continue
+        if word.startswith("-"):
+            i += 1
+            continue
+        return i, frozenset(no_pager)
+    return -1, frozenset(no_pager)
+
+
 def _git_clean_dry_run(words: list[str] | None) -> bool:
     """`words`: the shell words of a single command inside the engine's
-    closed grammar (None: no exemption); `clean` directly after `git`."""
-    if words is None or len(words) < 2 or words[0] != "git" or words[1] != "clean":
+    closed grammar (None: no exemption); the subcommand after the global
+    options is `clean`."""
+    prefix = _git_global_prefix(words)
+    if prefix is None or prefix[0] == -1 or words[prefix[0]] != "clean":
         return False
-    args = words[2:]
+    args = words[prefix[0] + 1:]
     if not all(t in _GIT_CLEAN_DRY_RUN_TOKENS or _RE_GIT_CLEAN_CLUSTER.fullmatch(t) for t in args):
         return False
     return any(t == "--dry-run" or (not t.startswith("--") and "n" in t) for t in args)
-
-
-def _git_no_pager_values(words: list[str] | None) -> set:
-    """The `-c` values `core.pager=cat` / `core.pager=` (key case-insensitive,
-    separate `-c` word) before the subcommand of a single command inside
-    the engine's closed grammar; empty when `words` is None."""
-    out = set()
-    if words is None or words[0] != "git":
-        return out
-    i = 1
-    while i + 1 < len(words) and words[i] == "-c":
-        kv = words[i + 1]
-        key = kv.split("=", 1)[0]
-        if key.casefold() == "core.pager" and kv[len(key):] in ("=cat", "="):
-            out.add(kv)
-        i += 2
-    return out
 
 
 def _check_high_risk_git(command: str, raw_tokens: list[str], words: list[str] | None = None) -> SecurityDecision | None:
@@ -192,19 +213,9 @@ def _check_high_risk_git(command: str, raw_tokens: list[str], words: list[str] |
     subcmd = None
     subcmd_idx = -1
     idx = 1
-    two_arg_flags = {
-        "-C",
-        "-c",
-        "--git-dir",
-        "--work-tree",
-        "--namespace",
-        "--exec-path",
-        "--super-prefix",
-        "--config-env",
-    }
     while idx < len(tokens):
         tok = tokens[idx]
-        if tok in two_arg_flags:
+        if tok in _GIT_TWO_ARG_GLOBALS:
             idx += 2
             continue
         if tok.startswith("-"):
@@ -221,7 +232,8 @@ def _check_high_risk_git(command: str, raw_tokens: list[str], words: list[str] |
     # git's own global flags - a subcommand-level '-c' (e.g. `git log -c`,
     # the combined-diff flag) is not this class.
     scan_upto = subcmd_idx if subcmd_idx != -1 else len(tokens)
-    no_pager_values = _git_no_pager_values(words)
+    prefix = _git_global_prefix(words)
+    no_pager_values = frozenset() if prefix is None else prefix[1]
     for idx_c in range(1, scan_upto):
         tok_c = tokens[idx_c]
         kv = None

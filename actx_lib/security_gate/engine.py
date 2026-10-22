@@ -7,6 +7,7 @@ Body unchanged from the pre-split monolith - see tools/ast_identity_check.py.
 
 import re
 import shlex
+from typing import NamedTuple
 
 from .common import SecurityDecision, _DECISION_ALLOW, _RE_FORK_BOMB, _RE_PIPE_TO_SHELL
 from .t1_paths import _check_sensitive_paths
@@ -56,11 +57,12 @@ def _fast_tokenize(chunk: str) -> list[str]:
     return shlex.split(norm_chunk, posix=True)
 
 
-def _evaluate_chunk(chunk: str, exempt_words: list[str] | None = None) -> SecurityDecision:
-    # exempt_words (TK-63): the shell words of a whole single command inside
-    # the closed grammar (_closed_grammar_words); only then may T4 and T6
-    # loosen today's verdict. None - the default, so an internal caller such
-    # as the find -exec re-evaluation - keeps today's verdict.
+def _evaluate_chunk(chunk: str, exempt: GrammarWords | None = None) -> SecurityDecision:
+    # exempt (TK-63): the shell words of a whole single command inside the
+    # closed grammar (_closed_grammar_words); only then may T4 and T6 loosen
+    # today's verdict. None - the default, so an internal caller such as the
+    # find -exec re-evaluation - keeps today's verdict.
+    exempt_words = None if exempt is None else exempt.words
     # Fast path for simple safe commands without redirection or special symbols (<0.001ms)
     if not any(c in chunk for c in ("<", ">", "$", "`", "/", "@", "-", ".", "~", ":", "(", ")", "\"", "'")):
         words = chunk.split()
@@ -73,7 +75,9 @@ def _evaluate_chunk(chunk: str, exempt_words: list[str] | None = None) -> Securi
         return _DECISION_ALLOW
 
     # 1. T4: Destructive OS mutations & Persistence (Top Priority)
-    t4 = _check_destructive_and_persistence(chunk, tokens, exempt_words)
+    t4 = _check_destructive_and_persistence(
+        chunk, tokens, exempt_words, None if exempt is None else exempt.globs
+    )
     if t4:
         return t4
 
@@ -358,7 +362,16 @@ def _glob_target_indices(words: list[str]) -> set:
     return set(operands if head == "rm" else operands[1:])
 
 
-def _closed_grammar_words(command: str) -> list[str] | None:
+class GrammarWords(NamedTuple):
+    """Shell words of a command inside the closed grammar, with per-word
+    quote provenance: globs[i] is True only when words[i] ends in an
+    UNQUOTED `*` component (a target glob); a quoted `*` is literal."""
+
+    words: list[str]
+    globs: tuple[bool, ...]
+
+
+def _closed_grammar_words(command: str) -> GrammarWords | None:
     """The shell words of a single simple command inside the closed grammar,
     or None. Words are separated by spaces; a quoted region is a whole
     word (single quotes: charset, space and `*?[]`, or exactly `';'`;
@@ -366,7 +379,12 @@ def _closed_grammar_words(command: str) -> list[str] | None:
     `${HOME}/`); an unquoted word uses the charset, a leading `~` before
     `/` or the end, one final `*` component, or is exactly `{}`, `\\;`, `!`,
     and never starts with `=`. The first word is an exemption head."""
+    # Cheap prefilter only: a head word inside the grammar is bare or one
+    # whole quoted region, so stripping its quotes yields the parsed word;
+    # the parsed first word is validated below.
     first = command.lstrip(" ").split(" ", 1)[0]
+    if len(first) >= 2 and first[0] in ("'", '"') and first[-1] == first[0]:
+        first = first[1:-1]
     if not _is_exemption_head(first):
         return None
     words, globs = [], []
@@ -404,7 +422,7 @@ def _closed_grammar_words(command: str) -> list[str] | None:
             return None
     except ValueError:
         return None
-    return words
+    return GrammarWords(words, tuple(globs))
 
 
 def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = False) -> SecurityDecision:
@@ -441,7 +459,7 @@ def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = F
 
         # TK-63: words for the exemptions, or None (today's verdict) for a
         # nested evaluation or a command outside the closed grammar.
-        exempt_words = None if _nested else _closed_grammar_words(raw_command)
+        exempt = None if _nested else _closed_grammar_words(raw_command)
 
         # Fast global check for fork bombs
         if ":" in command and "{" in command and _RE_FORK_BOMB.search(command):
@@ -486,8 +504,8 @@ def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = F
                 category="T4_DESTRUCTIVE_MUTATION",
             )
 
-        if exempt_words is not None and sum(1 for c in chunks if c.strip()) != 1:
-            exempt_words = None
+        if exempt is not None and sum(1 for c in chunks if c.strip()) != 1:
+            exempt = None
 
         decisions = []
         for chunk in chunks:
@@ -495,7 +513,7 @@ def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = F
             if not chunk:
                 continue
             try:
-                dec = _evaluate_chunk(chunk, exempt_words)
+                dec = _evaluate_chunk(chunk, exempt)
                 if dec.decision == "deny":
                     return dec
                 if dec.decision == "ask":

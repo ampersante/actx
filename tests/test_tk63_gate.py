@@ -365,6 +365,55 @@ class SingleCommandGrammarTests(_FixtureHome):
             self.assertNoT4Deny("find " + root + " -exec stat {} +")
 
 
+class GrammarWordProvenanceTests(_FixtureHome):
+    """Exemptions read the parsed words and their quote provenance, the git
+    global-option prefix is walked once, and every find exec program is
+    left out of target classification."""
+
+    def assertNoDecision(self, command):
+        self.assertEqual(_verdict(command), ("allow", None), command)
+
+    def test_whole_word_quoted_head_is_the_parsed_head(self):
+        for command in (
+            '"git" clean -n -x',
+            '"pg_restore" -l dump.bin',
+            '"./gradlew" assembleRelease',
+            '"rm" -rf ~/proj/build',
+        ):
+            self.assertNoDecision(command)
+
+    def test_only_an_unquoted_star_is_a_target_glob(self):
+        self.assertNoDecision("rm -rf '/tmp/*'")
+        self.assertT4Deny("rm -rf '/private/tmp/x/*'")
+        self.assertT4Deny("find '/private/tmp/*' -exec stat {} \\;")
+        self.assertNoDecision("find ~/proj -name '*.py' -exec stat {} \\;")
+
+    def test_git_clean_dry_run_behind_global_options(self):
+        for command in (
+            "git -C /tmp clean -n -x",
+            "git --no-pager clean -n -x",
+            "git -c core.pager=cat clean -n -x",
+        ):
+            self.assertNoDecision(command)
+        for command in ("git -C /tmp clean -f -x", "git -c core.pager=less clean -n -x"):
+            self.assertEqual(security_gate.evaluate_security(command).decision, "ask", command)
+
+    def test_core_pager_behind_global_options(self):
+        for command in (
+            "git --no-pager -c core.pager=cat log",
+            "git -C /tmp -c core.pager=cat log",
+            "git -c core.pager=cat --no-pager -c core.pager= log",
+        ):
+            self.assertNoDecision(command)
+        for command in ("git -C /tmp -c core.pager=less log", "git -c core.pager=cat -c core.pager=less log"):
+            self.assertEqual(security_gate.evaluate_security(command).decision, "ask", command)
+
+    def test_exec_program_is_never_a_target(self):
+        self.assertNoDecision("find /tmp/x -exec /Users/other/.aws/tool {} \\;")
+        self.assertNoDecision("find /tmp/x -exec /tmp/a/../tool {} \\;")
+        self.assertT4Deny("find ~/.aws -exec /tmp/tool {} \\;")
+
+
 class InlineEnvironmentReasonTests(_FixtureHome):
     """CHK-06 sample: the decision is unchanged, only the reason text."""
 
