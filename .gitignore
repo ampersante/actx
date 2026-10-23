@@ -11,3 +11,5 @@ homebrew-tap/
 
 # Local agent harness artifacts
 .zcode/
+.claude/
+scratch/
