@@ -256,24 +256,40 @@ class _FunctionFreeNameFinder(ast.NodeVisitor):
         self._visit_comprehension_owner(node, [node.key, node.value])
 
 
-def _check_module(path):
-    with open(path, encoding="utf-8") as f:
-        src = f.read()
-    tree = ast.parse(src, filename=path)
-
+def _unresolved_module_functions(tree):
     collector = _ModuleBindingCollector()
     for stmt in tree.body:
         collector.visit(stmt)
     module_bound = collector.bound
 
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
     unresolved = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parent = parents.get(node)
+            while parent is not None and not isinstance(parent, ast.Module):
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    break
+                parent = parents.get(parent)
+            else:
+                parent = None
+            if parent is not None:
+                continue
             finder = _FunctionFreeNameFinder(module_bound)
             finder._visit_function(node)
             if finder.unresolved:
                 unresolved[node.name] = sorted(set(finder.unresolved))
     return unresolved
+
+
+def _check_module(path):
+    with open(path, encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=path)
+    return _unresolved_module_functions(tree)
 
 
 class GatePackageNameResolutionTests(unittest.TestCase):
@@ -288,6 +304,27 @@ class GatePackageNameResolutionTests(unittest.TestCase):
             failures, {},
             "unresolved global names (missing import - would fail-open to "
             "'allow' at runtime instead of raising): %r" % (failures,),
+        )
+
+    def test_nested_closures_and_unresolved_control(self):
+        captured = ast.parse(
+            "def outer():\n"
+            "    local_name = object()\n"
+            "    def inner():\n"
+            "        return local_name\n"
+            "    return inner\n"
+        )
+        self.assertEqual(_unresolved_module_functions(captured), {})
+
+        missing = ast.parse(
+            "def outer():\n"
+            "    def inner():\n"
+            "        return missing_global\n"
+            "    return inner\n"
+        )
+        self.assertEqual(
+            _unresolved_module_functions(missing),
+            {"outer": ["missing_global"]},
         )
 
     def test_package_has_expected_module_set(self):

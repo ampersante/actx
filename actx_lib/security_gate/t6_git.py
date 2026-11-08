@@ -204,6 +204,155 @@ def _git_clean_dry_run(words: list[str] | None) -> bool:
     return any(t == "--dry-run" or (not t.startswith("--") and "n" in t) for t in args)
 
 
+# ----------------------------------------------------------------------
+# TK-70 REQ-02: push forms and protected destination branches
+# ----------------------------------------------------------------------
+
+# The fixed protected set is always in force; the global config key
+# `protected_branches` only EXTENDS it (owner decision 2026-11-08, INV-07:
+# read through actx_lib.config, any error or absence yields the fixed
+# pair). Cached per process: a push evaluation reads the config once.
+_DEFAULT_PROTECTED_BRANCHES = frozenset({"main", "master"})
+_protected_branches_cache = None
+
+
+def protected_branches() -> frozenset:
+    """Branch names a `git push` must not update without confirmation:
+    {main, master} union the global `protected_branches` config list."""
+    global _protected_branches_cache
+    if _protected_branches_cache is None:
+        names = set(_DEFAULT_PROTECTED_BRANCHES)
+        try:
+            from actx_lib import config
+
+            configured = config.load().get("protected_branches")
+            if isinstance(configured, list):
+                names.update(
+                    branch for branch in configured
+                    if isinstance(branch, str) and branch
+                )
+        except Exception:
+            pass
+        _protected_branches_cache = frozenset(names)
+    return _protected_branches_cache
+
+
+# `git push -h` (git 2.56.0, live 2026-11-08) long-option namespace:
+# parse-options.c resolves a unique abbreviation, so `--tag`, `--mir`,
+# `--dele`, `--pru`, `--fol` are accepted spellings of the ask forms and
+# must match here too. The list holds the option names exactly as git
+# prints them (`--[no-]x` entries by the bare name); `--no-<name>` forms
+# are negations and deliberately never resolve.
+_GIT_PUSH_LONG_OPTIONS = (
+    "verbose", "quiet", "repo", "all", "branches", "mirror", "delete",
+    "tags", "dry-run", "porcelain", "force", "force-with-lease",
+    "force-if-includes", "recurse-submodules", "thin", "receive-pack",
+    "exec", "set-upstream", "progress", "prune", "verify", "follow-tags",
+    "signed", "atomic", "push-option", "ipv4", "ipv6",
+)
+# Absolute/mass ref updates and ref deletions: `--mirror` and `--tags`
+# are REQ-02 verbatim; `--all`/`--branches` (every local branch, protected
+# ones included), `--prune` (deletes remote refs missing locally) and
+# `--follow-tags` (a tag push, the semantic sibling of `--tags`) are the
+# same class - decided in the TK-70 report, safe direction.
+_GIT_PUSH_MASS_ASK = frozenset({
+    "all", "branches", "mirror", "delete", "tags", "prune", "follow-tags",
+})
+# Force forms the exact-spelling loop above cannot see, e.g. the unique
+# abbreviation `--force-w` of --force-with-lease (parse-options accepts it;
+# any shorter prefix is ambiguous with --force/--force-if-includes).
+_GIT_PUSH_FORCE_ASK = frozenset({"force", "force-with-lease"})
+# Long options consuming the next token as their value (space form); the
+# `=<value>` form carries the value inside the token. Only options with a
+# REQUIRED value are listed: `--force-with-lease`/`--signed` take an
+# optional value, which parse-options accepts only attached.
+_GIT_PUSH_VALUE_LONG = frozenset({
+    "repo", "receive-pack", "exec", "push-option", "recurse-submodules",
+})
+
+
+def _git_push_long_name(token: str) -> str | None:
+    """The push long option `token` resolves to under parse-options.c:
+    exact name first, then a unique prefix. None for an unknown,
+    ambiguous or negated (`--no-...`) spelling."""
+    if not token.startswith("--"):
+        return None
+    name = token[2:].split("=", 1)[0]
+    if not name or name.startswith("no-"):
+        return None
+    if name in _GIT_PUSH_LONG_OPTIONS:
+        return name
+    matches = [opt for opt in _GIT_PUSH_LONG_OPTIONS if opt.startswith(name)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _git_push_short_letters(body: str) -> tuple[tuple[str, ...], bool]:
+    """Short-option cluster letters before the first value-taking option
+    (`-o` is push's only one): the rest of such a token is that option's
+    attached value, and a bare `-o`/`-qo` consumes the NEXT token. Returns
+    (letters, consumes_next_token)."""
+    letters = []
+    for idx, ch in enumerate(body):
+        letters.append(ch)
+        if ch == "o":
+            return tuple(letters), idx == len(body) - 1
+    return tuple(letters), False
+
+
+def _git_push_positionals(args: list[str]) -> list[str]:
+    """`[<repository> [<refspec>...]]` operands of a push argv: every flag
+    and its space-form value skipped. A `--` ends option parsing."""
+    positionals = []
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = _strip_redirection(args[i])
+        if not tok:
+            i += 1
+            continue
+        if tok == "--":
+            positionals.extend(
+                t for t in (_strip_redirection(x) for x in args[i + 1:]) if t
+            )
+            break
+        if tok.startswith("--"):
+            if (
+                "=" not in tok
+                and _git_push_long_name(tok) in _GIT_PUSH_VALUE_LONG
+                and i + 1 < n
+            ):
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            i += 2 if _git_push_short_letters(tok[1:])[1] else 1
+            continue
+        positionals.append(tok)
+        i += 1
+    return positionals
+
+
+def _git_push_refspec_dst(refspec: str) -> str | None:
+    """Destination branch name of a push refspec, or None when the refspec
+    targets no branch: `src`, `src:dst`, `refs/heads/dst`, `src:refs/heads/
+    dst` yield the name; `refs/tags/...` and other non-branch namespaces
+    yield None. An empty destination (`src:`) is an invalid refspec git
+    itself rejects, so it names nothing."""
+    spec = refspec[1:] if refspec.startswith("+") else refspec
+    if ":" in spec:
+        dst = spec.split(":", 1)[1]
+        if not dst:
+            return None
+    else:
+        dst = spec
+    if dst.startswith("refs/heads/"):
+        dst = dst[len("refs/heads/"):]
+    elif dst.startswith("refs/"):
+        return None
+    return dst or None
+
+
 def _check_high_risk_git(command: str, raw_tokens: list[str], words: list[str] | None = None) -> SecurityDecision | None:
     tokens = _unwrap_tokens(raw_tokens)
     if not tokens or os.path.basename(tokens[0]) != "git":
@@ -303,6 +452,64 @@ def _check_high_risk_git(command: str, raw_tokens: list[str], words: list[str] |
                 return SecurityDecision(
                     decision="ask",
                     reason="Force-pushing to remote git repository requires human confirmation",
+                    category="T6_HIGH_RISK_GIT",
+                )
+
+        # TK-70 REQ-02: push forms that delete or mass-update remote refs
+        # without force - --mirror, --tags (and the tag-push sibling
+        # --follow-tags), --delete/-d, --all/--branches, --prune - plus a
+        # deleting `:dst` refspec. Long forms match the unique spellings
+        # parse-options resolves; short forms are clusters (`-qd`).
+        for tok in sub_args:
+            clean_tok = _strip_redirection(tok)
+            if clean_tok.startswith("--"):
+                form = _git_push_long_name(clean_tok)
+                if form in _GIT_PUSH_FORCE_ASK:
+                    return SecurityDecision(
+                        decision="ask",
+                        reason="Force-pushing to remote git repository requires human confirmation",
+                        category="T6_HIGH_RISK_GIT",
+                    )
+                if form in _GIT_PUSH_MASS_ASK:
+                    return SecurityDecision(
+                        decision="ask",
+                        reason=f"git push --{form} deletes or mass-updates remote refs and requires human confirmation",
+                        category="T6_HIGH_RISK_GIT",
+                    )
+            elif clean_tok.startswith("-") and not clean_tok.startswith("--"):
+                letters = _git_push_short_letters(clean_tok[1:])[0]
+                if "d" in letters:
+                    return SecurityDecision(
+                        decision="ask",
+                        reason="Deleting remote refs with 'git push -d/--delete' requires human confirmation",
+                        category="T6_HIGH_RISK_GIT",
+                    )
+            elif clean_tok.startswith(":"):
+                return SecurityDecision(
+                    decision="ask",
+                    reason="Deleting a remote ref via a ':dst' refspec requires human confirmation",
+                    category="T6_HIGH_RISK_GIT",
+                )
+
+        # A destination branch in the protected set ({main, master} union
+        # the config list) asks whatever the refspec spelling: `main`,
+        # `src:main`, `refs/heads/main`, `src:refs/heads/main`.
+        positionals = _git_push_positionals(sub_args)
+        protected = protected_branches()
+        for refspec in positionals[1:]:
+            dst = _git_push_refspec_dst(refspec)
+            if dst is None:
+                continue
+            if "*" in dst:
+                return SecurityDecision(
+                    decision="ask",
+                    reason="Pushing a wildcard refspec updates several remote refs and requires human confirmation",
+                    category="T6_HIGH_RISK_GIT",
+                )
+            if dst in protected:
+                return SecurityDecision(
+                    decision="ask",
+                    reason=f"Pushing to protected branch '{dst}' requires human confirmation",
                     category="T6_HIGH_RISK_GIT",
                 )
 

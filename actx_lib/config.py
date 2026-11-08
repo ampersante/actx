@@ -23,6 +23,10 @@ DEFAULT_CONFIG = {
     # User-declared command heads (TK-39): `actx <head> args` behaves like
     # `actx run <head> args`; never extends the §7 rewriter whitelist.
     "custom_heads": [],
+    # Branches a `git push` must not update without confirmation (TK-70,
+    # REQ-02): the fixed {main, master} is always protected, this list adds
+    # to it (union). Read by the security gate, never by the rewriter.
+    "protected_branches": ["main", "master"],
     "ignore_dirs": [".git", "node_modules", "target"],
     "ignore_files": ["*.lock"],
     "tracking": {"enabled": True, "history_days": 90},

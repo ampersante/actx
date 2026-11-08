@@ -52,7 +52,8 @@ tuple sets inside each family (tested).
 
 Verb lists verified against the official CLI docs on 2026-09-05 (Vercel,
 Netlify, Railway, Cloudflare Wrangler, Supabase, fly.io, gcloud); docker
-joined in TK-41, kubectl and helm in TK-40 (wave-2 plan). Additions stay
+joined in TK-41, kubectl and helm in TK-40 (wave-2 plan); the TK-70 REQ-03
+ask_specs additions follow each tool's own subcommand docs. Additions stay
 conservative - when in doubt, leave the verb out.
 """
 
@@ -63,7 +64,10 @@ FAMILIES = {
     "vercel": {
         "global_flags": ("-d", "--debug", "--no-color", "--non-interactive"),
         "ro_verbs": (("whoami",), ("list",), ("logs",)),
-        "ask_specs": (("deploy", "--prod"), ("remove",)),
+        # TK-70 REQ-03: `env pull` writes a local .env and `env add`
+        # creates/updates remote environment variables.
+        "ask_specs": (("deploy", "--prod"), ("remove",),
+                      ("env", "pull"), ("env", "add")),
         "stream_specs": (
             ("env",),
             ("logs", "-f"), ("logs", "--follow"),
@@ -115,7 +119,10 @@ FAMILIES = {
             ("deployments", "list"),
             ("deployments", "status"),
         ),
-        "ask_specs": (("deploy",), ("publish",), ("delete",)),
+        # TK-70 REQ-03: `secret put` writes a remote secret value (the
+        # `secret` family stays never-wrap via stream_specs).
+        "ask_specs": (("deploy",), ("publish",), ("delete",),
+                      ("secret", "put")),
         "stream_specs": (("secret",), ("secret:bulk",)),
         "output": "summary",
     },
@@ -154,7 +161,10 @@ FAMILIES = {
     "gcloud": {
         "global_flags": ("--quiet", "-q"),
         "ro_verbs": (("projects", "list"),),
-        "ask_specs": (("delete",), ("undeploy",)),
+        # TK-70 REQ-03: every `* deploy` (app/run/functions) and
+        # `storage rm` mutate remote state.
+        "ask_specs": (("delete",), ("undeploy",), ("deploy",),
+                      ("storage", "rm")),
         "stream_specs": (("secrets",),),
         "output": "summary",
     },
@@ -175,10 +185,11 @@ FAMILIES = {
             ("compose", "ps"), ("compose", "logs"),
         ),
         # First 4 specs verbatim from the pre-TK-41 _T6_NON_CLOUD_ASK_TABLE
-        # entry; volume rm/prune are new (TK-41).
+        # entry; volume rm/prune are new (TK-41); push is new (TK-70
+        # REQ-03: it uploads an image to a remote registry).
         "ask_specs": (
             ("system", "prune"), ("rm",), ("rmi",), ("compose", "down"),
-            ("volume", "rm"), ("volume", "prune"),
+            ("volume", "rm"), ("volume", "prune"), ("push",),
         ),
         "stream_specs": (),
         "output": "summary",
@@ -196,14 +207,19 @@ FAMILIES = {
     # `-A/--all-namespaces` are boolean globals; the rest of the listed
     # flags take a value (`-n prod`, `--context ctx`, `--namespace=prod`).
     # ask_specs: the 4 pre-TK-40 non-cloud specs verbatim + ("exec",)
-    # (REQ-02: shell escape bypassing every actx gate).
+    # (REQ-02: shell escape bypassing every actx gate). TK-70 REQ-03 adds
+    # the mutating kubectl verbs (patch/edit/label/annotate/set/create/
+    # replace/drain/debug/cp and rollout restart).
     "kubectl": {
         "global_flags": ("-A", "--all-namespaces"),
         "value_flags": ("-n", "--namespace", "--context", "--cluster",
                         "--kubeconfig"),
         "ro_verbs": (("get",), ("describe",), ("top",), ("events",), ("logs",)),
         "ask_specs": (("delete",), ("scale",), ("rollout", "undo"),
-                      ("apply",), ("exec",)),
+                      ("apply",), ("exec",),
+                      ("patch",), ("rollout", "restart"), ("edit",),
+                      ("debug",), ("cp",), ("label",), ("annotate",),
+                      ("set",), ("create",), ("replace",), ("drain",)),
         "stream_specs": (),
         # `get` is wholly content (no flag-dependent class: the table form
         # is a few lines, -o json|yaml must reach the agent 1:1).
@@ -218,13 +234,15 @@ FAMILIES = {
     # already visible in argv) -> RO; `helm get values` prints DEPLOYED
     # values - the standard home of credentials - so it goes to stream_specs
     # by the wave-1 N-F4 qualification rule, never-wrap. ask_specs are the
-    # pre-TK-40 non-cloud specs verbatim.
+    # pre-TK-40 non-cloud specs verbatim; TK-70 REQ-03 adds install/upgrade
+    # (they create or change the release state in the cluster).
     "helm": {
         "global_flags": (),
         "ro_verbs": (("template",), ("get", "metadata"), ("list",),
                      ("show", "values"), ("show", "chart"), ("status",),
                      ("history",)),
-        "ask_specs": (("uninstall",), ("rollback",)),
+        "ask_specs": (("uninstall",), ("rollback",), ("install",),
+                      ("upgrade",)),
         "stream_specs": (("get", "values"),),
         "output": "summary",
         "output_verbs": {
@@ -252,14 +270,15 @@ FAMILIES = {
     # terraform (TK-43). RO verbs are the plan-inspection set; `plan -out`
     # persists a plan file that a later `terraform apply` executes without
     # re-reading the diff, and `state` mutates/pulls state (credentials
-    # live in it) -> ask. Limitation (documented): the `-out=file` =-form
-    # does not equal the "-out" token, so the token matcher misses it
-    # (N-F1 red-gate 12 checks the caught form).
+    # live in it) -> ask. TK-70 REQ-03 adds `import` (writes an existing
+    # resource into state). `-out=file` is an `=`-spelling of the `-out`
+    # spec token and matches since the TK-70 table normalization.
     "terraform": {
         "global_flags": (),
         "ro_verbs": (("plan",), ("validate",), ("show",), ("version",),
                      ("graph",)),
-        "ask_specs": (("apply",), ("destroy",), ("state",), ("plan", "-out")),
+        "ask_specs": (("apply",), ("destroy",), ("state",), ("plan", "-out"),
+                      ("import",)),
         "stream_specs": (),
     },
     # redis-cli (TK-43). Real redis commands are upper-case but the
@@ -329,6 +348,11 @@ FAMILIES = {
             ("workflow", "disable"),
             ("gist", "create"), ("gist", "edit"), ("gist", "delete"),
             ("gist", "rename"), ("gist", "clone"),
+            # TK-70 REQ-03: secret/variable set and delete write remote
+            # repository settings (the `secret`/`variable` namespaces stay
+            # in NO list: their read forms print credential material).
+            ("secret", "set"), ("secret", "delete"),
+            ("variable", "set"), ("variable", "delete"),
         ),
         "stream_specs": (
             ("run", "watch"), ("pr", "checks", "--watch"),

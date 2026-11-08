@@ -21,6 +21,7 @@ from .t6_tools import (
     _check_high_risk_npm,
     _check_high_risk_tools,
     _check_gradlew,
+    looks_irreversible,
 )
 from .t6_sql import _check_sql
 from .t7_action import (
@@ -522,7 +523,7 @@ def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = F
                     return dec
                 if dec.decision == "ask":
                     decisions.append(dec)
-            except ValueError:
+            except ValueError as exc:
                 # Malformed syntax fallback
                 for bad_pat in (
                     r"\.env\b",
@@ -538,11 +539,30 @@ def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = F
                             reason="Malformed shell syntax contains prohibited security patterns",
                             category="T1_CREDENTIAL_ACCESS",
                         )
+                # REQ-04 (TK-70): a parser failure on an irreversible chunk
+                # asks instead of falling through to the default allow; every
+                # other chunk keeps the previous fallback. The ask joins the
+                # normal ask list so a later chunk's deny still wins (the
+                # engine's deny > ask > allow precedence).
+                if looks_irreversible(chunk):
+                    decisions.append(SecurityDecision(
+                        decision="ask",
+                        reason=f"actx security gate internal error on irreversible command: {exc}",
+                        category="T6_GATE_ERROR",
+                    ))
 
         if decisions:
             return decisions[0]
 
         return _DECISION_ALLOW
 
-    except Exception:
+    except Exception as exc:
+        # REQ-04 (TK-70): the same ask for the whole-command failure path;
+        # every other command keeps the fail-open allow.
+        if looks_irreversible(command):
+            return SecurityDecision(
+                decision="ask",
+                reason=f"actx security gate internal error on irreversible command: {exc}",
+                category="T6_GATE_ERROR",
+            )
         return _DECISION_ALLOW

@@ -135,9 +135,17 @@ class LazyImportTests(unittest.TestCase):
     def test_hook_agent_paths_import_same_set(self):
         # TK-65: `--agent`/`--payload` parsing and rewriter.is_mutator add
         # no module to the hook path (git push reaches is_mutator).
-        baseline = self.run_path(["hook"], stdin_text=HOOK_JSON)
+        # TK-70: the push branch reads `protected_branches` through
+        # actx_lib.config (a lazy import inside protected_branches), so a
+        # push hook imports exactly that one module more than a non-push
+        # hook (git status) - the baseline below is the push path.
         push = json.dumps({"tool_name": "Bash",
                            "tool_input": {"command": "git push origin main"}})
+        baseline = self.run_path(["hook"], stdin_text=push)
+        self.assertEqual(
+            self.run_path(["hook"], stdin_text=HOOK_JSON) | {"actx_lib.config"},
+            baseline,
+        )
         for args in (["hook", "--agent", "opencode"],
                      ["hook", "--agent", "devin"],
                      ["hook", "--agent", "pi"],

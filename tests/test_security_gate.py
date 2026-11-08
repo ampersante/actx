@@ -1,8 +1,12 @@
+import contextlib
+import json
 import os
+import tempfile
 import time
 import unittest
 
 from actx_lib import security_gate
+from actx_lib.security_gate import t6_git, t6_tools
 
 
 class SecurityGateTests(unittest.TestCase):
@@ -591,7 +595,10 @@ class SecurityGateTests(unittest.TestCase):
         self.assert_allow("git config user.name x")
         self.assert_allow("git config --get core.pager")
         self.assert_allow("git fetch")
-        self.assert_allow("git push origin main")
+        # TK-70 REQ-02: a push whose destination is a protected branch
+        # ({main, master} union the config list) asks - the old allow pin
+        # migrates here (plan STEP-05).
+        self.assert_ask("git push origin main", "T6_HIGH_RISK_GIT")
 
     def test_g3_git_config_value_flags_consumed_before_key(self):
         # TK-60 STEP-G3 (REQ-09): every value-taking `git config` option
@@ -732,6 +739,9 @@ class SecurityGateTests(unittest.TestCase):
             ("helm uninstall my-release", "T6_HIGH_RISK_HELM"),
             ("helm rollback my-release 1", "T6_HIGH_RISK_HELM"),
             ("helm -n prod uninstall my-release", "T6_HIGH_RISK_HELM"),
+            # TK-70 REQ-03: install/upgrade change the deployed release.
+            ("helm install my-release chart", "T6_HIGH_RISK_HELM"),
+            ("helm upgrade my-release chart", "T6_HIGH_RISK_HELM"),
             # docker (specs generated from cli_families since TK-41;
             # volume rm/prune are new in TK-41)
             ("docker system prune", "T6_HIGH_RISK_DOCKER"),
@@ -744,6 +754,7 @@ class SecurityGateTests(unittest.TestCase):
             ("docker volume rm v1 v2", "T6_HIGH_RISK_DOCKER"),
             ("docker volume prune", "T6_HIGH_RISK_DOCKER"),
             ("docker volume prune --force", "T6_HIGH_RISK_DOCKER"),
+            ("docker push registry/img", "T6_HIGH_RISK_DOCKER"),
             # simctl
             ("simctl erase", "T6_HIGH_RISK_SIMCTL"),
             ("simctl erase all", "T6_HIGH_RISK_SIMCTL"),
@@ -794,7 +805,6 @@ class SecurityGateTests(unittest.TestCase):
             "wrangler deployments status",
             "vercel deploy --preprod",
             "docker rmi-dangling",
-            "helm upgrade my-release",
             "helm status",
             "helm template mychart",
             "helm get metadata my-release",
@@ -1103,6 +1113,518 @@ class SecurityGateTests(unittest.TestCase):
         ]
         for cmd in dev_commands:
             self.assert_allow(cmd)
+
+    # ------------------------------------------------------------------
+    # TK-70: REQ-02 push forms and protected branches, REQ-03 external
+    # mutation heads, the `=`-spelling table match, looks_irreversible.
+    # ------------------------------------------------------------------
+    @staticmethod
+    @contextlib.contextmanager
+    def _temp_home():
+        """Isolated HOME for the push tests: the protected set comes from
+        the default config, never from the developer's real config; the
+        per-process cache is reset on entry and exit."""
+        orig_home = os.environ.get("HOME")
+        try:
+            with tempfile.TemporaryDirectory() as home:
+                os.environ["HOME"] = home
+                t6_git._protected_branches_cache = None
+                yield home
+        finally:
+            t6_git._protected_branches_cache = None
+            if orig_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = orig_home
+
+    def test_tk70_push_ask_forms_req02(self):
+        cases = [
+            # REQ-02 forms verbatim.
+            "git push --mirror",
+            "git push --mirror origin",
+            "git push --tags",
+            "git push origin --tags",
+            "git push --delete origin old",
+            "git push -d origin old",
+            "git push -qd origin old",          # short cluster
+            "git push origin :old",             # deleting refspec
+            "git push origin +:old",            # force + delete
+            "git push origin refs/heads/main",  # bare full ref
+            "git push origin main",             # bare dst
+            "git push origin master",
+            "git push origin feature:main",     # src:dst
+            "git push origin HEAD:refs/heads/main",
+            "git push origin HEAD:refs/heads/master",
+            "git -C /tmp push --tags",          # global options before the verb
+            "git -C /tmp push origin main",
+            # Wrapper / actx prefixes unwrap to the same decision.
+            "env git push --tags",
+            "nice git push origin main",
+            "actx git push origin master",
+            # parse-options.c unique abbreviations (git-push(1), git 2.56.0).
+            "git push --tag",
+            "git push --mir",
+            "git push --dele origin old",
+            "git push --fol origin feature",
+            "git push --force-w=main origin feature",  # -> --force-with-lease
+            "git push --force-with-lease=main origin feature",
+            # Same class (sibling decision, TK-70 report): mass branch
+            # push, remote prune, tag push by another spelling.
+            "git push --all",
+            "git push --branches",
+            "git push --prune",
+            "git push --follow-tags origin feature",
+            "git push origin 'refs/heads/*:refs/heads/*'",  # wildcard dst
+        ]
+        with self._temp_home():
+            for cmd in cases:
+                with self.subTest(cmd=cmd):
+                    self.assert_ask(cmd, "T6_HIGH_RISK_GIT")
+
+    def test_tk70_push_forms_without_ask_req02(self):
+        # REQ-01/REQ-02 boundary: a push naming no dangerous form gets no
+        # decision from the gate.
+        with self._temp_home():
+            for cmd in (
+                "git push",
+                "git push origin",
+                "git push origin feature",
+                "git push origin feature:feature",
+                "git push origin HEAD:feature",
+                "git push origin refs/heads/feature",
+                "git push origin feature:refs/heads/feature",
+                "git push origin main:feature",
+                "git push --no-follow-tags origin feature",
+                "git push --no-all origin feature",
+                "git push --recurse-submodules=check origin feature",
+                "git push --dry-run origin feature",
+                "git push -o main origin feature",
+            ):
+                with self.subTest(cmd=cmd):
+                    self.assert_allow(cmd)
+
+    def test_tk70_protected_branches_config_req02(self):
+        # INV-07: {main, master} is always protected, the global key
+        # `protected_branches` extends it (never replaces it), any error or
+        # absence yields the fixed pair; the value is cached per process.
+        with self._temp_home() as home:
+            self.assert_ask("git push origin main", "T6_HIGH_RISK_GIT")
+            self.assert_ask("git push origin master", "T6_HIGH_RISK_GIT")
+            self.assert_allow("git push origin develop")
+
+            config_path = os.path.join(home, ".config", "actx", "config.json")
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, "w", encoding="utf-8") as handle:
+                json.dump({"protected_branches": ["develop"]}, handle)
+            t6_git._protected_branches_cache = None
+            self.assert_ask("git push origin develop", "T6_HIGH_RISK_GIT")
+            self.assert_ask("git push origin refs/heads/develop", "T6_HIGH_RISK_GIT")
+            self.assert_ask("git push origin main", "T6_HIGH_RISK_GIT")
+            self.assert_allow("git push origin feature")
+
+            # A wrong-typed value falls back to the fixed pair.
+            with open(config_path, "w", encoding="utf-8") as handle:
+                json.dump({"protected_branches": "develop"}, handle)
+            t6_git._protected_branches_cache = None
+            self.assert_allow("git push origin develop")
+            self.assert_ask("git push origin main", "T6_HIGH_RISK_GIT")
+
+    def test_tk70_table_equals_spelling_match_req03(self):
+        # One rule: a `-`-prefixed token carrying `=` matches by its flag
+        # part; the value never becomes a scan token, the flag is never
+        # removed. vercel's parser reads --prod=false as prod (E-006), so
+        # every `=`-spelling of --prod is the prod form.
+        ask_cases = [
+            ("vercel deploy --prod=false", "T6_HIGH_RISK_VERCEL"),
+            ("vercel deploy --prod=true", "T6_HIGH_RISK_VERCEL"),
+            ("vercel deploy --prod=0", "T6_HIGH_RISK_VERCEL"),
+            ("vercel deploy --prod=off", "T6_HIGH_RISK_VERCEL"),
+            ("terraform plan -out=false", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform plan -out=0", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform plan -out=no", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform plan -out=off", "T6_HIGH_RISK_TERRAFORM"),
+            ("terraform plan -out=tfplan", "T6_HIGH_RISK_TERRAFORM"),
+        ]
+        for cmd, category in ask_cases:
+            with self.subTest(cmd=cmd):
+                self.assert_ask(cmd, category)
+        for cmd in (
+            "vercel deploy",
+            "vercel deploy --no-prod",
+            "vercel deploy --preprod",
+            # Values never enter the scan: without that, the ("exec",) and
+            # ("uninstall",) specs would match the values below.
+            "kubectl logs p --container=exec",
+            "helm get metadata --set=uninstall=true",
+            # A non-flag `a=b` token stays literal (normalization is for
+            # `-`-prefixed tokens only).
+            "terraform apply=plan",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_allow(cmd)
+        # REQ-03: `helm install` itself asks; the reason names the install
+        # verb, never the `--set` value.
+        res = self.eval("helm install my-release chart --set=uninstall=true")
+        self.assertEqual(res.decision, "ask")
+        self.assertIn("helm install", res.reason)
+        self.assertNotIn("helm uninstall", res.reason)
+
+    def test_tk70_fly_alias_req03(self):
+        # The alias lives in the gate-table lookup only.
+        self.assert_ask("fly deploy", "T6_HIGH_RISK_FLYCTL")
+        self.assert_ask("fly apps destroy my-app", "T6_HIGH_RISK_FLYCTL")
+        self.assert_allow("fly status")
+        self.assert_allow("fly apps list")
+        self.assert_allow("fly logs")
+
+    def test_tk70_external_mutation_heads_req03(self):
+        cases = [
+            ("docker push registry/img:tag", "T6_HIGH_RISK_DOCKER"),
+            ("helm install my-release chart", "T6_HIGH_RISK_HELM"),
+            ("helm upgrade my-release chart", "T6_HIGH_RISK_HELM"),
+            ("kubectl patch pod x -p '{}'", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl rollout restart deployment/app", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl edit deployment/app", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl debug pod/x", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl cp pod/x:/tmp/a ./a", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl label pod x team=dev", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl annotate pod x note=1", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl set image deployment/app c=img", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl create namespace dev", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl replace -f pod.yaml", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl drain node-1", "T6_HIGH_RISK_KUBECTL"),
+            ("kubectl -n dev create configmap c --from-literal=a=b", "T6_HIGH_RISK_KUBECTL"),
+            ("terraform import aws_s3_bucket.b bucket-name", "T6_HIGH_RISK_TERRAFORM"),
+            ("gcloud run deploy svc", "T6_HIGH_RISK_GCLOUD"),
+            ("gcloud app deploy app.yaml", "T6_HIGH_RISK_GCLOUD"),
+            ("gcloud functions deploy fn", "T6_HIGH_RISK_GCLOUD"),
+            ("gcloud storage rm gs://bucket/obj", "T6_HIGH_RISK_GCLOUD"),
+            ("gh secret set API_KEY", "T6_HIGH_RISK_GH"),
+            ("gh secret delete API_KEY", "T6_HIGH_RISK_GH"),
+            ("gh variable set FOO", "T6_HIGH_RISK_GH"),
+            ("gh variable delete FOO", "T6_HIGH_RISK_GH"),
+            ("wrangler secret put API_KEY", "T6_HIGH_RISK_WRANGLER"),
+            ("vercel env pull out.txt", "T6_HIGH_RISK_VERCEL"),
+            ("vercel env add API_KEY", "T6_HIGH_RISK_VERCEL"),
+            ("firebase deploy", "T6_HIGH_RISK_FIREBASE"),
+            ("firebase functions:secrets:set API_KEY", "T6_HIGH_RISK_FIREBASE"),
+            ("gsutil rm gs://bucket/obj", "T6_HIGH_RISK_GSUTIL"),
+            ("twine upload dist/pkg.whl", "T6_HIGH_RISK_TWINE"),
+            ("gem push pkg-1.0.gem", "T6_HIGH_RISK_GEM"),
+            ("poetry publish", "T6_HIGH_RISK_POETRY"),
+            ("pnpm publish", "T6_HIGH_RISK_PNPM"),
+            ("yarn publish", "T6_HIGH_RISK_YARN"),
+            ("bun publish", "T6_HIGH_RISK_BUN"),
+            ("uv publish", "T6_HIGH_RISK_UV"),
+            ("heroku config:set API_KEY=1", "T6_HIGH_RISK_HEROKU"),
+            ("heroku config:set API_KEY 1", "T6_HIGH_RISK_HEROKU"),
+            ("heroku config:unset API_KEY", "T6_HIGH_RISK_HEROKU"),
+            ("stripe create customers", "T6_HIGH_RISK_STRIPE"),
+            ("stripe update customers cus_1", "T6_HIGH_RISK_STRIPE"),
+            ("stripe delete customers cus_1", "T6_HIGH_RISK_STRIPE"),
+            ("stripe cancel subscriptions sub_1", "T6_HIGH_RISK_STRIPE"),
+            ("stripe refund pi_1", "T6_HIGH_RISK_STRIPE"),
+            ("stripe capture pi_1", "T6_HIGH_RISK_STRIPE"),
+            ("stripe confirm pi_1", "T6_HIGH_RISK_STRIPE"),
+        ]
+        for cmd, category in cases:
+            with self.subTest(cmd=cmd):
+                self.assert_ask(cmd, category)
+
+    def test_tk70_external_mutation_readonly_negatives_req03(self):
+        for cmd in (
+            "docker ps",
+            "docker images",
+            "docker inspect x",
+            "docker volume ls",
+            "helm list",
+            "helm status my-release",
+            "helm template mychart",
+            "helm get values my-release",
+            "kubectl get pods",
+            "kubectl describe pod x",
+            "kubectl rollout status deployment/app",
+            "kubectl top pods",
+            "kubectl logs pod/x",
+            "terraform plan",
+            "terraform validate",
+            "terraform show",
+            "gcloud projects list",
+            "gcloud projects describe p",
+            "gcloud storage ls",
+            "gh pr list",
+            "gh run view",
+            "gh secret list",
+            "gh variable list",
+            "wrangler deployments list",
+            "wrangler secret list",
+            "vercel whoami",
+            "vercel list",
+            "vercel logs",
+            "firebase login",
+            "gsutil ls gs://bucket",
+            "twine check dist/pkg.whl",
+            "gem list",
+            "poetry build",
+            "pnpm build",
+            "uv run pytest",
+            "heroku config",
+            "heroku config:get API_KEY",
+            "heroku config:unsetx API_KEY",
+            "stripe retrieve charges",
+            "stripe list customers",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_allow(cmd)
+
+    def test_tk70_aws_az_default_ask_req03(self):
+        for cmd in (
+            "aws s3 rm s3://bucket/key",
+            "aws s3 cp local s3://bucket/key",
+            "aws s3 sync . s3://bucket",
+            "aws ec2 terminate-instances --instance-ids i-1",
+            "aws iam create-user --user-name x",
+            "aws lambda invoke --function-name f out.json",
+            "aws --profile prod s3 rm s3://bucket/key",
+            "az vm delete -n x -g y",
+            "az group create -n x -l westus",
+            "az deployment group create -g x -f main.bicep",
+            "az account set -s subscription-id",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_ask(cmd)
+        for cmd in (
+            "aws s3 ls",
+            "aws s3api list-buckets",
+            "aws ec2 describe-instances",
+            "aws sts get-caller-identity",
+            "aws ec2 describe-instances --output json --query 'Reservations'",
+            "aws --profile prod --region us-east-1 s3 ls",
+            "aws help",
+            "az vm list --output json",
+            "az account list -o table",
+            "az group show",
+            "az account show",
+            "az vm get-instance-view",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_allow(cmd)
+
+    def test_tk70_curl_wget_data_and_method_req03(self):
+        for cmd in (
+            "curl -d a=1 http://example.com",
+            "curl -da=1 http://example.com",
+            "curl --data a=1 http://example.com",
+            "curl --data=a=1 http://example.com",
+            "curl --data-ascii a=1 http://example.com",
+            "curl --data-binary @file http://example.com",
+            "curl --data-raw a=1 http://example.com",
+            "curl --data-urlencode a=1 http://example.com",
+            "curl -F f=@file http://example.com",
+            "curl -Ff=@file http://example.com",
+            "curl --form f=@file http://example.com",
+            "curl --form-string f=@file http://example.com",
+            "curl --json '{}' http://example.com",
+            "curl -T file http://example.com",
+            "curl --upload-file file http://example.com",
+            "curl -X POST http://example.com",
+            "curl -XPOST http://example.com",
+            "curl -X put http://example.com",
+            "curl --request PATCH http://example.com",
+            "curl --request=DELETE http://example.com",
+            "wget --post-data=a=1 http://example.com",
+            "wget --post-data a=1 http://example.com",
+            "wget --post-file=@file http://example.com",
+            # GNU getopt_long unique abbreviations.
+            "wget --post-dat=a=1 http://example.com",
+            "wget --post-f=@file http://example.com",
+            "wget --meth=POST http://example.com",
+            "wget --method=POST http://example.com",
+            "wget --method DELETE http://example.com",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_ask(cmd)
+        for cmd in (
+            "curl http://example.com",
+            "curl -s http://example.com",
+            "curl -X GET http://example.com",
+            "curl --request HEAD http://example.com",
+            "curl -H 'X-Test: 1' http://example.com",
+            "curl -Hd http://example.com",
+            "wget http://example.com",
+            "wget -q http://example.com",
+            "wget --method=GET http://example.com",
+            "wget --meth=GET http://example.com",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_allow(cmd)
+
+    def test_tk70_mysql_mongosh_payload_req03(self):
+        for cmd in (
+            "mysql -e 'INSERT INTO t VALUES (1)' db",
+            "mysql -e 'UPDATE t SET a=1' db",
+            "mysql -e 'delete from t' db",
+            "mysql -e 'CREATE TABLE t (a int)' db",
+            "mysql -e 'ALTER TABLE t ADD b int' db",
+            "mysql -e 'DROP TABLE t' db",
+            "mysql -e 'REPLACE INTO t VALUES (1)' db",
+            "mysql -e 'TRUNCATE t' db",
+            "mysql -e 'SET NAMES utf8' db",
+            "mysql -e 'GRANT ALL ON *.* TO u' db",
+            "mysql -e 'REVOKE ALL ON *.* FROM u' db",
+            "mysql --execute='DROP DATABASE d' db",
+            "mysql --execute 'DELETE FROM t' db",
+            "mysql -Be 'UPDATE t SET a=1' db",
+            "mysql -uroot -e 'INSERT INTO t VALUES (1)' db",
+            "mongosh --eval 'db.users.insertOne({})'",
+            "mongosh --eval='db.users.deleteMany({})'",
+            "mongosh --eval 'db.users.updateOne({}, {})'",
+            "mongosh --eval 'db.users.replaceOne({}, {})'",
+            "mongosh --eval 'db.users.drop()'",
+            "mongosh --eval 'db.dropDatabase()'",
+            "mongosh --eval 'db.users.renameCollection(\"x\")'",
+            "mongosh --eval 'db.users.bulkWrite([])'",
+            "mongosh --eval 'db.getCollection(\"users\").insertOne({})'",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_ask(cmd)
+        for cmd in (
+            "mysql -e 'SELECT 1' db",
+            "mysql -e 'SHOW TABLES' db",
+            "mysql db",
+            "mysql -u root -p db",
+            "mongosh --eval 'db.users.find({})'",
+            "mongosh --eval 'db.version()'",
+            "mongosh",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_allow(cmd)
+
+    def test_tk70_wrapper_targets_req03(self):
+        for cmd in (
+            "make deploy",
+            "make -j8 release",
+            "make -C deploydir publish",
+            "make FOO=bar deploy",
+            "make predeploy-check",
+            "npm run deploy",
+            "npm run-script publish",
+            "npm run --silent release",
+            "just publish",
+            "just deploy-prod",
+            "just -f justfile deploy",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_ask(cmd)
+        for cmd in (
+            "make",
+            "make build",
+            "make test",
+            "make FOO=deploy",
+            "npm run test",
+            "npm run build",
+            "npm test",
+            "just build",
+            "just test",
+            "just --list",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_allow(cmd)
+
+    def test_tk70_gh_api_mutation_req03(self):
+        for cmd in (
+            "gh api -X DELETE repos/o/r/issues/1",
+            "gh api -Xdelete repos/o/r/issues/1",
+            "gh api -XDELETE repos/o/r/issues/1",
+            "gh api --method=DELETE repos/o/r/issues/1",
+            "gh api --method=delete repos/o/r/issues/1",
+            "gh api --method DELETE repos/o/r/issues/1",
+            "gh api --request=POST repos/o/r/issues",
+            "gh api --request PATCH repos/o/r/issues/1",
+            "gh api -XPUT repos/o/r/x",
+            "gh api -f title=bug repos/o/r/issues",
+            "gh api -ftitle=bug repos/o/r/issues",
+            "gh api -F body=@file repos/o/r/issues",
+            "gh api --field title=bug repos/o/r/issues",
+            "gh api --raw-field body=x repos/o/r/issues",
+            "gh api --input payload.json repos/o/r/issues",
+            "gh api --input=payload.json repos/o/r/issues",
+            "gh -R owner/repo api -X DELETE repos/o/r/issues/1",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_ask(cmd)
+        for cmd in (
+            "gh api repos/o/r",
+            "gh api -X GET repos/o/r",
+            "gh api --method=GET repos/o/r",
+            "gh api -H 'Accept: application/json' repos/o/r",
+            "gh api --paginate repos/o/r",
+            "gh pr list",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_allow(cmd)
+
+    def test_tk70_bq_dry_run_positive_list_req03(self):
+        # E-007: the dry-run exemption is a POSITIVE list; every falsey or
+        # unknown literal and the absence of the flag asks.
+        for cmd in (
+            "bq query 'SELECT 1'",
+            "bq query --dry_run=false 'SELECT 1'",
+            "bq query --dry_run=0 'SELECT 1'",
+            "bq query --dry_run=f 'SELECT 1'",
+            "bq query --dry_run=no 'SELECT 1'",
+            "bq query --dry_run=n 'SELECT 1'",
+            "bq query --dry-run=off 'SELECT 1'",
+            "bq query --dry_run=maybe 'SELECT 1'",
+            "bq rm -t ds.t",
+            "bq rm -f ds.t",
+            "bq update ds.t schema.json",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_ask(cmd)
+        for cmd in (
+            "bq ls",
+            "bq show ds.t",
+            "bq head ds.t",
+            "bq query --dry_run 'SELECT 1'",
+            "bq query --dry-run 'SELECT 1'",
+            "bq query --dry_run=true 'SELECT 1'",
+            "bq query --dry_run=TRUE 'SELECT 1'",
+            "bq query --dry_run=1 'SELECT 1'",
+            "bq query --dry_run=t 'SELECT 1'",
+            "bq --format=json query --dry_run 'SELECT 1'",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assert_allow(cmd)
+
+    def test_tk70_looks_irreversible_req04(self):
+        cases = {
+            "git push origin main": True,
+            "git push origin feature": False,
+            "git push --tags": True,
+            "docker push img": True,
+            "aws s3 rm s3://b/k": True,
+            "aws s3 ls": False,
+            "curl -d a=1 http://example.com": True,
+            "curl http://example.com": False,
+            "bq query --dry_run 'SELECT 1'": False,
+            "bq query 'SELECT 1'": True,
+            "make deploy": True,
+            "make build": False,
+            "kubectl get pods": False,
+            "kubectl delete pod x": True,
+            "true; git push --tags": True,
+            "git status && curl -XPOST http://example.com": True,
+            "rm -rf /tmp/x": False,
+            "psql -c 'drop table t'": True,
+            "cargo clean": True,
+            "": False,
+            "'unterminated": True,
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd):
+                self.assertEqual(t6_tools.looks_irreversible(cmd), expected)
+        self.assertTrue(t6_tools.looks_irreversible(None))
 
     # ------------------------------------------------------------------
     # Performance & Fail-Open Resilience

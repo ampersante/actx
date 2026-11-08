@@ -481,14 +481,25 @@ class HookCliTests(unittest.TestCase):
 
 
 # TK-65 (plan D5 §1): per-agent policy selected by `actx hook --agent <name>`.
+# The mutator-policy rows below use `git commit` - a mutator outside the
+# TK-70 push policy (rewrite-eligible, no protected-branch decision); push
+# rows live in Tk70PushPolicyTests further down.
+MUTATOR = 'git commit -m "probe commit"'
+FALLBACK_MUTATOR = "git commit -m x"
 PUSH = "git push origin main"
 FORCE_PUSH = "git push --force origin main"
 FORCE_PUSH_REASON = "Force-pushing to remote git repository requires human confirmation"
-# Byte-exact HEAD b051058 (v2.12.0) output of `actx hook` for PUSH.
-PUSH_NO_AGENT_STDOUT = (
+# Byte-exact `actx hook` output for MUTATOR on the default (no-agent) policy.
+MUTATOR_NO_AGENT_STDOUT = (
     '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
     '"permissionDecision": "allow", "updatedInput": {"command": '
-    '"actx git push origin main"}, "additionalContext": '
+    '"actx git commit -m \\"probe commit\\""}, "additionalContext": '
+    '"Command rewritten by actx for output compression."}}\n'
+)
+FALLBACK_MUTATOR_NO_AGENT_STDOUT = (
+    '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
+    '"permissionDecision": "allow", "updatedInput": {"command": '
+    '"actx git commit -m x"}, "additionalContext": '
     '"Command rewritten by actx for output compression."}}\n'
 )
 DEVIN_MUTATOR_ALLOW = {
@@ -528,20 +539,20 @@ class HookAgentPolicyTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         return p.stdout
 
-    # --- mutators -------------------------------------------------------
+    # --- mutators (git commit: outside the TK-70 push policy) -----------
     def test_opencode_mutator_not_rewritten_empty(self):
-        self.assertEqual(self.hook_stdout(["--agent", "opencode"], PUSH), "")
+        self.assertEqual(self.hook_stdout(["--agent", "opencode"], MUTATOR), "")
 
     def test_devin_mutator_allow_without_updated_input(self):
-        out = self.hook_stdout(["--agent", "devin"], PUSH)
+        out = self.hook_stdout(["--agent", "devin"], MUTATOR)
         self.assertEqual(out, json.dumps(DEVIN_MUTATOR_ALLOW) + "\n")
 
     def test_pi_mutator_rewritten(self):
-        self.assertEqual(self.hook_stdout(["--agent", "pi"], PUSH),
-                         PUSH_NO_AGENT_STDOUT)
+        self.assertEqual(self.hook_stdout(["--agent", "pi"], MUTATOR),
+                         MUTATOR_NO_AGENT_STDOUT)
 
     def test_no_agent_mutator_rewritten_byte_identical(self):
-        self.assertEqual(self.hook_stdout([], PUSH), PUSH_NO_AGENT_STDOUT)
+        self.assertEqual(self.hook_stdout([], MUTATOR), MUTATOR_NO_AGENT_STDOUT)
 
     # --- gate verdicts --------------------------------------------------
     def test_devin_force_push_gate_ask_first(self):
@@ -590,19 +601,23 @@ class HookAgentPolicyTests(unittest.TestCase):
 
     # --- malformed argv -> no-agent behaviour ---------------------------
     def test_malformed_agent_argv_falls_back_to_no_agent(self):
+        # FALLBACK_MUTATOR is rewrite-eligible under the default policy, so
+        # the fallback is observable as the full allow+updatedInput output.
         for args in (["--agent", "nosuch"], ["--agent"], ["--bogus"],
                      ["--agent", "opencode", "--bogus"],
                      ["--bogus", "--agent", "opencode"]):
             with self.subTest(args=args):
-                p = self.run_hook(args, PUSH)
+                p = self.run_hook(args, FALLBACK_MUTATOR)
                 self.assertEqual(p.returncode, 0, p.stderr)
-                self.assertEqual(p.stdout, PUSH_NO_AGENT_STDOUT)
+                self.assertEqual(p.stdout, FALLBACK_MUTATOR_NO_AGENT_STDOUT)
 
     # --- --payload (A1 fallback) ----------------------------------------
     def test_payload_either_order_matches_stdin_form(self):
         # stdin carries a different command: the payload must replace it.
+        # MUTATOR replaces PUSH here: the push policy (TK-70 REQ-01) has its
+        # own class below; this test pins argv-order plumbing.
         decoy = hook_input("Bash", {"command": "git log"})
-        for command in (PUSH, FORCE_PUSH, "git status"):
+        for command in (MUTATOR, FORCE_PUSH, "git status"):
             expected = self.hook_stdout(["--agent", "opencode"], command)
             payload = hook_input("Bash", {"command": command})
             for args in (["--agent", "opencode", "--payload", payload],
@@ -611,7 +626,7 @@ class HookAgentPolicyTests(unittest.TestCase):
                     p = self.run_hook(args, stdin_text=decoy)
                     self.assertEqual(p.returncode, 0, p.stderr)
                     self.assertEqual(p.stdout, expected)
-        self.assertEqual(self.hook_stdout(["--agent", "opencode"], PUSH), "")
+        self.assertEqual(self.hook_stdout(["--agent", "opencode"], MUTATOR), "")
         self.assertEqual(
             json.loads(self.hook_stdout(["--agent", "opencode"], FORCE_PUSH))
             ["hookSpecificOutput"]["permissionDecision"], "deny")
@@ -631,8 +646,12 @@ class HookAgentPolicyTests(unittest.TestCase):
                 self.assertEqual(p.returncode, 0, p.stderr)
                 self.assertEqual(p.stdout, "")
 
-    # --- gate exception -> no opinion, every agent ----------------------
-    def test_gate_exception_empty_for_every_agent(self):
+    # --- gate exception -> no opinion on benign commands, every agent ---
+    def test_gate_exception_empty_for_every_agent_on_benign_command(self):
+        # Pins the unchanged fail-open half of TK-70 REQ-04: a gate failure
+        # on a benign (non-irreversible) command still defers to the
+        # harness (empty output) on every agent. The irreversible half
+        # (ask / opencode+pi deny) is pinned in Tk70GateErrorAskTests.
         from actx_lib import hook
 
         for args in ([], ["--agent", "opencode"], ["--agent", "devin"],
@@ -643,7 +662,7 @@ class HookAgentPolicyTests(unittest.TestCase):
                     "actx_lib.security_gate.evaluate_security",
                     side_effect=RuntimeError("boom"),
                 ), mock.patch(
-                    "sys.stdin", io.StringIO(hook_input("Bash", {"command": PUSH}))
+                    "sys.stdin", io.StringIO(hook_input("Bash", {"command": "ls -la"}))
                 ), mock.patch("sys.stdout", out):
                     rc = hook.main(args)
                 self.assertEqual(rc, 0)
@@ -663,8 +682,11 @@ class CodexPayloadPolicyTests(unittest.TestCase):
         })
 
     def test_codex_all_git_mutators_defer_without_allow_or_rewrite(self):
+        # An ordinary push to an unprotected dst defers like every other
+        # git mutator under the codex policy (TK-70 REQ-01); a protected
+        # dst is a gate ask, pinned in Tk70PushPolicyTests.
         for command in ("git add probe.txt", "git commit -m probe",
-                        "git push origin main", "git pull origin main",
+                        "git push origin feature", "git pull origin main",
                         "git fetch origin"):
             for tool_name in ("Bash", "exec"):
                 with self.subTest(command=command, tool_name=tool_name):
@@ -698,26 +720,32 @@ class CodexPayloadPolicyTests(unittest.TestCase):
                 )
 
     def test_only_nonempty_top_level_string_marker_selects_codex(self):
-        unmarked = json.loads(hook_input("Bash", {"command": PUSH}))
-        payloads = [unmarked]
-        for marker in (None, "", False, True, 0, 1, [], {}, ["synthetic-turn"]):
-            payloads.append({**unmarked, "turn_id": marker})
-        payloads.append({**unmarked, "model": "synthetic-model"})
-        payloads.append({**unmarked, "tool_input": {
-            "command": PUSH, "turn_id": "synthetic-turn",
-        }})
-        for payload in payloads:
-            with self.subTest(payload=payload):
-                baseline = dict(payload)
-                baseline.pop("turn_id", None)
-                p = self.run_hook([], stdin_text=json.dumps(payload))
-                expected = self.run_hook([], stdin_text=json.dumps(baseline))
-                self.assertEqual(p.returncode, 0, p.stderr)
-                self.assertEqual(p.stdout, expected.stdout)
-                self.assertEqual(
-                    json.loads(p.stdout)["hookSpecificOutput"]["updatedInput"]["command"],
-                    "actx " + PUSH,
-                )
+        # Two commands tell the two policies apart: `git status` rewrites
+        # identically either way, while `git commit -m x` is empty under the
+        # codex mutator policy and allow+updatedInput under the default one.
+        # An invalid marker must leave the default output intact, so the
+        # commit row proves the marker was NOT selected.
+        for command in ("git status", "git commit -m x"):
+            unmarked = json.loads(hook_input("Bash", {"command": command}))
+            payloads = [unmarked]
+            for marker in (None, "", False, True, 0, 1, [], {}, ["synthetic-turn"]):
+                payloads.append({**unmarked, "turn_id": marker})
+            payloads.append({**unmarked, "model": "synthetic-model"})
+            payloads.append({**unmarked, "tool_input": {
+                "command": command, "turn_id": "synthetic-turn",
+            }})
+            for payload in payloads:
+                with self.subTest(command=command, payload=payload):
+                    baseline = dict(payload)
+                    baseline.pop("turn_id", None)
+                    p = self.run_hook([], stdin_text=json.dumps(payload))
+                    expected = self.run_hook([], stdin_text=json.dumps(baseline))
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertEqual(p.stdout, expected.stdout)
+                    self.assertEqual(
+                        json.loads(p.stdout)["hookSpecificOutput"]["updatedInput"]["command"],
+                        "actx " + command,
+                    )
 
     def test_explicit_agent_overrides_codex_marker(self):
         for agent in ("opencode", "devin", "pi"):
@@ -729,7 +757,9 @@ class CodexPayloadPolicyTests(unittest.TestCase):
                     self.assertEqual(p.stdout, self.hook_stdout(args, command))
 
     def test_explicit_codex_agent_supported_without_marker(self):
-        self.assertEqual(self.hook_stdout(["--agent", "codex"], PUSH), "")
+        # A codex mutator stays empty (defer) with no turn_id in the payload.
+        self.assertEqual(self.hook_stdout(["--agent", "codex"], FALLBACK_MUTATOR),
+                         "")
         for command in (FORCE_PUSH, "cat .env", "git status"):
             with self.subTest(command=command):
                 self.assertEqual(self.hook_stdout(["--agent", "codex"], command),
@@ -768,19 +798,258 @@ class CodexPayloadPolicyTests(unittest.TestCase):
                     "permissionDecisionReason": reason,
                 }})
 
-    def test_codex_gate_exception_defers_before_rewriter(self):
+    def test_codex_gate_exception_defers_before_rewriter_on_benign_command(self):
+        # Pins two things on a benign command: the gate failure still
+        # defers (empty output, no ask) and the deferral happens BEFORE the
+        # rewriter, so no rewritten command is emitted. The irreversible
+        # gate-error ask is pinned in Tk70GateErrorAskTests.
         from actx_lib import hook
 
         out = io.StringIO()
         with mock.patch("actx_lib.security_gate.evaluate_security",
                         side_effect=RuntimeError("probe failure")), \
              mock.patch("actx_lib.rewriter.rewrite") as rewrite, \
-             mock.patch("sys.stdin", io.StringIO(self.codex_payload(PUSH))), \
+             mock.patch("sys.stdin", io.StringIO(self.codex_payload("ls -la"))), \
              mock.patch("sys.stdout", out):
             rc = hook.main()
         self.assertEqual(rc, 0)
         self.assertEqual(out.getvalue(), "")
         rewrite.assert_not_called()
+
+
+# TK-70 STEP-04 (plan REQ-01/REQ-04): an ordinary push gets no verdict from
+# actx on any agent, and a gate failure asks instead of failing open on an
+# irreversible command.
+PUSH_UNPROTECTED = "git push origin feature"
+PUSH_PROTECTED = "git push origin main"
+PROTECTED_PUSH_REASON = "Pushing to protected branch 'main' requires human confirmation"
+GATE_ERROR_MESSAGE = "actx security gate internal error on irreversible command"
+AGY_PUSH_ASK = {
+    "decision": "ask",
+    "reason": "actx: command outside actx policy — deferred to user confirmation",
+}
+
+
+def gate_error_ask(message):
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "ask",
+        "permissionDecisionReason": (
+            f"actx security gate confirmation required: {GATE_ERROR_MESSAGE}: {message}"
+        ),
+    }}
+
+
+class Tk70PushPolicyTests(unittest.TestCase):
+    run_hook = HookAgentPolicyTests.run_hook
+    hook_stdout = HookAgentPolicyTests.hook_stdout
+
+    def assert_empty(self, args, command):
+        p = self.run_hook(args, command)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, "")
+
+    def test_unprotected_push_defers_on_every_claude_schema_agent(self):
+        for agent in (None, "codex", "opencode", "devin", "pi"):
+            args = [] if agent is None else ["--agent", agent]
+            with self.subTest(agent=agent):
+                self.assert_empty(args, PUSH_UNPROTECTED)
+
+    def test_unprotected_push_defers_for_codex_turn_id_marker(self):
+        payload = json.dumps({
+            "turn_id": "synthetic-turn",
+            "tool_name": "Bash",
+            "tool_input": {"command": PUSH_UNPROTECTED},
+        })
+        p = self.run_hook([], stdin_text=payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, "")
+
+    def test_antigravity_unprotected_push_falls_through_to_ask(self):
+        payload = gemini_input("run_command", {"CommandLine": PUSH_UNPROTECTED})
+        p = self.run_hook([], stdin_text=payload)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout), AGY_PUSH_ASK)
+
+    def test_other_git_mutators_keep_previous_policy(self):
+        for command in ("git add probe.txt", "git commit -m probe",
+                        "git pull", "git fetch"):
+            with self.subTest(command=command):
+                base = json.loads(self.hook_stdout([], command))
+                output = base["hookSpecificOutput"]
+                self.assertEqual(output["permissionDecision"], "allow")
+                self.assertEqual(output["updatedInput"],
+                                 {"command": "actx " + command})
+                self.assert_empty(["--agent", "codex"], command)
+                self.assert_empty(["--agent", "opencode"], command)
+                self.assertEqual(
+                    json.loads(self.hook_stdout(["--agent", "devin"], command)),
+                    DEVIN_MUTATOR_ALLOW)
+                self.assertEqual(self.hook_stdout(["--agent", "pi"], command),
+                                 self.hook_stdout([], command))
+                agy = self.run_hook([], stdin_text=gemini_input(
+                    "run_command", {"CommandLine": command}))
+                self.assertEqual(json.loads(agy.stdout), {
+                    "decision": "allow",
+                    "overwrite": {"CommandLine": "actx " + command},
+                })
+
+    def test_dangerous_push_forms_keep_gate_verdicts(self):
+        reasons = {
+            "git push --tags origin feature":
+                "git push --tags deletes or mass-updates remote refs and "
+                "requires human confirmation",
+            "git push --delete origin feature":
+                "git push --delete deletes or mass-updates remote refs and "
+                "requires human confirmation",
+            "git push --mirror origin":
+                "git push --mirror deletes or mass-updates remote refs and "
+                "requires human confirmation",
+            "git push origin :feature":
+                "Deleting a remote ref via a ':dst' refspec requires human "
+                "confirmation",
+            PUSH_PROTECTED: PROTECTED_PUSH_REASON,
+        }
+        for command, reason in reasons.items():
+            with self.subTest(command=command):
+                for agent in (None, "codex", "devin"):
+                    args = [] if agent is None else ["--agent", agent]
+                    self.assertEqual(json.loads(self.hook_stdout(args, command)), {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "ask",
+                            "permissionDecisionReason": (
+                                f"actx security gate confirmation required: {reason}"
+                            ),
+                        }
+                    })
+                for agent in ("opencode", "pi"):
+                    with self.subTest(command=command, agent=agent):
+                        self.assertEqual(
+                            json.loads(self.hook_stdout(
+                                ["--agent", agent], command)),
+                            gate_ask_as_deny(agent, "T6_HIGH_RISK_GIT", reason))
+                agy = self.run_hook([], stdin_text=gemini_input(
+                    "run_command", {"CommandLine": command}))
+                self.assertEqual(json.loads(agy.stdout),
+                                 {"decision": "force_ask", "reason": reason})
+
+
+class Tk70GateErrorAskTests(unittest.TestCase):
+    run_hook = HookAgentPolicyTests.run_hook
+
+    def main_stdout(self, args, payload, effect):
+        from actx_lib import hook
+
+        out = io.StringIO()
+        with mock.patch("actx_lib.security_gate.evaluate_security",
+                        side_effect=effect), \
+             mock.patch("sys.stdin", io.StringIO(payload)), \
+             mock.patch("sys.stdout", out):
+            rc = hook.main(list(args))
+        self.assertEqual(rc, 0)
+        return out.getvalue()
+
+    def test_gate_runtime_error_asks_on_unprotected_push(self):
+        payload = hook_input("Bash", {"command": PUSH_UNPROTECTED})
+        expected = gate_error_ask("boom")
+        for args in ([], ["--agent", "codex"], ["--agent", "devin"]):
+            with self.subTest(args=args):
+                self.assertEqual(
+                    json.loads(self.main_stdout(args, payload, RuntimeError("boom"))),
+                    expected)
+        for agent in ("opencode", "pi"):
+            with self.subTest(agent=agent):
+                self.assertEqual(
+                    json.loads(self.main_stdout(
+                        ["--agent", agent], payload, RuntimeError("boom"))),
+                    gate_ask_as_deny(agent, "T6_GATE_ERROR",
+                                     f"{GATE_ERROR_MESSAGE}: boom"))
+
+    def test_antigravity_gate_runtime_error_force_asks_on_unprotected_push(self):
+        payload = gemini_input("run_command", {"CommandLine": PUSH_UNPROTECTED})
+        self.assertEqual(
+            json.loads(self.main_stdout([], payload, RuntimeError("boom"))),
+            {"decision": "force_ask",
+             "reason": f"{GATE_ERROR_MESSAGE}: boom"})
+
+    def test_gate_runtime_error_keeps_fail_open_on_ro_command(self):
+        payload = hook_input("Bash", {"command": "ls"})
+        for args in ([], ["--agent", "opencode"], ["--agent", "pi"]):
+            with self.subTest(args=args):
+                self.assertEqual(
+                    self.main_stdout(args, payload, RuntimeError("boom")), "")
+        agy = gemini_input("run_command", {"CommandLine": "ls"})
+        self.assertEqual(self.main_stdout([], agy, RuntimeError("boom")), "")
+
+    def test_engine_value_error_asks_on_irreversible_chunk(self):
+        from actx_lib import security_gate
+
+        with mock.patch("actx_lib.security_gate.engine._check_high_risk_tools",
+                        side_effect=ValueError("bad pattern")):
+            result = security_gate.evaluate_security("helm install r c")
+        self.assertEqual(result.decision, "ask")
+        self.assertEqual(result.category, "T6_GATE_ERROR")
+        self.assertEqual(result.reason,
+                         f"{GATE_ERROR_MESSAGE}: bad pattern")
+
+    def test_engine_value_error_keeps_allow_on_ro_command(self):
+        from actx_lib import security_gate
+
+        with mock.patch("actx_lib.security_gate.engine._check_high_risk_tools",
+                        side_effect=ValueError("bad pattern")):
+            result = security_gate.evaluate_security("ls")
+        self.assertEqual(result.decision, "allow")
+
+    def test_engine_outer_error_asks_on_irreversible_command(self):
+        from actx_lib import security_gate
+
+        with mock.patch("actx_lib.security_gate.engine._closed_grammar_words",
+                        side_effect=RuntimeError("boom")):
+            result = security_gate.evaluate_security("helm install r c")
+        self.assertEqual(result.decision, "ask")
+        self.assertEqual(result.category, "T6_GATE_ERROR")
+        self.assertEqual(result.reason, f"{GATE_ERROR_MESSAGE}: boom")
+
+    def test_engine_outer_error_keeps_allow_on_ro_command(self):
+        from actx_lib import security_gate
+
+        with mock.patch("actx_lib.security_gate.engine._closed_grammar_words",
+                        side_effect=RuntimeError("boom")):
+            result = security_gate.evaluate_security("ls")
+        self.assertEqual(result.decision, "allow")
+
+    def test_invalid_input_still_no_op(self):
+        from actx_lib import hook
+
+        for text in ("not json",
+                     json.dumps({"tool_input": {"command": PUSH_UNPROTECTED}})):
+            with self.subTest(text=text):
+                out = io.StringIO()
+                with mock.patch("sys.stdin", io.StringIO(text)), \
+                     mock.patch("sys.stdout", out):
+                    rc = hook.main([])
+                self.assertEqual(rc, 0)
+                self.assertEqual(out.getvalue(), "")
+
+
+class Tk70PushPerfTests(unittest.TestCase):
+    def test_warm_hook_process_push_under_1ms(self):
+        import time
+
+        from actx_lib import hook
+
+        payload = hook_input("Bash", {"command": PUSH_UNPROTECTED})
+        self.assertIsNone(hook.process(payload))  # warm-up
+        best = None
+        for _ in range(5):
+            start = time.process_time()
+            for _ in range(200):
+                result = hook.process(payload)
+            ms = (time.process_time() - start) / 200 * 1000.0
+            best = ms if best is None else min(best, ms)
+        self.assertIsNone(result)
+        self.assertLess(best, 1.0, f"warm hook.process push {best:.4f}ms per op")
 
 
 if __name__ == "__main__":

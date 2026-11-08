@@ -142,11 +142,14 @@ class FamilyRecordTests(unittest.TestCase):
             spec["ro_verbs"],
             (("get",), ("describe",), ("top",), ("events",), ("logs",)),
         )
-        # The 4 pre-TK-40 non-cloud specs verbatim + ("exec",) (REQ-02).
+        # The 4 pre-TK-40 non-cloud specs verbatim + ("exec",) (REQ-02);
+        # TK-70 REQ-03 adds the remaining mutating verbs.
         self.assertEqual(
             spec["ask_specs"],
             (("delete",), ("scale",), ("rollout", "undo"), ("apply",),
-             ("exec",)),
+             ("exec",), ("patch",), ("rollout", "restart"), ("edit",),
+             ("debug",), ("cp",), ("label",), ("annotate",), ("set",),
+             ("create",), ("replace",), ("drain",)),
         )
         self.assertEqual(spec["stream_specs"], ())
 
@@ -160,7 +163,11 @@ class FamilyRecordTests(unittest.TestCase):
              ("show", "values"), ("show", "chart"), ("status",),
              ("history",)),
         )
-        self.assertEqual(spec["ask_specs"], (("uninstall",), ("rollback",)))
+        # TK-70 REQ-03 adds install/upgrade (release state changes).
+        self.assertEqual(
+            spec["ask_specs"],
+            (("uninstall",), ("rollback",), ("install",), ("upgrade",)),
+        )
         self.assertEqual(spec["stream_specs"], (("get", "values"),))
 
     def test_manual_kubectl_predicate_is_gone(self):

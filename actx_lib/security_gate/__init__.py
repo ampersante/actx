@@ -17,16 +17,18 @@ Public API (REQ-02, TK-59 plan section 2, derived from an exact grep of
 every consumer - see tools/gate_corpus_extract.py's neighbor commands and
 the plan's E-007 evidence entry): ``evaluate_security``, ``SecurityDecision``,
 ``T6_ASK_TABLE``, ``_T6_NON_CLOUD_ASK_TABLE``, ``_quick_check_hit``,
-``_RE_SENSITIVE_QUICK_CHECK``, and the ``sql_verbs`` module itself (patched
-by tests/test_sql_gate.py:128 as ``security_gate.sql_verbs``). Every other
-name lives in its owning submodule only.
+``_RE_SENSITIVE_QUICK_CHECK``, ``looks_irreversible`` (TK-70 REQ-04: the
+hook's gate-error and engine's failure-path predicate) and the
+``sql_verbs`` module itself (patched by tests/test_sql_gate.py:128 as
+``security_gate.sql_verbs``). Every other name lives in its owning
+submodule only.
 """
 
 from actx_lib import sql_verbs
 
 from .common import SecurityDecision, _quick_check_hit, _RE_SENSITIVE_QUICK_CHECK
 from .engine import evaluate_security
-from .t6_tools import T6_ASK_TABLE, _T6_NON_CLOUD_ASK_TABLE
+from .t6_tools import T6_ASK_TABLE, _T6_NON_CLOUD_ASK_TABLE, looks_irreversible
 
 __all__ = [
     "evaluate_security",
@@ -35,5 +37,6 @@ __all__ = [
     "_T6_NON_CLOUD_ASK_TABLE",
     "_quick_check_hit",
     "_RE_SENSITIVE_QUICK_CHECK",
+    "looks_irreversible",
     "sql_verbs",
 ]

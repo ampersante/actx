@@ -23,13 +23,35 @@ _AGY_DEFER_REASON = "actx: command outside actx policy — deferred to user conf
 #                "allow"   - allow without updatedInput: auto-allowed as
 #                            today, rules see the typed string (Devin, whose
 #                            empty response would prompt; `-p` rejects).
+#   push:        a rewritable `git push` (rewriter.is_git_push), decided
+#                before the mutator policy: "defer" - no verdict at all, the
+#                harness's own confirmation stays in force (TK-70 REQ-01).
 AGENT_POLICIES = {
-    None: {"ask_as_deny": False, "mutator": "rewrite"},
-    "codex": {"ask_as_deny": False, "mutator": "none"},
-    "opencode": {"ask_as_deny": True, "mutator": "none"},
-    "devin": {"ask_as_deny": False, "mutator": "allow"},
-    "pi": {"ask_as_deny": True, "mutator": "rewrite"},
+    None: {"ask_as_deny": False, "mutator": "rewrite", "push": "defer"},
+    "codex": {"ask_as_deny": False, "mutator": "none", "push": "defer"},
+    "opencode": {"ask_as_deny": True, "mutator": "none", "push": "defer"},
+    "devin": {"ask_as_deny": False, "mutator": "allow", "push": "defer"},
+    "pi": {"ask_as_deny": True, "mutator": "rewrite", "push": "defer"},
 }
+
+
+def _gate_error_reason(exc):
+    return f"actx security gate internal error on irreversible command: {exc}"
+
+
+def _error_is_irreversible(command):
+    """REQ-04 (TK-70): a gate failure asks instead of failing open when the
+    command is irreversible - any T6-ask command (looks_irreversible) or an
+    ordinary `git push`, which actx never lets through as an allow (REQ-01).
+    Both predicates return True on their own failure (safe side)."""
+    return (security_gate.looks_irreversible(command)
+            or rewriter.is_git_push(command))
+
+
+def _push_defers(command):
+    """True for a rewritable `git push`: actx withholds its verdict so the
+    harness's native confirmation stays in force (TK-70 REQ-01)."""
+    return rewriter.is_mutator(command) and rewriter.is_git_push(command)
 
 
 def _gate_reason(prefix, category, reason):
@@ -66,8 +88,13 @@ def process(text, agent=None):
 
         try:
             sec_res = security_gate.evaluate_security(command)
-        except Exception:
-            return None
+        except Exception as exc:
+            # REQ-04 (TK-70): a gate failure on an irreversible command asks
+            # (force_ask is the Antigravity ask equivalent); every other
+            # command keeps the fail-open deferral.
+            if not _error_is_irreversible(command):
+                return None
+            return {"decision": "force_ask", "reason": _gate_error_reason(exc)}
 
         if sec_res is not None:
             if sec_res.decision == "deny":
@@ -86,12 +113,13 @@ def process(text, agent=None):
         except Exception:
             rewritten = None
 
-        if rewritten is not None:
+        if rewritten is not None and not _push_defers(command):
             return {
                 "decision": "allow",
                 "overwrite": {"CommandLine": rewritten},
             }
-        # Fallthrough: no gate verdict, no rewrite. Empty hook output is
+        # Fallthrough: no gate verdict, no rewrite - also an ordinary push
+        # (REQ-01: never auto-approved). Empty hook output is
         # undocumented in the Antigravity contract and third-party sources
         # report it as fail-closed, while "deny" would break every
         # unrewritten command - so "ask" is used as the defer primitive:
@@ -123,17 +151,29 @@ def process(text, agent=None):
         print("actx hook: command is missing or not a string", file=sys.stderr)
         return None
 
-    # 1. Evaluate Security Gatekeeper policies
-    try:
-        sec_res = security_gate.evaluate_security(command)
-    except Exception:
-        # Fail-open guarantee: defer to native harness permissions on gate error
-        return None
-
+    # The policy is resolved before the gate so the gate-error path below
+    # emits its ask through the same mapping as a gate ask (REQ-04, TK-70):
+    # a Codex turn_id selects the codex policy, and opencode/pi turn the
+    # ask into a deny with their standard reason.
     turn_id = data.get("turn_id")
     if agent is None and isinstance(turn_id, str) and turn_id:
         agent = "codex"
     policy = AGENT_POLICIES.get(agent, AGENT_POLICIES[None])
+
+    # 1. Evaluate Security Gatekeeper policies
+    try:
+        sec_res = security_gate.evaluate_security(command)
+    except Exception as exc:
+        # REQ-04 (TK-70): a gate failure on an irreversible command asks
+        # instead of failing open; every other command keeps the fail-open
+        # deferral to native harness permissions.
+        if not _error_is_irreversible(command):
+            return None
+        sec_res = security_gate.SecurityDecision(
+            decision="ask",
+            reason=_gate_error_reason(exc),
+            category="T6_GATE_ERROR",
+        )
 
     if sec_res is not None:
         if sec_res.decision == "deny":
@@ -178,6 +218,13 @@ def process(text, agent=None):
     if rewritten is None:
         # Clean/safe command without compression -> strictly return None
         # to defer to the agent harness's native permission policy
+        return None
+
+    # REQ-01 (TK-70): an ordinary push gets no verdict before the mutator
+    # policy - no allow, no updatedInput, no overwrite - so the harness's
+    # own confirmation stays in force on every agent.
+    if (rewritten is not None and _push_defers(command)
+            and policy["push"] == "defer"):
         return None
 
     if policy["mutator"] != "rewrite" and rewriter.is_mutator(command):

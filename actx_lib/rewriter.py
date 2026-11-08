@@ -636,3 +636,34 @@ def is_mutator(command):
         return _mutator_argv(shlex.split(command))
     except Exception:
         return True
+
+
+def _git_push_argv(argv):
+    if not argv:
+        return False
+    head = cli_families.head_key(argv[0])
+    if head in cli_families.RUN_PREFIXES:
+        split = cli_families.run_prefix_split([head] + list(argv[1:]))
+        return split is not None and _git_push_argv(split[0])
+    if head != "git":
+        return False
+    trail = _spec_trail(head, argv)
+    return (bool(trail)
+            and trail[-1] is rewrite_spec.HEAD_SPECS["git"]["verbs"]["push"])
+
+
+def is_git_push(command):
+    """True when `command` reaches the git `push` node on the is_mutator
+    walk (run-prefixes unwrapped, the same strict-or-lenient spec trail).
+    hook.py uses it to withhold every verdict on an ordinary push so the
+    harness's own confirmation stays in force (TK-70 REQ-01). Like
+    is_mutator, `git -C <dir> push` is True (the lenient walk skips the
+    global value flag), but rewrite() returns None for it - the git spec
+    admits no global options - so the hook's push branch, guarded by
+    `rewritten is not None`, never sees that form. Any exception -> True:
+    fail toward the user-facing confirmation (the push branch then emits
+    no allow)."""
+    try:
+        return _git_push_argv(shlex.split(command))
+    except Exception:
+        return True

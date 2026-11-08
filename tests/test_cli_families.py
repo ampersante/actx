@@ -259,20 +259,40 @@ class RewriterCloudTests(unittest.TestCase):
 class T6ConsolidationTests(unittest.TestCase):
     def test_final_table_superset_of_pre_tk39(self):
         # Red-gate 11/12: every pre-existing spec carried over verbatim (the
-        # final table is a SUPERSET). docker gained volume rm/prune in TK-41
-        # and kubectl gained ("exec",) in TK-40, so grown heads are checked by
-        # per-spec containment, untouched heads stay pinned by exact equality.
+        # final table is a SUPERSET). docker gained volume rm/prune in TK-41,
+        # kubectl gained ("exec",) in TK-40 and TK-70 REQ-03 grew helm/
+        # gcloud/vercel/wrangler, so grown heads are checked by per-spec
+        # containment plus the exact rows below; untouched heads stay pinned
+        # by exact equality.
         for head, specs in PRE_TK39_T6_ASK_TABLE.items():
             final = security_gate.T6_ASK_TABLE.get(head)
             self.assertIsNotNone(final, head)
             for spec in specs:
                 self.assertIn(spec, final, (head, spec))
-            if head not in ("docker", "kubectl", "terraform"):
+            if head not in ("docker", "kubectl", "terraform", "helm",
+                            "gcloud", "vercel", "wrangler"):
                 self.assertEqual(final, specs, head)
-        # 4 non-cloud heads + 14 family heads (bq/terraform/redis-cli
+        # TK-70 REQ-03 exact family rows (mirror cli_families.FAMILIES).
+        self.assertEqual(
+            security_gate.T6_ASK_TABLE["helm"],
+            (("uninstall",), ("rollback",), ("install",), ("upgrade",)),
+        )
+        self.assertEqual(
+            security_gate.T6_ASK_TABLE["gcloud"],
+            (("delete",), ("undeploy",), ("deploy",), ("storage", "rm")),
+        )
+        self.assertEqual(
+            security_gate.T6_ASK_TABLE["vercel"],
+            (("deploy", "--prod"), ("remove",), ("env", "pull"), ("env", "add")),
+        )
+        self.assertEqual(
+            security_gate.T6_ASK_TABLE["wrangler"],
+            (("deploy",), ("publish",), ("delete",), ("secret", "put")),
+        )
+        # 15 non-cloud heads + 14 family heads (bq/terraform/redis-cli
         # joined via FAMILIES in TK-43, gh in TK-55; gradlew's ask is a
         # custom gate check, not a table entry).
-        self.assertEqual(len(security_gate.T6_ASK_TABLE), 18)
+        self.assertEqual(len(security_gate.T6_ASK_TABLE), 29)
 
     def test_migrated_heads_left_the_non_cloud_table(self):
         # N-F1 red-gate: a docker/kubectl/helm/terraform record left in
@@ -396,14 +416,16 @@ class DataFamiliesTests(unittest.TestCase):
         )
         self.assert_rewrite("terraform plan -input=false")
         self.assert_none("terraform plan -out tfplan")
-        # TK-55 round 5b: the =-form gap is closed — `-out=file` is denied
-        # by the _DENIED_WRITE_FLAGS eq match (was a documented wave-2
-        # limitation, E5.6).
+        # TK-55 round 5b closed the rewriter's =-form gap; TK-70 REQ-03
+        # (`=`-spelling normalization in the T6 table) turns `-out=file`
+        # into a T6 ask as well. The rewriter still refuses both write
+        # forms, so neither is ever prefixed with actx.
         self.assert_none("terraform plan -out=tfplan")
-        self.assertEqual(
-            security_gate.evaluate_security("terraform plan -out=tfplan").decision,
-            "allow",
-        )
+        for command in ("terraform plan -out tfplan", "terraform plan -out=tfplan"):
+            with self.subTest(command=command):
+                decision = security_gate.evaluate_security(command)
+                self.assertEqual(decision.decision, "ask", command)
+                self.assertEqual(decision.category, "T6_HIGH_RISK_TERRAFORM", command)
 
     def test_redis_ro_verbs_rewrite_both_cases(self):
         for verb in ("EXISTS", "TTL", "TYPE", "SCAN", "DBSIZE",

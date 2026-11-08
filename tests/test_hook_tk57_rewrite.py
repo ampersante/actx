@@ -194,11 +194,20 @@ class HookRewriteProbeTests(unittest.TestCase):
         for command in (
             "git fetch",
             "git pull --rebase",
-            "git push origin main",
-            "git push --recurse-submodules=check",
         ):
             with self.subTest(command=command):
                 self.assert_allow_rewritten(command)
+
+    def test_step06_push_forms_never_auto_allowed(self):
+        # TK-70 REQ-01/02: an ordinary push gets no actx verdict (empty
+        # stdout on Claude/Codex; Antigravity falls through to ask) and a
+        # protected dst is a T6 ask, so neither schema may auto-approve.
+        for command in (
+            "git push --recurse-submodules=check",
+            "git push origin main",
+        ):
+            with self.subTest(command=command):
+                self.assert_not_auto_allowed(command)
 
 
 class InlineCodeBoundaryTests(unittest.TestCase):

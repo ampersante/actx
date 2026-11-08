@@ -107,6 +107,28 @@ ALLOWED_CHANGED_DEFS = {
     "_GIT_EXEC_FLAG_VERBS": "STEP-G4",
     "_has_git_exec_argv_flag": "STEP-G4",
     "_check_high_risk_git": "STEP-G4",
+    # Post-baseline waves after the TK-60 fixwave changed these definitions
+    # too (mechanically derived the same way: exactly the MISSING set the
+    # check printed against the monolith before this block existed).
+    # TK-61/TK-63/TK-71: gate false denials and performance, closed-grammar
+    # exemptions, whole-word inline markers, T1 environment reasons.
+    "_RE_INLINE_SOCKET": "TK-63 (split into _RE_INLINE_SOCKET_* regexes)",
+    "_RE_SENSITIVE_QUICK_CHECK": "TK-63",
+    "_quick_check_hit": "TK-63",
+    "_is_sensitive_path": "TK-71",
+    "_check_obfuscation_and_eval": "TK-63/TK-71",
+    "_check_destructive_and_persistence": "TK-63",
+    "_unwrap_tokens": "TK-63",
+    "_mask_literal_semicolons": "TK-63",
+    "_evaluate_chunk": "TK-63",
+    "evaluate_security": "TK-63",
+    "_check_high_risk_cargo": "TK-63",
+    "_check_gradlew": "TK-63",
+    "_check_sql": "TK-63",
+    # TK-70 REQ-03: the ask table grew, and the table match gained the
+    # `=`-spelling normalization plus the external-mutation predicates.
+    "_T6_NON_CLOUD_ASK_TABLE": "TK-70",
+    "_check_high_risk_tools": "TK-70",
 }
 
 

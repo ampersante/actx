@@ -10,7 +10,7 @@ $ git status        →   $ actx git status
 
 ![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB)
 ![Stdlib only](https://img.shields.io/badge/dependencies-none-brightgreen)
-![Tests](https://img.shields.io/badge/tests-1210%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1360%20passed-brightgreen)
 
 ---
 
@@ -53,13 +53,13 @@ M (3):
 
 ## Features
 
-- **L7 Security Gatekeeper (`actx hook`)** — deterministic PreToolUse guard (<0.02ms latency) that intercepts dangerous commands before execution. Blocks credential exposure (`.env`, `~/.ssh/id_rsa`, AWS/GCP keys, Keychain), network exfiltration (`curl -d @.env`, `nc`/`socat`), pipe-to-interpreter obfuscation, OS destruction (`rm -rf /`), and insecure package registries. Requests human confirmation (`ask`) on destructive git operations (`git push --force`, `git reset --hard`).
-- **Auto-rewrite (observational + narrow mutators)** — observational CLI (`git` RO, `ls`/`grep`/`find`/`wc`/…, test runners, linters without write flags, `docker`/`kubectl`/`gh` RO, …) plus a narrow mutator allow-list (`git add|commit|push|pull|fetch`; package installs left it and always ask for confirmation). Safety is metachar/exec/fail-open/write-flag rejects (`--fix`, `ruff format`, …), not “read-only only”. No lexer; no `python3`/`aws` auto-rewrite.
+- **L7 Security Gatekeeper (`actx hook`)** — deterministic PreToolUse guard (<0.02ms latency) that intercepts dangerous commands before execution. Blocks credential exposure (`.env`, `~/.ssh/id_rsa`, AWS/GCP keys, Keychain), network exfiltration (`curl -d @.env`, `nc`/`socat`), pipe-to-interpreter obfuscation, OS destruction (`rm -rf /`), and insecure package registries. Requests human confirmation (`ask`) on destructive git operations (`git push --force`, `git reset --hard`), on dangerous push forms and pushes to a protected branch (`main`/`master` plus your `protected_branches`), and on one class of external mutations — deploys, publishes and remote-state writes (`docker push`, `helm install|upgrade`, mutating `kubectl` verbs, `terraform import`, cloud deploy/remove verbs, `gh api` mutating methods, `npm`/`uv`/`gem`/`twine` publishes, non-GET `curl`/`wget`, `make`/`npm run`/`just` deploy targets, and similar). A flag written as `--flag=value` counts as the flag being present.
+- **Auto-rewrite (observational + narrow mutators)** — observational CLI (`git` RO, `ls`/`grep`/`find`/`wc`/…, test runners, linters without write flags, `docker`/`kubectl`/`gh` RO, …) plus a narrow mutator allow-list (`git add|commit|pull|fetch`; `git push` is left alone — the hook returns no verdict on an ordinary push, so the host's own confirmation stays in force and push output is not compressed; package installs left the list and always ask for confirmation). Safety is metachar/exec/fail-open/write-flag rejects (`--fix`, `ruff format`, …), not “read-only only”. No lexer; no `python3`/`aws` auto-rewrite.
 - **Exact exit codes** — the original command's exit code is preserved, including `git status` returning `128` outside a repo and `grep` returning `1` for no matches.
 - **Stderr never hidden** — a compacted command (tests, linters, installers) prints its stderr after the summary, secret values masked: whole on failure; on success whole up to 20 lines, longer stderr keeps its warning/error/URL lines plus one `[actx] N stderr lines hidden; full output: <tee path>` line (`actx run --failures` stays silent on a green run).
 - **Lossless filenames** — `git status`, `ls`, and `find` compress the format, not the names.
 - **Tee for recovery** — truncated or failed output is saved to `~/.local/share/actx/tee` as JSON (secret values masked); a truncated result is always saved and its tee path printed.
-- **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent on an error (the OpenCode plugin's deliberate throw on a security-gate deny is OpenCode's only way to block a command); on any error they pass the command through unchanged and the output through with secret values masked (if masking itself fails, lines that may carry a secret are withheld and a marker line says how many).
+- **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent on an error (the OpenCode plugin's deliberate throw on a security-gate deny is OpenCode's only way to block a command); on any error they pass the command through unchanged and the output through with secret values masked (if masking itself fails, lines that may carry a secret are withheld and a marker line says how many). Point-wise exception (TK-70): if the gate itself fails on an already-parsed irreversible command, the hook returns `ask` (category `T6_GATE_ERROR`; OpenCode/pi `deny`, Antigravity `force_ask`) instead of passing it through; malformed input without a command and a host timeout/kill stay fail-open.
 - **Escape hatch** — `ACTX_BYPASS=1` or a `bypass_commands` entry runs the matching command unfiltered (byte-for-byte except masked secret values), preserving the exit code.
 - **Stdlib only** — Python 3.14 standard library. No pip, no brew, no network, no telemetry.
 - **Multi-agent** — deterministic hooks and plugins for Claude Code, Codex, Gemini/Antigravity, GitHub Copilot CLI, OpenCode, Devin CLI, and pi; rule-based instructions for Grok, Cline, Windsurf, and Cursor.
@@ -181,7 +181,7 @@ actx --help
 | `actx session` | Adoption across sessions |
 | `actx insights [--days N] [--top N] [--verbose-commands] [--json]` | Orchestration analytics: repeats, failures, passthrough, suggestions, verbose-command advisor, wave-head adoption |
 | `actx tracking on\|off\|status\|clear` | Enable/disable/inspect/clear local analytics |
-| `actx git add/commit/push/pull/fetch` | Narrow mutators (auto-rewritable); success prints a tiny confirmation |
+| `actx git add/commit/pull/fetch` | Narrow mutators (auto-rewritable); success prints a tiny confirmation. `actx git push` still works, but an ordinary `git push` is never auto-rewritten: the hook returns no verdict and the host's own confirmation stays in force |
 | `actx git branch [RO flags]` | Branch list / show-current (RO flags only) |
 | `actx --raw <command>` | Bypass filtering; output byte-for-byte except masked secret values |
 | `ACTX_BYPASS=1 actx <command>` | Run the command unfiltered (no filter, no tee; secret values masked) |
@@ -256,13 +256,14 @@ cache). Under `--dangerously-skip-permissions` Antigravity still honours a hook
 | Windsurf | Rules file | `actx init --agent windsurf` | soft |
 | Cursor | Printed for manual UI insert | `actx init --agent cursor` | manual |
 
-¹ Codex requires the user to trust the hook once via `/hooks`. With actx ≥ 2.13.1, the security gate runs first, then eligible Git mutators (`git add|commit|push|pull|fetch`) are left unrewritten so existing native permission rules match the original command. The hook returns no new allow for these commands. Trusted hook definitions are unchanged.
+¹ Codex requires the user to trust the hook once via `/hooks`. With actx ≥ 2.13.1, the security gate runs first, then eligible Git mutators (`git add|commit|pull|fetch`) are left unrewritten so existing native permission rules match the original command. The hook returns no new allow for these commands. An ordinary `git push` gets no verdict from actx on any harness (see the push policy below). Trusted hook definitions are unchanged.
 
 ² These adapters call `actx hook --agent <name>` and require actx ≥ 2.13.0. Per harness:
 
-- **OpenCode** checks its own `permission` rules against the command *after* the plugin has rewritten it. So the git mutators (`git add|commit|push|pull|fetch`) are left unrewritten, and your rules such as `shell:git push*` still match them. OpenCode has no confirmation channel for plugins, so a gate `ask` (e.g. `git push --force`) becomes a deny with the reason `actx security gate (opencode: no confirmation channel) …`. Not covered: user-typed `!cmd`, the `execute` tool (code-mode bridge for catalog/MCP tools), MCP tools. The agentic-kit `apply` writes the same plugin file; until the kit drops its template, re-run `actx init` after a kit apply.
-- **Devin** also checks its rules after the hook. Git mutators are allowed without being rewritten, so a matching `deny` rule of yours still wins. A gate `ask` prompts; `devin -p` rejects it. Mutator forms actx does not rewrite (`git -C dir push`) get Devin's default prompt, which `-p` rejects. `~/.config/devin/config.json` (or `$XDG_CONFIG_HOME/devin/config.json`) is merged in place and keeps mode 0600; if it contains comments or an unexpected shape, `actx init` leaves it untouched, exits 1 and prints the entry to add by hand.
-- **pi** never asks the human: a gate `ask` becomes a deny with the reason `actx security gate (pi: no confirmation channel) …`, so the agent sees why and continues. The extension goes to `$PI_CODING_AGENT_DIR/extensions/actx.ts` (default `~/.pi/agent/extensions/actx.ts`). Not covered: user-typed `!cmd`.
+- **OpenCode** checks its own `permission` rules against the command *after* the plugin has rewritten it. So the git mutators (`git add|commit|pull|fetch`) are left unrewritten, and your rules such as `shell:git commit*` still match them. OpenCode has no confirmation channel for plugins, so a gate `ask` (e.g. `git push --force`) becomes a deny with the reason `actx security gate (opencode: no confirmation channel) …`. Not covered: user-typed `!cmd`, the `execute` tool (code-mode bridge for catalog/MCP tools), MCP tools. The agentic-kit `apply` writes the same plugin file; until the kit drops its template, re-run `actx init` after a kit apply.
+- **Devin** also checks its rules after the hook. `git add`/`commit`/`pull`/`fetch` are allowed without being rewritten, so a matching `deny` rule of yours still wins. A gate `ask` prompts; `devin -p` rejects it. An ordinary `git push` gets no answer, so Devin's own confirmation prompt applies (`devin -p` rejects it). Mutator forms actx cannot rewrite (`git -C dir push`) also get Devin's default prompt, which `-p` rejects. `~/.config/devin/config.json` (or `$XDG_CONFIG_HOME/devin/config.json`) is merged in place and keeps mode 0600; if it contains comments or an unexpected shape, `actx init` leaves it untouched, exits 1 and prints the entry to add by hand.
+- **pi** never asks the human: a gate `ask` becomes a deny with the reason `actx security gate (pi: no confirmation channel) …`, so the agent sees why and continues. An ordinary `git push` gets no answer from actx and runs unmodified (pi has no confirmation system). The extension goes to `$PI_CODING_AGENT_DIR/extensions/actx.ts` (default `~/.pi/agent/extensions/actx.ts`). Not covered: user-typed `!cmd`.
+- **`git push` on every harness (TK-70).** An ordinary push — destination not protected, no `--mirror`/`--tags`/`--follow-tags`/`--all`/`--branches`/`--prune`/`--delete`/`-d`/`:dst` refspec and no wildcard refspec — gets no verdict from actx: empty output on Claude Code, Codex, OpenCode, Devin and pi, and a fallthrough `ask` on Antigravity (`agy -p --dangerously-skip-permissions` auto-approves it — a known limit until TK-66). Push output is not compressed on any host: a live probe showed no guarantee that an `updatedInput` without a verdict keeps the host's confirmation window. Dangerous push forms and a destination in `main`/`master` (or your `protected_branches`) ask.
 - In OpenCode and Devin, a rule of yours on an observational command (e.g. `git log*`) no longer matches once actx rewrites it to `actx git log …`.
 - Devin with the Tier-2 rules file only (no hook): `devin -p` rejects a rewritten `actx git status` as "requires confirmation"; add an allow rule for `actx *`. Since actx 2.13.0 Devin is wired as a Tier-1 hook instead.
 
@@ -292,6 +293,7 @@ Created automatically on first run at `~/.config/actx/config.json`:
     "max_line_chars": 300
   },
   "bypass_commands": [],
+  "protected_branches": ["main", "master"],
   "tracking": {
     "enabled": true,
     "history_days": 90
@@ -301,6 +303,7 @@ Created automatically on first run at `~/.config/actx/config.json`:
 
 - `tee.mode`: `failures` (default), `always`, or `never`.
 - `bypass_commands`: list of command names (first token) that run unfiltered, e.g. `["git"]`. Environment variable `ACTX_BYPASS=1` bypasses filtering for the current call only.
+- `protected_branches`: extra branches a `git push` must ask about; always includes `main` and `master` (the list only adds). A missing key, a non-list value or a read error falls back to `["main", "master"]`.
 - A truncated result (line cap or long-line clip) always tees regardless of `enabled`/`mode`, and the tee path is printed.
 - Tee files are `~/.local/share/actx/tee/<unix_ts>_<sha1(command)[:8]>.log`, kept to 100 files.
 
