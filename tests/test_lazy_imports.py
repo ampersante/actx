@@ -149,6 +149,8 @@ class LazyImportTests(unittest.TestCase):
         for args in (["hook", "--agent", "opencode"],
                      ["hook", "--agent", "devin"],
                      ["hook", "--agent", "pi"],
+                     ["hook", "--agent", "hermes"],
+                     ["hook", "--agent", "dsh"],
                      ["hook", "--agent", "opencode", "--payload", push]):
             with self.subTest(args=args):
                 self.assertEqual(self.run_path(args, stdin_text=push), baseline)

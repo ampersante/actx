@@ -10,8 +10,10 @@ import os
 import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
+import urllib.parse
 
 AGENTS = (
     "claude",
@@ -25,6 +27,8 @@ AGENTS = (
     "copilot",
     "devin",
     "pi",
+    "dsh",
+    "hermes",
 )
 
 def _tier2_flags_block():
@@ -86,6 +90,10 @@ _DEVIN_MATCHER = "^exec$"
 
 # Codex names its shell tool differently across versions.
 _CODEX_MATCHER = "Bash|shell|bash|exec"
+
+# dsh reads `cordis.patch.yml` as YAML; actx writes it as JSON (JSON is a
+# subset of YAML), so everything else in it stays byte-identical.
+_DSH_HOME = "~/.dsh"
 
 
 class _FileError(Exception):
@@ -646,6 +654,532 @@ def _devin_installed(path):
     )
 
 
+def _dsh_name_target(name, patch_path):
+    """The filesystem path an entry's ``name`` denotes, or None.  dsh resolves
+    a relative name next to the patch file and reads ``file://`` URLs as its
+    normalized form; both spellings are accepted."""
+    if not isinstance(name, str) or not name:
+        return None
+    if name.startswith("file://"):
+        name = urllib.parse.unquote(name[len("file://"):])
+    name = os.path.expanduser(name)
+    if not os.path.isabs(name):
+        name = os.path.join(os.path.dirname(patch_path), name)
+    return name
+
+
+def _dsh_entry_is_ours(entry, patch_path, mjs_path):
+    """An entry is ours only when ``id == "actx"`` and ``name`` resolves to
+    our mjs.  A foreign entry that merely shares the id is not ours."""
+    if not isinstance(entry, dict) or entry.get("id") != "actx":
+        return False
+    target = _dsh_name_target(entry.get("name"), patch_path)
+    if target is None:
+        return False
+    return os.path.realpath(target) == os.path.realpath(mjs_path)
+
+
+def _dsh_row_is_ours(row, patch_path, mjs_path):
+    """A patch-list item is ours in two shapes:
+
+    - the insert operation actx writes: a dict whose ``insert`` holds exactly
+      one entry that is ours (a foreign insert operation is never ours);
+    - the legacy plain-entry form written before the patch-operation shape was
+      known (dsh read it as an override that matched nothing and dropped it):
+      the entry itself, so re-init and uninstall clean such an installation up.
+
+    A foreign override operation (an item with our id but no insert) is not
+    ours and stays untouched."""
+    if not isinstance(row, dict):
+        return False
+    if "insert" in row:
+        entries = row["insert"]
+        return (
+            isinstance(entries, list)
+            and len(entries) == 1
+            and _dsh_entry_is_ours(entries[0], patch_path, mjs_path)
+        )
+    return _dsh_entry_is_ours(row, patch_path, mjs_path)
+
+
+def _dsh_row():
+    """The canonical patch item: a new entry goes in through ``insert`` (a
+    bare ``{"id": ...}`` item is an override of an existing entry)."""
+    return {"insert": [{"id": "actx", "name": "./actx/actx-dsh.mjs"}]}
+
+
+def _load_dsh_patch(path):
+    """The parsed patch items ([] when the file is missing).  ValueError with
+    the reason when the file must be left untouched: a hand-written YAML
+    patch is refused, never normalized (the Devin canon)."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot read it as strict JSON (%s)" % exc) from exc
+    if not isinstance(data, list):
+        raise ValueError("the top level is not a JSON array")
+    for row in data:
+        if not isinstance(row, dict):
+            raise ValueError("a patch item is not a JSON object")
+    return data
+
+
+def _merge_dsh_patch(path, mjs_path):
+    """Merge our insert operation into the patch list: foreign items keep their
+    order and content, our items (either shape) are replaced by the canonical
+    one.  Writes only on change."""
+    rows = _load_dsh_patch(path)
+    merged = [row for row in rows if not _dsh_row_is_ours(row, path, mjs_path)]
+    merged.append(_dsh_row())
+    if merged == rows:
+        return False
+    _write_json(path, merged)
+    return True
+
+
+def _remove_dsh_patch(path, mjs_path):
+    """Remove our items (either shape); the file is deleted when nothing else
+    was there.  False when there is nothing to remove."""
+    if not os.path.exists(path):
+        return False
+    rows = _load_dsh_patch(path)
+    remaining = [row for row in rows if not _dsh_row_is_ours(row, path, mjs_path)]
+    if len(remaining) == len(rows):
+        return False
+    if remaining:
+        _write_json(path, remaining)
+    else:
+        _remove_file(path)
+    return True
+
+
+def _dsh_installed(paths):
+    """Both halves of the installation: the mjs exists and the patch parses
+    with our insert operation among its items.  A file actx cannot parse reads
+    as not installed, never as an error."""
+    mjs = os.path.expanduser(paths["plugin"])
+    patch = os.path.expanduser(paths["patch"])
+    if not os.path.exists(mjs):
+        return False
+    try:
+        rows = _load_dsh_patch(patch)
+    except ValueError:
+        return False
+    return any(_dsh_row_is_ours(row, patch, mjs) for row in rows)
+
+
+# Hermes Agent (TK-69): actx registers a `pre_tool_call` shell hook through
+# the hermes CLI and pre-approves it in the profile's
+# `shell-hooks-allowlist.json`.  Both sides key on one command string, built
+# once per run.  A cold first CLI call bootstraps an isolated runtime
+# (~91 s measured), hence the generous timeout.
+_HERMES_HOME = "~/.hermes"
+_HERMES_TIMEOUT = 120
+_HERMES_MATCHER = "^terminal$"
+# The default profile takes no `-p` flag; this sentinel names it internally.
+_HERMES_DEFAULT_PROFILE = "default-profile"
+
+
+class _HermesProfileError(Exception):
+    """One Hermes profile whose state actx cannot read or write safely.  The
+    run keeps processing the other profiles and exits 1 at the end."""
+
+
+def _hermes_binary():
+    """The single hermes resolution point (tests mock this helper)."""
+    return shutil.which("hermes")
+
+
+def _hermes_home_exists():
+    return os.path.isdir(os.path.expanduser(_HERMES_HOME))
+
+
+def _hermes_gate():
+    """(binary, None) when the hermes CLI may be run, else (None, note).  No
+    subprocess is spawned before this gate passes: a home without Hermes
+    keeps `actx init --agent all` offline and test-hermetic."""
+    if not _hermes_home_exists():
+        return None, "no ~/.hermes data root - skipping (run hermes once first)"
+    binary = _hermes_binary()
+    if binary is None:
+        return None, "the hermes binary was not found on PATH - skipping"
+    return binary, None
+
+
+def _hermes_command(abs_actx):
+    return shlex.quote(abs_actx) + " hook --agent hermes"
+
+
+def _hermes_entry(command):
+    return {
+        "command": command,
+        "matcher": _HERMES_MATCHER,
+        "timeout": 10,
+        "fail_closed": True,
+    }
+
+
+def _hermes_label(profile):
+    if profile == _HERMES_DEFAULT_PROFILE:
+        return "default profile"
+    return "profile %r" % (profile,)
+
+
+def _hermes_profiles():
+    """The default profile plus each configured extra, in order, deduped.
+    A non-list value or a non-string entry is noted and ignored."""
+    profiles = [_HERMES_DEFAULT_PROFILE]
+    try:
+        from actx_lib import config
+
+        configured = config.load().get("hermes_profiles")
+    except Exception as exc:
+        print(
+            "actx init: hermes: cannot read the actx config (%s); only the "
+            "default profile is used" % exc,
+            file=sys.stderr,
+        )
+        return profiles
+    if not isinstance(configured, list):
+        print(
+            'actx init: hermes: config "hermes_profiles" is not a list - ignored',
+            file=sys.stderr,
+        )
+        return profiles
+    for name in configured:
+        if not isinstance(name, str) or not name:
+            print(
+                'actx init: hermes: config "hermes_profiles" entry %r is not a '
+                "profile name - ignored" % (name,),
+                file=sys.stderr,
+            )
+            continue
+        if name not in profiles:
+            profiles.append(name)
+    return profiles
+
+
+def _hermes_argv(binary, profile, *args):
+    """One `hermes config` argv; the default profile passes no `-p` flag."""
+    prefix = [] if profile == _HERMES_DEFAULT_PROFILE else ["-p", profile]
+    return [binary] + prefix + ["config"] + list(args)
+
+
+def _run_hermes(binary, profile, args, label):
+    """Run one `hermes config` verb and return stdout.  A spawn failure, a
+    timeout or a non-zero exit is a profile error, never a traceback
+    (exec-array only, engineering rule 3)."""
+    argv = _hermes_argv(binary, profile, *args)
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=_HERMES_TIMEOUT
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _HermesProfileError(
+            "%s: cannot run %s: %s" % (label, " ".join(argv), exc)
+        ) from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()
+        raise _HermesProfileError(
+            "%s: `hermes %s` exited %d%s"
+            % (label, " ".join(args), proc.returncode,
+               ": " + detail[0] if detail else "")
+        )
+    return proc.stdout
+
+
+def _hermes_get_hooks(binary, profile, label):
+    stdout = _run_hermes(binary, profile, ("get", "hooks", "--json"), label)
+    try:
+        hooks = json.loads(stdout)
+    except ValueError as exc:
+        raise _HermesProfileError(
+            "%s: `hermes config get hooks --json` did not return JSON (%s)"
+            % (label, exc)
+        ) from exc
+    if not isinstance(hooks, dict):
+        raise _HermesProfileError(
+            "%s: `hermes config get hooks --json` returned no JSON object"
+            % label
+        )
+    return hooks
+
+
+def _hermes_config_home(binary, profile, label):
+    """The profile's home: the directory of its `hermes config path` file."""
+    stdout = _run_hermes(binary, profile, ("path",), label)
+    lines = stdout.splitlines()
+    path = lines[0].strip() if lines else ""
+    home = os.path.dirname(os.path.expanduser(path)) if path else ""
+    if not home:
+        raise _HermesProfileError(
+            "%s: `hermes config path` printed no config path" % label
+        )
+    return home
+
+
+def _load_hermes_allowlist(path):
+    """The parsed allowlist ({"approvals": []} when the file is missing).
+    ValueError with the reason when the file must be left untouched."""
+    if not os.path.exists(path):
+        return {"approvals": []}
+    try:
+        data = _read_json(path)
+    except (_FileError, ValueError) as exc:
+        raise ValueError(str(exc)) from exc
+    if not isinstance(data, dict):
+        raise ValueError("%s is not a JSON object" % path)
+    if "approvals" not in data:
+        return data
+    approvals = data["approvals"]
+    if not isinstance(approvals, list) or not all(
+        isinstance(approval, dict) for approval in approvals
+    ):
+        raise ValueError('%s: "approvals" is not a list of objects' % path)
+    return data
+
+
+def _is_actx_hermes_entry(entry):
+    return isinstance(entry, dict) and _is_actx_hook_command(entry.get("command"))
+
+
+def _merge_hermes_hooks(hooks, command):
+    """The hooks object with actx entries replaced by the current one; foreign
+    entries keep order and content.  ValueError when `pre_tool_call` has a
+    shape a merge would overwrite."""
+    entries = hooks.get("pre_tool_call", [])
+    if not isinstance(entries, list):
+        raise ValueError('"pre_tool_call" is not a list')
+    kept = [entry for entry in entries if not _is_actx_hermes_entry(entry)]
+    if not any(
+        isinstance(entry, dict) and entry.get("command") == command
+        for entry in kept
+    ):
+        kept.append(_hermes_entry(command))
+    merged = dict(hooks)
+    merged["pre_tool_call"] = kept
+    return merged
+
+
+def _merge_hermes_allowlist(data, command):
+    """The allowlist with actx approvals replaced by the current one; foreign
+    approvals keep order and content."""
+    approvals = data.get("approvals", [])
+    kept = [approval for approval in approvals if not _is_actx_hermes_entry(approval)]
+    if not any(approval.get("command") == command for approval in kept):
+        kept.append({"event": "pre_tool_call", "command": command})
+    merged = dict(data)
+    merged["approvals"] = kept
+    return merged
+
+
+def _remove_hermes_hooks(hooks):
+    """The hooks object without actx entries, or None when there were none."""
+    entries = hooks.get("pre_tool_call", [])
+    if not isinstance(entries, list):
+        raise ValueError('"pre_tool_call" is not a list')
+    kept = [entry for entry in entries if not _is_actx_hermes_entry(entry)]
+    if kept == entries:
+        return None
+    merged = dict(hooks)
+    merged["pre_tool_call"] = kept
+    return merged
+
+
+def _remove_hermes_approvals(data):
+    """The allowlist without actx approvals, or None when there were none."""
+    approvals = data.get("approvals", [])
+    kept = [approval for approval in approvals if not _is_actx_hermes_entry(approval)]
+    if kept == approvals:
+        return None
+    merged = dict(data)
+    merged["approvals"] = kept
+    return merged
+
+
+def _hermes_has_content(data):
+    """True when the dict holds anything besides empty containers."""
+    for value in data.values():
+        if isinstance(value, (dict, list)):
+            if value:
+                return True
+        elif value is not None and value != "" and value is not False:
+            return True
+    return False
+
+
+def _hermes_set_hook_key(binary, profile, key, value, label):
+    """Write one sub-key of the `hooks` section through its dotted path.  The
+    whole section cannot be set: the CLI refuses a list where it expects a
+    section's sub-key map (found live, CHK-08)."""
+    _run_hermes(
+        binary, profile,
+        ("set", "hooks.%s" % (key,), json.dumps(value, separators=(",", ":"))),
+        label,
+    )
+
+
+def _hermes_unset_path(binary, profile, path, label):
+    """Remove one configuration path (`hooks` or `hooks.<key>`) whole."""
+    _run_hermes(binary, profile, ("unset", path), label)
+
+
+def _hermes_write_changed_hooks(binary, profile, fetched, merged, label):
+    """One dotted `set` per sub-key whose value differs from the fetched
+    hooks; a sub-key actx did not change is never rewritten."""
+    for key, value in merged.items():
+        if key not in fetched or fetched[key] != value:
+            _hermes_set_hook_key(binary, profile, key, value, label)
+
+
+def _hermes_write_removed_hooks(binary, profile, hooks, label):
+    """Drop actx's entries from the hooks section: our entries are already
+    gone from `hooks`.  A surviving list keeps its foreign entries through
+    one dotted set; an emptied list is unset, never written back; a section
+    left with no content is unset whole.  Foreign sub-keys are never
+    written."""
+    entries = hooks.get("pre_tool_call")
+    if entries:
+        _hermes_set_hook_key(binary, profile, "pre_tool_call", entries, label)
+    elif _hermes_has_content(hooks):
+        _hermes_unset_path(binary, profile, "hooks.pre_tool_call", label)
+    else:
+        _hermes_unset_path(binary, profile, "hooks", label)
+
+
+def _install_hermes_profile(binary, profile, command):
+    label = _hermes_label(profile)
+    hooks = _hermes_get_hooks(binary, profile, label)
+    home = _hermes_config_home(binary, profile, label)
+    allowlist_path = os.path.join(home, "shell-hooks-allowlist.json")
+    # Both user-owned sides are validated before the first write (F5/C5): a
+    # refused side leaves both byte-identical, never a half-install.
+    try:
+        allowlist = _load_hermes_allowlist(allowlist_path)
+    except ValueError as exc:
+        raise _HermesProfileError(
+            "%s: %s; nothing was written" % (label, exc)
+        ) from exc
+    try:
+        merged_hooks = _merge_hermes_hooks(hooks, command)
+    except ValueError as exc:
+        raise _HermesProfileError(
+            "%s: hooks %s; nothing was written" % (label, exc)
+        ) from exc
+    merged_allowlist = _merge_hermes_allowlist(allowlist, command)
+    _hermes_write_changed_hooks(binary, profile, hooks, merged_hooks, label)
+    if merged_allowlist != allowlist:
+        try:
+            _write_json(allowlist_path, merged_allowlist)
+        except _FileError as exc:
+            raise _HermesProfileError("%s: %s" % (label, exc)) from exc
+
+
+def _install_hermes(abs_actx):
+    binary, skip = _hermes_gate()
+    if binary is None:
+        print("actx init: hermes: %s" % skip, file=sys.stderr)
+        return 0
+    command = _hermes_command(abs_actx)
+    failed = 0
+    for profile in _hermes_profiles():
+        try:
+            _install_hermes_profile(binary, profile, command)
+        except _HermesProfileError as exc:
+            print("actx init: hermes: %s" % exc, file=sys.stderr)
+            failed += 1
+    if failed:
+        raise _FileError(
+            "install", "hermes",
+            "%d profile(s) failed; the notes above name each one" % failed,
+        )
+    return 0
+
+
+def _uninstall_hermes_profile(binary, profile, command):
+    label = _hermes_label(profile)
+    try:
+        hooks = _hermes_get_hooks(binary, profile, label)
+        home = _hermes_config_home(binary, profile, label)
+    except _HermesProfileError as exc:
+        raise _HermesProfileError(
+            "%s. Nothing was changed; remove the entry whose command is %r "
+            "manually." % (exc, command)
+        ) from exc
+    allowlist_path = os.path.join(home, "shell-hooks-allowlist.json")
+    try:
+        allowlist = _load_hermes_allowlist(allowlist_path)
+    except ValueError as exc:
+        raise _HermesProfileError(
+            "%s: %s. Nothing was written; remove the approvals whose command "
+            "is %r manually." % (label, exc, command)
+        ) from exc
+    try:
+        reduced_hooks = _remove_hermes_hooks(hooks)
+    except ValueError as exc:
+        raise _HermesProfileError(
+            "%s: hooks %s. The hook config was left unchanged; remove the "
+            "entry whose command is %r manually." % (label, exc, command)
+        ) from exc
+    reduced_allowlist = _remove_hermes_approvals(allowlist)
+    if reduced_hooks is not None:
+        _hermes_write_removed_hooks(binary, profile, reduced_hooks, label)
+    if reduced_allowlist is not None:
+        try:
+            if _hermes_has_content(reduced_allowlist):
+                _write_json(allowlist_path, reduced_allowlist)
+            else:
+                _remove_file(allowlist_path)
+        except _FileError as exc:
+            raise _HermesProfileError("%s: %s" % (label, exc)) from exc
+
+
+def _uninstall_hermes(abs_actx):
+    binary, skip = _hermes_gate()
+    if binary is None:
+        print("actx init: hermes: %s" % skip, file=sys.stderr)
+        return 0
+    command = _hermes_command(abs_actx)
+    failed = 0
+    for profile in _hermes_profiles():
+        try:
+            _uninstall_hermes_profile(binary, profile, command)
+        except _HermesProfileError as exc:
+            print("actx init: hermes: %s" % exc, file=sys.stderr)
+            failed += 1
+    if failed:
+        raise _FileError(
+            "uninstall", "hermes",
+            "%d profile(s) failed; the notes above name each one" % failed,
+        )
+    return 0
+
+
+def _hermes_installed():
+    """True iff the default profile's allowlist names the exact current hook
+    command.  A stdlib read: `--show` never runs the hermes CLI."""
+    path = os.path.join(
+        os.path.expanduser(_HERMES_HOME), "shell-hooks-allowlist.json"
+    )
+    try:
+        data = _read_json(path)
+    except (_FileError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    approvals = data.get("approvals")
+    if not isinstance(approvals, list):
+        return False
+    command = _hermes_command(abs_path())
+    return any(
+        isinstance(approval, dict) and approval.get("command") == command
+        for approval in approvals
+    )
+
+
 def _read_instructions(path):
     return _read_text(path) if os.path.exists(path) else ""
 
@@ -739,7 +1273,8 @@ def _uninstall_instructions(path):
 
 
 def _install_template(path, template_name, abs_actx):
-    """Write an actx-owned adapter file (opencode plugin, pi extension)."""
+    """Write an actx-owned adapter file (opencode plugin, pi extension, dsh
+    plugin)."""
     template = _read_text(os.path.join(_ADAPTERS_DIR, template_name))
     _write_text(path, template.replace("__ACTX_ABS_PATH__", json.dumps(abs_actx)))
     return True
@@ -767,6 +1302,18 @@ def _agent_config(agent):
         return {"hook": os.path.join(_config_home(), "devin", "config.json")}
     if agent == "pi":
         return {"plugin": os.path.join(_pi_agent_dir(), "extensions", "actx.ts")}
+    if agent == "dsh":
+        # dsh has no documented home override (the shipped bundle has no
+        # reader of a $DSH_HOME-style variable), so the home is the literal
+        # ~/.dsh; an override needs a cited reader first.
+        dsh_home = os.path.expanduser(_DSH_HOME)
+        return {
+            "plugin": os.path.join(dsh_home, "actx", "actx-dsh.mjs"),
+            "patch": os.path.join(dsh_home, "cordis.patch.yml"),
+        }
+    if agent == "hermes":
+        # The hermes CLI owns its config files; dispatch by name only.
+        return {}
     return _AGENT_PATHS[agent]
 
 
@@ -780,6 +1327,10 @@ def _detect_existing(agent):
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["plugin"])))
     if agent == "pi":
         return os.path.isdir(os.path.expanduser(_pi_agent_dir()))
+    if agent == "dsh":
+        return os.path.isdir(os.path.expanduser(_DSH_HOME))
+    if agent == "hermes":
+        return _hermes_home_exists()
     if agent == "grok":
         return os.path.isdir(os.path.expanduser("~/.grok"))
     if agent == "cline":
@@ -869,6 +1420,10 @@ def _installed(agent):
         )
     if agent in ("opencode", "pi"):
         return os.path.exists(os.path.expanduser(paths["plugin"]))
+    if agent == "dsh":
+        return _dsh_installed(paths)
+    if agent == "hermes":
+        return _hermes_installed()
     if agent == "devin":
         return _devin_installed(os.path.expanduser(paths["hook"]))
     if agent in ("grok", "cline", "windsurf"):
@@ -918,6 +1473,27 @@ def install(agent, abs_actx):
         path = os.path.expanduser(paths["plugin"])
         _install_template(path, "%s.ts.template" % agent, abs_actx)
         return 0
+    if agent == "dsh":
+        # The mjs is actx-owned and inert on its own (dsh loads only what the
+        # patch names), so it is written first: a refused patch leaves an
+        # unused file that --show reads as not installed and uninstall removes.
+        mjs = os.path.expanduser(paths["plugin"])
+        _install_template(mjs, "dsh.mjs.template", abs_actx)
+        patch = os.path.expanduser(paths["patch"])
+        try:
+            _merge_dsh_patch(patch, mjs)
+        except ValueError as exc:
+            print(
+                "cannot install: %s: %s. The file may be a hand-written YAML "
+                "patch; it was left unchanged. Add this insert operation to "
+                "the JSON array manually:\n%s"
+                % (patch, exc, json.dumps([_dsh_row()], indent=2)),
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+    if agent == "hermes":
+        return _install_hermes(abs_actx)
     if agent == "devin":
         path = os.path.expanduser(paths["hook"])
         try:
@@ -973,6 +1549,26 @@ def uninstall(agent, abs_actx):
     if agent in ("opencode", "pi"):
         _remove_file(os.path.expanduser(paths["plugin"]))
         return 0
+    if agent == "dsh":
+        # The patch row goes first: a refused patch leaves the mjs in place,
+        # so a dsh boot never misses a plugin the patch still names.
+        mjs = os.path.expanduser(paths["plugin"])
+        patch = os.path.expanduser(paths["patch"])
+        try:
+            _remove_dsh_patch(patch, mjs)
+        except ValueError as exc:
+            print(
+                "cannot uninstall: %s: %s. The file may be a hand-written YAML "
+                "patch; it was left unchanged. Remove the actx insert "
+                "operation (the item inserting id \"actx\" with name "
+                "\"./actx/actx-dsh.mjs\") manually." % (patch, exc),
+                file=sys.stderr,
+            )
+            return 1
+        _remove_file(mjs)
+        return 0
+    if agent == "hermes":
+        return _uninstall_hermes(abs_actx)
     if agent == "devin":
         path = os.path.expanduser(paths["hook"])
         try:

@@ -27,6 +27,10 @@ DEFAULT_CONFIG = {
     # REQ-02): the fixed {main, master} is always protected, this list adds
     # to it (union). Read by the security gate, never by the rewriter.
     "protected_branches": ["main", "master"],
+    # Extra Hermes profiles that `actx init --agent hermes` configures
+    # (profile-name strings). The default profile is always handled; the
+    # default here adds none.
+    "hermes_profiles": [],
     "ignore_dirs": [".git", "node_modules", "target"],
     "ignore_files": ["*.lock"],
     "tracking": {"enabled": True, "history_days": 90},

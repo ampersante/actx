@@ -1,7 +1,9 @@
 import io
 import json
 import os
+import shlex
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -75,7 +77,12 @@ class HookCliTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         data = json.loads(p.stdout)
         self.assertEqual(data["decision"], "force_ask")
-        self.assertIn("Force-pushing to remote git repository requires human confirmation", data["reason"])
+        self.assertEqual(data["reason"], (
+            "actx security gate confirmation required [T6_HIGH_RISK_GIT] "
+            "'git push --force origin main': rewrites remote git history or "
+            "refs and can affect what everyone else sees — "
+            "Force-pushing to remote git repository requires human confirmation"
+        ))
 
     def test_gemini_secret_class_bare_operand_denied(self):
         # TK-57 S1 (STEP-01): matches the Claude-schema pin above.
@@ -93,7 +100,13 @@ class HookCliTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         data = json.loads(p.stdout)
         self.assertEqual(data["decision"], "force_ask")
-        self.assertIn("alias.p", data["reason"])
+        self.assertEqual(data["reason"], (
+            "actx security gate confirmation required [T6_HIGH_RISK_GIT] "
+            "'git config alias.p '\"'\"'!id'\"'\"'': rewrites remote git "
+            "history or refs and can affect what everyone else sees — "
+            "Setting git config key 'alias.p' can redirect git into "
+            "executing an arbitrary program"
+        ))
 
     def test_gemini_find_exec_escaped_semicolon_denied(self):
         # TK-57 S6 (STEP-05): matches the Claude-schema pin above.
@@ -304,7 +317,13 @@ class HookCliTests(unittest.TestCase):
         data = json.loads(p.stdout)
         output = data["hookSpecificOutput"]
         self.assertEqual(output["permissionDecision"], "ask")
-        self.assertIn("unknown discovered file", output["permissionDecisionReason"])
+        self.assertEqual(output["permissionDecisionReason"], (
+            "actx security gate confirmation required [T4_DESTRUCTIVE_MUTATION] "
+            "'find /tmp -name '\"'\"'*.sh'\"'\"' -exec {} \\;': deletes or "
+            "overwrites files and local state and cannot be undone — find "
+            "executes an unknown discovered file directly ('{}' as the "
+            "executed program)"
+        ))
 
     def test_t6_infra_ask_passthrough(self):
         # TK-37: kubectl apply is a T6 ask (not denied, not rewritten)
@@ -489,6 +508,8 @@ FALLBACK_MUTATOR = "git commit -m x"
 PUSH = "git push origin main"
 FORCE_PUSH = "git push --force origin main"
 FORCE_PUSH_REASON = "Force-pushing to remote git repository requires human confirmation"
+GIT_EXPLANATION = ("rewrites remote git history or refs and can affect what "
+                   "everyone else sees")
 # Byte-exact `actx hook` output for MUTATOR on the default (no-agent) policy.
 MUTATOR_NO_AGENT_STDOUT = (
     '{"hookSpecificOutput": {"hookEventName": "PreToolUse", '
@@ -791,7 +812,10 @@ class CodexPayloadPolicyTests(unittest.TestCase):
                 gate.assert_called_once_with("git commit -m probe")
                 reason = ("actx security gate violation [T_PROBE]: probe reason"
                           if decision == "deny" else
-                          "actx security gate confirmation required: probe reason")
+                          "actx security gate confirmation required [T_PROBE] "
+                          "'git commit -m probe': runs a command class that "
+                          "the security gate asks a human to review — "
+                          "probe reason")
                 self.assertEqual(result, {"hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": decision,
@@ -824,6 +848,8 @@ PUSH_UNPROTECTED = "git push origin feature"
 PUSH_PROTECTED = "git push origin main"
 PROTECTED_PUSH_REASON = "Pushing to protected branch 'main' requires human confirmation"
 GATE_ERROR_MESSAGE = "actx security gate internal error on irreversible command"
+GATE_ERROR_EXPLANATION = ("the security gate could not finish checking this "
+                          "command, so it needs a human decision")
 AGY_PUSH_ASK = {
     "decision": "ask",
     "reason": "actx: command outside actx policy — deferred to user confirmation",
@@ -835,7 +861,9 @@ def gate_error_ask(message):
         "hookEventName": "PreToolUse",
         "permissionDecision": "ask",
         "permissionDecisionReason": (
-            f"actx security gate confirmation required: {GATE_ERROR_MESSAGE}: {message}"
+            "actx security gate confirmation required [T6_GATE_ERROR] "
+            f"'{PUSH_UNPROTECTED}': {GATE_ERROR_EXPLANATION} "
+            f"(internal error: {message}) — {GATE_ERROR_MESSAGE}: {message}"
         ),
     }}
 
@@ -850,7 +878,8 @@ class Tk70PushPolicyTests(unittest.TestCase):
         self.assertEqual(p.stdout, "")
 
     def test_unprotected_push_defers_on_every_claude_schema_agent(self):
-        for agent in (None, "codex", "opencode", "devin", "pi"):
+        for agent in (None, "codex", "opencode", "devin", "pi",
+                      "hermes", "dsh"):
             args = [] if agent is None else ["--agent", agent]
             with self.subTest(agent=agent):
                 self.assert_empty(args, PUSH_UNPROTECTED)
@@ -882,6 +911,8 @@ class Tk70PushPolicyTests(unittest.TestCase):
                                  {"command": "actx " + command})
                 self.assert_empty(["--agent", "codex"], command)
                 self.assert_empty(["--agent", "opencode"], command)
+                self.assert_empty(["--agent", "hermes"], command)
+                self.assert_empty(["--agent", "dsh"], command)
                 self.assertEqual(
                     json.loads(self.hook_stdout(["--agent", "devin"], command)),
                     DEVIN_MUTATOR_ALLOW)
@@ -919,7 +950,9 @@ class Tk70PushPolicyTests(unittest.TestCase):
                             "hookEventName": "PreToolUse",
                             "permissionDecision": "ask",
                             "permissionDecisionReason": (
-                                f"actx security gate confirmation required: {reason}"
+                                "actx security gate confirmation required "
+                                f"[T6_HIGH_RISK_GIT] {shlex.quote(command)}: "
+                                f"{GIT_EXPLANATION} — {reason}"
                             ),
                         }
                     })
@@ -931,8 +964,13 @@ class Tk70PushPolicyTests(unittest.TestCase):
                             gate_ask_as_deny(agent, "T6_HIGH_RISK_GIT", reason))
                 agy = self.run_hook([], stdin_text=gemini_input(
                     "run_command", {"CommandLine": command}))
-                self.assertEqual(json.loads(agy.stdout),
-                                 {"decision": "force_ask", "reason": reason})
+                self.assertEqual(json.loads(agy.stdout), {
+                    "decision": "force_ask",
+                    "reason": (
+                        "actx security gate confirmation required "
+                        f"[T6_HIGH_RISK_GIT] {shlex.quote(command)}: "
+                        f"{GIT_EXPLANATION} — {reason}"),
+                })
 
 
 class Tk70GateErrorAskTests(unittest.TestCase):
@@ -953,7 +991,8 @@ class Tk70GateErrorAskTests(unittest.TestCase):
     def test_gate_runtime_error_asks_on_unprotected_push(self):
         payload = hook_input("Bash", {"command": PUSH_UNPROTECTED})
         expected = gate_error_ask("boom")
-        for args in ([], ["--agent", "codex"], ["--agent", "devin"]):
+        for args in ([], ["--agent", "codex"], ["--agent", "devin"],
+                     ["--agent", "dsh"]):
             with self.subTest(args=args):
                 self.assertEqual(
                     json.loads(self.main_stdout(args, payload, RuntimeError("boom"))),
@@ -966,12 +1005,28 @@ class Tk70GateErrorAskTests(unittest.TestCase):
                     gate_ask_as_deny(agent, "T6_GATE_ERROR",
                                      f"{GATE_ERROR_MESSAGE}: boom"))
 
+    def test_hermes_gate_error_approves_on_unprotected_push(self):
+        # Hermes has its own ask shape ({"action": "approve", ...}), so the
+        # shared claude-schema loop above must not carry this agent.
+        payload = hook_input("terminal", {"command": PUSH_UNPROTECTED})
+        self.assertEqual(
+            json.loads(self.main_stdout(
+                ["--agent", "hermes"], payload, RuntimeError("boom"))),
+            {"action": "approve",
+             "message": (
+                 "actx security gate confirmation required [T6_GATE_ERROR] "
+                 f"'{PUSH_UNPROTECTED}': {GATE_ERROR_EXPLANATION} "
+                 f"(internal error: boom) — {GATE_ERROR_MESSAGE}: boom")})
+
     def test_antigravity_gate_runtime_error_force_asks_on_unprotected_push(self):
         payload = gemini_input("run_command", {"CommandLine": PUSH_UNPROTECTED})
         self.assertEqual(
             json.loads(self.main_stdout([], payload, RuntimeError("boom"))),
             {"decision": "force_ask",
-             "reason": f"{GATE_ERROR_MESSAGE}: boom"})
+             "reason": (
+                 "actx security gate confirmation required [T6_GATE_ERROR] "
+                 f"'{PUSH_UNPROTECTED}': {GATE_ERROR_EXPLANATION} "
+                 f"(internal error: boom) — {GATE_ERROR_MESSAGE}: boom")})
 
     def test_gate_runtime_error_keeps_fail_open_on_ro_command(self):
         payload = hook_input("Bash", {"command": "ls"})
@@ -1031,6 +1086,386 @@ class Tk70GateErrorAskTests(unittest.TestCase):
                     rc = hook.main([])
                 self.assertEqual(rc, 0)
                 self.assertEqual(out.getvalue(), "")
+
+
+# TK-69 STEP-01 (plan REQ-01/REQ-06): Hermes shell-hook output. The agent
+# sends {"tool_name": "terminal", ...}; every verdict on the claude-schema
+# path is a flat shape - block / approve / modify - and a defer is empty
+# stdout with exit 0 (the Hermes no-op).
+class HermesPolicyTests(unittest.TestCase):
+    run_hook = HookAgentPolicyTests.run_hook
+
+    TOOL = "terminal"
+
+    def run_hermes(self, command=None, stdin_text=None):
+        if stdin_text is None:
+            stdin_text = hook_input(self.TOOL, {"command": command})
+        return self.run_hook(["--agent", "hermes"], stdin_text=stdin_text)
+
+    def hermes_stdout(self, command):
+        p = self.run_hermes(command)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def assert_empty(self, command):
+        p = self.run_hermes(command)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, "")
+
+    def test_gate_deny_blocks(self):
+        self.assertEqual(json.loads(self.hermes_stdout("cat .env")), {
+            "decision": "block",
+            "reason": (
+                "actx security gate violation [T1_CREDENTIAL_ACCESS]: "
+                "Access to sensitive credential/file '.env' is prohibited"),
+        })
+
+    def test_gate_ask_approves(self):
+        self.assertEqual(json.loads(self.hermes_stdout(FORCE_PUSH)), {
+            "action": "approve",
+            "message": (
+                "actx security gate confirmation required [T6_HIGH_RISK_GIT] "
+                f"{shlex.quote(FORCE_PUSH)}: {GIT_EXPLANATION} — "
+                + FORCE_PUSH_REASON),
+        })
+
+    def test_observational_rewrite_modifies_without_context(self):
+        data = json.loads(self.hermes_stdout("git log --oneline -5"))
+        self.assertEqual(data, {
+            "decision": "modify",
+            "tool_input": {"command": "actx git log --oneline -5"},
+        })
+        self.assertNotIn("additionalContext", data)
+        self.assertNotIn("hookSpecificOutput", data)
+
+    def test_mutator_and_push_defer_empty(self):
+        for command in ("git add x", "git push", PUSH_UNPROTECTED):
+            with self.subTest(command=command):
+                self.assert_empty(command)
+
+    def test_gate_exception_defers_on_benign_command(self):
+        # Mirrors the claude-schema fail-open half of TK-70 REQ-04.
+        from actx_lib import hook
+
+        out = io.StringIO()
+        with mock.patch("actx_lib.security_gate.evaluate_security",
+                        side_effect=RuntimeError("boom")), \
+             mock.patch("sys.stdin", io.StringIO(hook_input(
+                 self.TOOL, {"command": "ls -la"}))), \
+             mock.patch("sys.stdout", out):
+            rc = hook.main(["--agent", "hermes"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_gate_exception_approves_on_unprotected_push(self):
+        # T6_GATE_ERROR flows through the same mapping as a gate ask.
+        from actx_lib import hook
+
+        out = io.StringIO()
+        with mock.patch("actx_lib.security_gate.evaluate_security",
+                        side_effect=RuntimeError("boom")), \
+             mock.patch("sys.stdin", io.StringIO(hook_input(
+                 self.TOOL, {"command": PUSH_UNPROTECTED}))), \
+             mock.patch("sys.stdout", out):
+            rc = hook.main(["--agent", "hermes"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue()), {
+            "action": "approve",
+            "message": (
+                "actx security gate confirmation required [T6_GATE_ERROR] "
+                f"'{PUSH_UNPROTECTED}': {GATE_ERROR_EXPLANATION} "
+                f"(internal error: boom) — {GATE_ERROR_MESSAGE}: boom"),
+        })
+
+    def test_malformed_input_defers_empty(self):
+        for text in (
+            "{not json",
+            json.dumps({"tool_input": {"command": "git status"}}),
+            hook_input("Read", {"command": "git status"}),
+            json.dumps({"tool_name": self.TOOL, "tool_input": "git status"}),
+            hook_input(self.TOOL, {"description": "no command"}),
+        ):
+            with self.subTest(text=text):
+                p = self.run_hermes(stdin_text=text)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(p.stdout, "")
+
+    def test_internal_exception_escapes_process(self):
+        # Internal actx failure must never look like a successful no-op.
+        # Live probe (2026-11-09): mocking rewriter.is_git_push escapes
+        # hook.process through _push_defers (it is called only after a true
+        # is_mutator), and the actx entrypoint has no catch-all, so a real
+        # Hermes run exits non-zero.
+        from actx_lib import hook
+
+        out = io.StringIO()
+        with mock.patch("actx_lib.rewriter.is_git_push",
+                        side_effect=RuntimeError("probe failure")), \
+             mock.patch("sys.stdin", io.StringIO(hook_input(
+                 self.TOOL, {"command": "git commit -m x"}))), \
+             mock.patch("sys.stdout", out):
+            with self.assertRaises(RuntimeError):
+                hook.main(["--agent", "hermes"])
+        self.assertEqual(out.getvalue(), "")
+
+    def test_main_level_stdin_oserror_exits_nonzero(self):
+        # Live probe (2026-11-09): a write-only stdin fd makes sys.stdin.read
+        # raise OSError in main (:292-304) - rc 1, empty stdout.
+        with tempfile.NamedTemporaryFile() as f:
+            fd = os.open(f.name, os.O_WRONLY)
+            try:
+                p = subprocess.run(
+                    [ACTX, "hook", "--agent", "hermes"],
+                    stdin=fd, capture_output=True, text=True)
+            finally:
+                os.close(fd)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, "")
+        self.assertIn("failed to read stdin", p.stderr)
+
+
+# TK-72 STEP-01 (plan REQ-02/REQ-06): dsh is gate-only. The gate deny/ask
+# passes through in the claude schema (the mjs adapter maps it to dsh
+# verdicts); nothing else is ever emitted - no allow, no updatedInput.
+class DshPolicyTests(unittest.TestCase):
+    run_hook = HookAgentPolicyTests.run_hook
+    hook_stdout = HookAgentPolicyTests.hook_stdout
+
+    def run_dsh(self, command=None, stdin_text=None):
+        if stdin_text is None:
+            stdin_text = hook_input("bash", {"command": command})
+        return self.run_hook(["--agent", "dsh"], stdin_text=stdin_text)
+
+    def dsh_stdout(self, command):
+        p = self.run_dsh(command)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def assert_empty(self, command):
+        p = self.run_dsh(command)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, "")
+
+    def test_gate_deny_is_claude_schema(self):
+        self.assertEqual(self.dsh_stdout("cat .env"),
+                         self.hook_stdout([], "cat .env"))
+        self.assertEqual(json.loads(self.dsh_stdout("cat .env")), {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "actx security gate violation [T1_CREDENTIAL_ACCESS]: "
+                    "Access to sensitive credential/file '.env' is prohibited"),
+            }
+        })
+
+    def test_gate_ask_is_claude_schema(self):
+        self.assertEqual(self.dsh_stdout(FORCE_PUSH),
+                         self.hook_stdout([], FORCE_PUSH))
+        self.assertEqual(json.loads(self.dsh_stdout(FORCE_PUSH)), {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "ask",
+                "permissionDecisionReason": (
+                    "actx security gate confirmation required "
+                    f"[T6_HIGH_RISK_GIT] {shlex.quote(FORCE_PUSH)}: "
+                    f"{GIT_EXPLANATION} — " + FORCE_PUSH_REASON),
+            }
+        })
+
+    def test_observational_rewrite_never_emits_updated_input(self):
+        self.assert_empty("git log --oneline -5")
+
+    def test_mutator_and_push_defer_empty(self):
+        for command in ("git add x", "git push", PUSH_UNPROTECTED):
+            with self.subTest(command=command):
+                self.assert_empty(command)
+
+    def test_gate_error_asks_on_unprotected_push(self):
+        from actx_lib import hook
+
+        out = io.StringIO()
+        with mock.patch("actx_lib.security_gate.evaluate_security",
+                        side_effect=RuntimeError("boom")), \
+             mock.patch("sys.stdin", io.StringIO(hook_input(
+                 "bash", {"command": PUSH_UNPROTECTED}))), \
+             mock.patch("sys.stdout", out):
+            rc = hook.main(["--agent", "dsh"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue()), gate_error_ask("boom"))
+
+    def test_malformed_input_defers_empty(self):
+        for text in (
+            "{not json",
+            json.dumps({"tool_input": {"command": "git status"}}),
+            hook_input("Read", {"command": "git status"}),
+            json.dumps({"tool_name": "bash", "tool_input": "git status"}),
+            hook_input("bash", {"description": "no command"}),
+        ):
+            with self.subTest(text=text):
+                p = self.run_dsh(stdin_text=text)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(p.stdout, "")
+
+
+def gate_ask_categories():
+    """Every category the gate can emit with decision="ask", enumerated by
+    the plan's three operands: SecurityDecision(decision="ask") categories
+    in security_gate/*.py, the T6_ASK_TABLE/FAMILIES heads, and the heads
+    passed to every `_t6_ask(` call site (the aws/az site passes `lookup`,
+    so each literal the dispatch compares it with is a head)."""
+    import ast
+    import pathlib
+
+    from actx_lib import cli_families
+    from actx_lib import security_gate
+    from actx_lib.security_gate import t6_tools
+
+    package = pathlib.Path(security_gate.__file__).parent
+    static = set()
+    heads = set(t6_tools.T6_ASK_TABLE) | set(cli_families.FAMILIES)
+    for path in sorted(package.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None)
+            if name == "SecurityDecision":
+                keywords = {kw.arg: kw.value for kw in node.keywords}
+                decision = keywords.get("decision")
+                category = keywords.get("category")
+                if (isinstance(decision, ast.Constant)
+                        and decision.value == "ask"
+                        and isinstance(category, ast.Constant)):
+                    static.add(category.value)
+            elif name == "_t6_ask" and node.args:
+                head = node.args[0]
+                if (isinstance(head, ast.Constant)
+                        and isinstance(head.value, str)):
+                    heads.add(head.value)
+                elif isinstance(head, ast.Name):
+                    for compare in ast.walk(tree):
+                        if (not isinstance(compare, ast.Compare)
+                                or not isinstance(compare.left, ast.Name)
+                                or compare.left.id != head.id):
+                            continue
+                        for comparator in compare.comparators:
+                            for element in getattr(comparator, "elts", ()):
+                                if (isinstance(element, ast.Constant)
+                                        and isinstance(element.value, str)):
+                                    heads.add(element.value)
+    family = {"T6_HIGH_RISK_" + head.upper() for head in heads}
+    return static | family
+
+
+class HumanAskReasonTests(unittest.TestCase):
+    """Human gate-confirmation texts carry the command, a plain-language
+    explanation and the gate rule reason; the deny and ask_as_deny texts
+    stay byte-identical."""
+
+    def test_every_gate_ask_category_has_an_explanation(self):
+        from actx_lib import hook
+
+        categories = gate_ask_categories()
+        self.assertEqual(len(categories), 46, sorted(categories))
+        for category in sorted(categories):
+            with self.subTest(category=category):
+                explanation = hook._explanation(category, "probe reason")
+                self.assertTrue(explanation)
+                self.assertNotEqual(explanation, hook._HUMAN_ASK_FALLBACK)
+        self.assertEqual(
+            hook._explanation("T6_HIGH_RISK_KUBECTL", "probe reason"),
+            "runs kubectl in a mode that can change remote state, publish "
+            "artifacts, or deploy a service")
+
+    def test_unknown_category_falls_back_and_keeps_category_and_command(self):
+        from actx_lib import hook
+
+        self.assertEqual(
+            hook._human_ask_message(
+                "git commit -m probe", "T_SYNTHETIC", "probe reason"),
+            "actx security gate confirmation required [T_SYNTHETIC] "
+            "'git commit -m probe': runs a command class that the security "
+            "gate asks a human to review — probe reason")
+
+    def test_long_command_is_truncated_with_hidden_char_count(self):
+        from actx_lib import hook
+
+        command = "echo " + "x" * 120
+        self.assertEqual(
+            hook._human_ask_message(command, "T5_SUPPLY_CHAIN",
+                                    "probe reason"),
+            "actx security gate confirmation required [T5_SUPPLY_CHAIN] "
+            "'echo " + "x" * 65 + "…(+15 chars)…" + "x" * 40 + "': "
+            "installs or updates packages — third-party code will run on "
+            "this machine — probe reason")
+
+    def test_truncation_keeps_a_trailing_trigger_visible(self):
+        from actx_lib import hook
+
+        command = "echo " + "x" * 120 + " && git push --force origin main"
+        output = hook.process(hook_input("Bash", {"command": command}))
+        output = output["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "ask")
+        reason = output["permissionDecisionReason"]
+        self.assertIn("…(+47 chars)…", reason)
+        self.assertIn("git push --force origin main", reason)
+        self.assertTrue(reason.endswith("— " + FORCE_PUSH_REASON), reason)
+
+    def test_hidden_compound_trigger_is_flagged_and_named_by_the_rule(self):
+        from actx_lib import hook
+
+        command = ("echo " + "A" * 65 + " && git push --force origin main"
+                   " && echo " + "B" * 65)
+        output = hook.process(hook_input("Bash", {"command": command}))
+        output = output["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "ask")
+        reason = output["permissionDecisionReason"]
+        self.assertTrue(reason.startswith(
+            "actx security gate confirmation required [T6_HIGH_RISK_GIT] "
+            "'echo "), reason)
+        self.assertIn(
+            "…(+66 chars, compound command partially shown)…", reason)
+        self.assertNotIn("git push --force origin main", reason)
+        self.assertTrue(reason.endswith("— " + FORCE_PUSH_REASON), reason)
+
+    def test_embedded_single_quote_stays_inside_the_shlex_boundary(self):
+        from actx_lib import hook
+
+        command = "git config alias.p '!id'"
+        message = hook._human_ask_message(
+            command, "T6_HIGH_RISK_GIT", "probe reason")
+        prefix = ("actx security gate confirmation required "
+                  "[T6_HIGH_RISK_GIT] ")
+        self.assertTrue(
+            message.startswith(prefix + shlex.quote(command) + ": "), message)
+        quoted = message[len(prefix):message.index(": rewrites")]
+        self.assertEqual(shlex.split(quoted), [command])
+
+    def test_gate_error_exception_tail_is_printable_and_capped(self):
+        from actx_lib import hook
+
+        exc = "boom\nwith\rcontrol\tchars" + "z" * 200
+        message = hook._human_ask_message(
+            "git push origin feature", "T6_GATE_ERROR",
+            GATE_ERROR_MESSAGE + ": " + exc)
+        start = message.index("(internal error: ") + len("(internal error: ")
+        tail = message[start:message.index(") — ", start)]
+        self.assertEqual(len(tail), 120)
+        self.assertTrue(tail.endswith("…"))
+        self.assertTrue(tail.isprintable(), tail)
+        self.assertEqual(len(message.rsplit(" — ", 1)[1]), 120)
+
+    def test_ask_as_deny_is_byte_identical_across_runs(self):
+        expected = json.dumps(gate_ask_as_deny(
+            "opencode", "T6_HIGH_RISK_GIT", FORCE_PUSH_REASON)) + "\n"
+        for _ in range(2):
+            p = subprocess.run(
+                [ACTX, "hook", "--agent", "opencode"],
+                input=hook_input("Bash", {"command": FORCE_PUSH}),
+                capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.stdout, expected)
 
 
 class Tk70PushPerfTests(unittest.TestCase):

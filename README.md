@@ -10,7 +10,7 @@ $ git status        →   $ actx git status
 
 ![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB)
 ![Stdlib only](https://img.shields.io/badge/dependencies-none-brightgreen)
-![Tests](https://img.shields.io/badge/tests-1360%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1417%20passed-brightgreen)
 
 ---
 
@@ -59,10 +59,10 @@ M (3):
 - **Stderr never hidden** — a compacted command (tests, linters, installers) prints its stderr after the summary, secret values masked: whole on failure; on success whole up to 20 lines, longer stderr keeps its warning/error/URL lines plus one `[actx] N stderr lines hidden; full output: <tee path>` line (`actx run --failures` stays silent on a green run).
 - **Lossless filenames** — `git status`, `ls`, and `find` compress the format, not the names.
 - **Tee for recovery** — truncated or failed output is saved to `~/.local/share/actx/tee` as JSON (secret values masked); a truncated result is always saved and its tee path printed.
-- **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent on an error (the OpenCode plugin's deliberate throw on a security-gate deny is OpenCode's only way to block a command); on any error they pass the command through unchanged and the output through with secret values masked (if masking itself fails, lines that may carry a secret are withheld and a marker line says how many). Point-wise exception (TK-70): if the gate itself fails on an already-parsed irreversible command, the hook returns `ask` (category `T6_GATE_ERROR`; OpenCode/pi `deny`, Antigravity `force_ask`) instead of passing it through; malformed input without a command and a host timeout/kill stay fail-open.
+- **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent on an error (the OpenCode plugin's deliberate throw on a security-gate deny is OpenCode's only way to block a command); on any error they pass the command through unchanged and the output through with secret values masked (if masking itself fails, lines that may carry a secret are withheld and a marker line says how many). Point-wise exception (TK-70): if the gate itself fails on an already-parsed irreversible command, the hook returns `ask` (category `T6_GATE_ERROR`; OpenCode/pi `deny`, Antigravity `force_ask`) instead of passing it through; malformed input without a command and a host timeout/kill stay fail-open. The Hermes hook entry is registered with `fail_closed: true` (an owner decision): a missing or broken actx blocks the tool call instead of letting it through (see ³).
 - **Escape hatch** — `ACTX_BYPASS=1` or a `bypass_commands` entry runs the matching command unfiltered (byte-for-byte except masked secret values), preserving the exit code.
 - **Stdlib only** — Python 3.14 standard library. No pip, no brew, no network, no telemetry.
-- **Multi-agent** — deterministic hooks and plugins for Claude Code, Codex, Gemini/Antigravity, GitHub Copilot CLI, OpenCode, Devin CLI, and pi; rule-based instructions for Grok, Cline, Windsurf, and Cursor.
+- **Multi-agent** — deterministic hooks and plugins for Claude Code, Codex, Gemini/Antigravity, GitHub Copilot CLI, OpenCode, Devin CLI, pi, and Hermes Agent; deterministic security gate for dsh (the dsh platform cannot rewrite tool arguments); rule-based instructions for Grok, Cline, Windsurf, and Cursor.
 
 ## Installation
 
@@ -86,6 +86,8 @@ actx init --agent codex
 actx init --agent opencode
 actx init --agent devin
 actx init --agent pi
+actx init --agent hermes
+actx init --agent dsh
 ```
 
 After installation, restart the agent.
@@ -93,8 +95,8 @@ After installation, restart the agent.
 ### Via curl (release tarball)
 
 ```bash
-curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.14.0.tar.gz | tar xz
-cd actx-2.14.0
+curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.16.0.tar.gz | tar xz
+cd actx-2.16.0
 bash install.sh
 ```
 
@@ -157,7 +159,7 @@ actx discover
 actx session
 actx tracking [on|off|status|clear]
 actx rewrite "<command>"      # pure rewriter, no security gate
-actx hook [--agent codex|opencode|devin|pi] [--payload <json>]
+actx hook [--agent codex|opencode|devin|pi|hermes|dsh] [--payload <json>]
 actx init [--agent <name>|all] [--show] [--uninstall]
 actx --version
 actx --help
@@ -228,7 +230,7 @@ One rewriter is the single source of truth for every adapter. It rewrites simple
 
 ## Agent integration
 
-Tier-1 hooks (Claude/Codex; Devin and pi do not deliver it) append a compact-flag hint to `additionalContext` on
+Tier-1 hooks (Claude/Codex; Devin, pi, Hermes and dsh do not deliver it) append a compact-flag hint to `additionalContext` on
 allow+rewrite verdicts for known verbose forms (e.g. a bare `git log` gets the
 `-n` advice); deny/ask verdicts and the Antigravity schema carry no hints, and a
 clean command without a rewrite still returns strict no-op. Tier-2 instruction
@@ -251,6 +253,8 @@ cache). Under `--dangerously-skip-permissions` Antigravity still honours a hook
 | OpenCode ≥ 2.0.0 | TypeScript plugin (v2) | `actx init --agent opencode` | ✅ deterministic² |
 | Devin CLI | PreToolUse JSON hook (`exec` tool) | `actx init --agent devin` | ✅ deterministic² |
 | pi | TypeScript extension | `actx init --agent pi` | ✅ deterministic² |
+| Hermes Agent ≥ 0.23.0 | Shell hook (`pre_tool_call`) | `actx init --agent hermes` | ✅ deterministic³ |
+| DeepSeek Harness (dsh) 0.2.2-rc.1 | Cordis pre-execute plugin | `actx init --agent dsh` | 🚫 gate-only³ (no rewrite on this platform) |
 | Grok Build | Rules instruction | `actx init --agent grok` | soft (~70–85%) |
 | Cline / Roo | Rules file | `actx init --agent cline` | soft |
 | Windsurf | Rules file | `actx init --agent windsurf` | soft |
@@ -263,9 +267,11 @@ cache). Under `--dangerously-skip-permissions` Antigravity still honours a hook
 - **OpenCode** checks its own `permission` rules against the command *after* the plugin has rewritten it. So the git mutators (`git add|commit|pull|fetch`) are left unrewritten, and your rules such as `shell:git commit*` still match them. OpenCode has no confirmation channel for plugins, so a gate `ask` (e.g. `git push --force`) becomes a deny with the reason `actx security gate (opencode: no confirmation channel) …`. Not covered: user-typed `!cmd`, the `execute` tool (code-mode bridge for catalog/MCP tools), MCP tools. The agentic-kit `apply` writes the same plugin file; until the kit drops its template, re-run `actx init` after a kit apply.
 - **Devin** also checks its rules after the hook. `git add`/`commit`/`pull`/`fetch` are allowed without being rewritten, so a matching `deny` rule of yours still wins. A gate `ask` prompts; `devin -p` rejects it. An ordinary `git push` gets no answer, so Devin's own confirmation prompt applies (`devin -p` rejects it). Mutator forms actx cannot rewrite (`git -C dir push`) also get Devin's default prompt, which `-p` rejects. `~/.config/devin/config.json` (or `$XDG_CONFIG_HOME/devin/config.json`) is merged in place and keeps mode 0600; if it contains comments or an unexpected shape, `actx init` leaves it untouched, exits 1 and prints the entry to add by hand.
 - **pi** never asks the human: a gate `ask` becomes a deny with the reason `actx security gate (pi: no confirmation channel) …`, so the agent sees why and continues. An ordinary `git push` gets no answer from actx and runs unmodified (pi has no confirmation system). The extension goes to `$PI_CODING_AGENT_DIR/extensions/actx.ts` (default `~/.pi/agent/extensions/actx.ts`). Not covered: user-typed `!cmd`.
-- **`git push` on every harness (TK-70).** An ordinary push — destination not protected, no `--mirror`/`--tags`/`--follow-tags`/`--all`/`--branches`/`--prune`/`--delete`/`-d`/`:dst` refspec and no wildcard refspec — gets no verdict from actx: empty output on Claude Code, Codex, OpenCode, Devin and pi, and a fallthrough `ask` on Antigravity (`agy -p --dangerously-skip-permissions` auto-approves it — a known limit until TK-66). Push output is not compressed on any host: a live probe showed no guarantee that an `updatedInput` without a verdict keeps the host's confirmation window. Dangerous push forms and a destination in `main`/`master` (or your `protected_branches`) ask.
+- **`git push` on every harness (TK-70).** An ordinary push — destination not protected, no `--mirror`/`--tags`/`--follow-tags`/`--all`/`--branches`/`--prune`/`--delete`/`-d`/`:dst` refspec and no wildcard refspec — gets no verdict from actx: empty output on Claude Code, Codex, OpenCode, Devin, pi, Hermes and dsh, and a fallthrough `ask` on Antigravity (`agy -p --dangerously-skip-permissions` auto-approves it — a known limit until TK-66). Push output is not compressed on any host: a live probe showed no guarantee that an `updatedInput` without a verdict keeps the host's confirmation window. Dangerous push forms and a destination in `main`/`master` (or your `protected_branches`) ask.
 - In OpenCode and Devin, a rule of yours on an observational command (e.g. `git log*`) no longer matches once actx rewrites it to `actx git log …`.
 - Devin with the Tier-2 rules file only (no hook): `devin -p` rejects a rewritten `actx git status` as "requires confirmation"; add an allow rule for `actx *`. Since actx 2.13.0 Devin is wired as a Tier-1 hook instead.
+
+³ Hermes Agent ≥ 0.23.0 and dsh 0.2.2-rc.1 adapters require actx ≥ 2.16.0. Hermes: the `pre_tool_call` hook entry is written through the `hermes config` CLI and the `shell-hooks-allowlist.json` approval is pre-written, for the default profile and each profile named in `hermes_profiles`; an observational rewrite arrives as `{"decision":"modify",…}`, a gate `deny` as `{"decision":"block",…}`, and a gate `ask` as a human approval (`{"action":"approve",…}`) that blocks non-interactive runs. Git mutators and an ordinary `git push` are left unrewritten so Hermes's own rules see the typed command. Unsupported modes: yolo and `approvals.mode: off` bypass the approve gate. dsh: security gate only — the platform deep-freezes tool arguments and never applies `updatedInput`, so actx never rewrites; gate `deny`/`ask` reach the harness as `{kind:"deny"|"ask"}`, and the headless profile turns `ask` into a deny. Not covered: dsh's `terminal_*` tool family; win32 `pwsh` (the name is allowed, no live Windows check).
 
 ### Headless runs
 

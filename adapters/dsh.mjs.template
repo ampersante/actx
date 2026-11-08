@@ -1,0 +1,114 @@
+// actx adapter for DeepSeek Harness (dsh), written by `actx init --agent dsh`.
+// Transport only: every decision comes from `actx hook --agent dsh` (one
+// rewriter, one security gate); no gate or rewrite logic lives here.
+//
+// The native `tools/pre-execute` listener is fail-CLOSED: a listener that
+// throws blocks the tool call, and dsh applies no timeout of its own. So every
+// failure path of this file calls next() - the call then runs under dsh's own
+// guards - and the actx subprocess is bounded by our own timer.
+//
+// On timeout the whole process group is SIGKILLed: a descendant that survived
+// the direct child would keep our pipe descriptors open, delay close, and stall
+// the host's session exit.
+//
+// dsh freezes the tool arguments before this event and cannot rewrite them, so
+// only the gate's deny and ask verdicts are forwarded; an allow verdict is
+// dropped, never applied.
+import { spawn } from "node:child_process";
+
+const ACTX = __ACTX_ABS_PATH__;
+const TIMEOUT_MS = 3000;
+const TOOLS = new Set(["bash", "pwsh"]);
+
+// The claude-schema gate verdict reduced to the dsh marker; null for every
+// other decision (allow, unknown decision, malformed output).
+function verdictFrom(stdout) {
+  try {
+    const text = String(stdout || "").trim();
+    if (!text) return null;
+    const output = JSON.parse(text).hookSpecificOutput;
+    const decision = output && output.permissionDecision;
+    if (decision !== "deny" && decision !== "ask") return null;
+    return {
+      kind: decision,
+      reason: String(output.permissionDecisionReason || "actx security gate"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Resolves with the verdict ({kind: "deny" | "ask", reason}) once the child
+// has closed, or with null on a spawn error, a non-zero exit, empty stdout,
+// bad JSON, a missing hookSpecificOutput, a decision other than deny/ask, or
+// after TIMEOUT_MS (the child's process group is killed).
+function askActx(toolName, args) {
+  return new Promise((resolve) => {
+    let out = "";
+    let settled = false;
+    let timer = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(value);
+    };
+    try {
+      // detached: the child leads its own process group, so a timed-out run is
+      // killed as one tree and no descendant outlives this listener.
+      const child = spawn(ACTX, ["hook", "--agent", "dsh"], {
+        detached: true,
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+      timer = setTimeout(() => {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {}
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+        finish(null);
+      }, TIMEOUT_MS);
+      child.on("error", () => finish(null));
+      child.on("close", (code) => {
+        if (code !== 0) return finish(null);
+        finish(verdictFrom(out));
+      });
+      child.stdout.on("data", (chunk) => {
+        out += String(chunk);
+      });
+      child.stdin.on("error", () => {});
+      child.stdin.end(JSON.stringify({ tool_name: toolName, tool_input: args }));
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+async function listener(exec, next) {
+  let verdict = null;
+  try {
+    if (exec && TOOLS.has(exec.name)) {
+      const args = exec.arguments;
+      if (args && typeof args.command === "string" && args.command) {
+        verdict = await askActx(exec.name, args);
+      }
+    }
+  } catch {
+    verdict = null;
+  }
+  if (verdict) return { kind: verdict.kind, reason: verdict.reason };
+  return next();
+}
+
+export default function actxPlugin(ctx) {
+  try {
+    ctx.effect(function* () {
+      yield ctx.on("tools/pre-execute", listener, { prepend: true });
+    });
+  } catch (error) {
+    // A registration-API change in a dsh update must never decide tool calls:
+    // register nothing and leave the harness's own guards in force.
+    console.error("actx: dsh adapter not registered:", error);
+  }
+}

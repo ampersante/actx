@@ -3,7 +3,7 @@ import sys
 
 import actx_lib.rewriter as rewriter
 
-VERSION = "actx 2.14.0"
+VERSION = "actx 2.16.0"
 
 USAGE = """usage: actx [--raw] [--ultra-compact] [-v|-vv|-vvv] <command> [args...]
 
@@ -19,7 +19,7 @@ commands:
   insights [--days N] [--top N] [--verbose-commands] [--json]
   tracking [on|off|status|clear]
   rewrite "<command>"
-  hook [--agent codex|opencode|devin|pi] [--payload <json>]
+  hook [--agent codex|opencode|devin|pi|hermes|dsh] [--payload <json>]
   init [--agent <name>|all] [--show] [--uninstall]
 
 user-declared heads from the "custom_heads" list in

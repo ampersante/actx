@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import re
@@ -7,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from actx_lib import installer
 from actx_lib.installer import INSTRUCTION_SECTION
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -381,6 +383,9 @@ class InitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             p = self.run_actx(["init", "--agent", "all"], home)
             self.assertEqual(p.returncode, 0, p.stderr)
+            # No ~/.hermes in this HOME: the hermes gate skips before any
+            # subprocess (CHK-05(1)), so the run stays rc 0 and offline.
+            self.assertIn("hermes: no ~/.hermes data root - skipping", p.stderr)
             self.assertIn(INSTRUCTION_SECTION, p.stdout)
 
             for path in (
@@ -393,6 +398,8 @@ class InitTests(unittest.TestCase):
                 os.path.join(home, ".gemini", "config", "hooks.json"),
                 os.path.join(home, ".config", "devin", "config.json"),
                 os.path.join(home, ".pi", "agent", "extensions", "actx.ts"),
+                os.path.join(home, ".dsh", "actx", "actx-dsh.mjs"),
+                os.path.join(home, ".dsh", "cordis.patch.yml"),
             ):
                 self.assertTrue(os.path.exists(path), path)
 
@@ -407,8 +414,10 @@ class InitTests(unittest.TestCase):
                 "gemini",
                 "devin",
                 "pi",
+                "dsh",
             ):
                 self.assertIn("%s: installed" % agent, p.stdout)
+            self.assertIn("hermes: not installed", p.stdout)
             self.assertIn("cursor: manual (cursor)", p.stdout)
 
     def test_gemini_double_init_single_entry_and_uninstall(self):
@@ -576,6 +585,104 @@ DEVIN_OWNER_SHAPED = {
 USER_BASH_ENTRY = {"matcher": "Bash",
                    "hooks": [{"type": "command", "command": "echo bash-user"}]}
 USER_EXEC_HANDLER = {"type": "command", "command": "echo exec-user", "timeout": 5}
+# TK-72: the one patch item actx writes into ~/.dsh/cordis.patch.yml (JSON,
+# which dsh reads as YAML).  The home patch is a list of patch OPERATIONS: a
+# new entry goes in through `insert`, while a bare `{"id": ...}` item would
+# override an existing entry (and be dropped when none matches).
+DSH_PATCH_ITEM = {"insert": [{"id": "actx", "name": "./actx/actx-dsh.mjs"}]}
+# The shape written by the first build of this adapter (dsh dropped it as an
+# unmatched override); recognition must still clean it up.
+DSH_LEGACY_ROW = {"id": "actx", "name": "./actx/actx-dsh.mjs"}
+
+# TK-69/CHK-05: the exact command string and the two records it keys - the
+# hook entry in `hooks.pre_tool_call` and the approval in the profile's
+# shell-hooks-allowlist.json.  The default profile takes no `-p` flag.
+HERMES_DEFAULT_PROFILE = "default-profile"
+HERMES_COMMAND = shlex.quote(ACTX) + " hook --agent hermes"
+HERMES_ENTRY = {
+    "command": HERMES_COMMAND,
+    "matcher": "^terminal$",
+    "timeout": 10,
+    "fail_closed": True,
+}
+HERMES_APPROVAL = {"event": "pre_tool_call", "command": HERMES_COMMAND}
+
+
+class HermesCli:
+    """In-process stand-in for the `hermes` binary: the only subprocess the
+    hermes suite allows.  It keeps per-profile hooks state, so a `config set`
+    answers the next `config get` and re-init is genuinely idempotent."""
+
+    def __init__(self, home):
+        self.home = home
+        self.calls = []
+        self.hooks = {}
+        self.raw_hooks = {}
+        self.paths = {}
+        self.set_rc = {}
+        self.spawn_errors = {}
+
+    def profile_and_rest(self, argv):
+        rest = list(argv[1:])
+        if rest[:1] == ["-p"]:
+            return rest[1], rest[2:]
+        return HERMES_DEFAULT_PROFILE, rest
+
+    def __call__(self, argv, capture_output=True, text=True, timeout=None):
+        self.calls.append(list(argv))
+        profile, rest = self.profile_and_rest(argv)
+        if profile in self.spawn_errors:
+            raise self.spawn_errors[profile]
+        if rest == ["config", "get", "hooks", "--json"]:
+            payload = self.raw_hooks.get(
+                profile, json.dumps(self.hooks.get(profile, {})))
+            return subprocess.CompletedProcess(argv, 0, payload, "")
+        if rest == ["config", "path"]:
+            path = self.paths.get(
+                profile, os.path.join(self.home, ".hermes", "config.yaml"))
+            return subprocess.CompletedProcess(argv, 0, path + "\n", "")
+        if rest[:2] == ["config", "set"] and len(rest) == 4:
+            key, payload = rest[2], rest[3]
+            code = self.set_rc.get(profile, 0)
+            if code != 0:
+                return subprocess.CompletedProcess(argv, code, "", "")
+            if key == "hooks":
+                # The live shape (CHK-08): a section is not a scalar.
+                return subprocess.CompletedProcess(
+                    argv, 1, "",
+                    "cannot set 'hooks' to a scalar - 'hooks' is a "
+                    "configuration section with 1 sub-key(s).")
+            if not key.startswith("hooks."):
+                raise AssertionError("unexpected hermes argv: %r" % (argv,))
+            self.hooks.setdefault(profile, {})[key[len("hooks."):]] = \
+                json.loads(payload)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if rest[:2] == ["config", "unset"] and len(rest) == 3:
+            path = rest[2]
+            if path == "hooks":
+                self.hooks[profile] = {}
+            elif path.startswith("hooks."):
+                self.hooks.setdefault(profile, {}).pop(path[len("hooks."):],
+                                                       None)
+            else:
+                raise AssertionError("unexpected hermes argv: %r" % (argv,))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError("unexpected hermes argv: %r" % (argv,))
+
+    def verb_calls(self, verb, profile=None):
+        found = []
+        for argv in self.calls:
+            name, rest = self.profile_and_rest(argv)
+            if (rest[:2] == ["config", verb]
+                    and (profile is None or name == profile)):
+                found.append(argv)
+        return found
+
+    def set_calls(self, profile=None):
+        return self.verb_calls("set", profile)
+
+    def unset_calls(self, profile=None):
+        return self.verb_calls("unset", profile)
 
 
 class AdapterInitTests(unittest.TestCase):
@@ -784,6 +891,192 @@ class AdapterInitTests(unittest.TestCase):
             self.assertIn("devin: installed",
                           self.init(home, "--show", extra_env=env).stdout)
 
+    # --- dsh --------------------------------------------------------------
+    def dsh_paths(self, home):
+        return (
+            os.path.join(home, ".dsh", "actx", "actx-dsh.mjs"),
+            os.path.join(home, ".dsh", "cordis.patch.yml"),
+        )
+
+    def write_dsh_patch(self, home, text):
+        _, patch = self.dsh_paths(home)
+        os.makedirs(os.path.dirname(patch), exist_ok=True)
+        with open(patch, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return patch
+
+    def test_dsh_install_writes_mjs_and_patch(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.init(home, "--agent", "dsh")
+            mjs, patch = self.dsh_paths(home)
+            with open(patch, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(),
+                                 json.dumps([DSH_PATCH_ITEM], indent=2) + "\n")
+            with open(mjs, encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertNotIn("__ACTX_ABS_PATH__", content)
+            # CHK-03: the transport contract, and the negative needle proving
+            # no rewrite verdict is ever read or applied (dsh freezes input).
+            for needle in ("export default", "tools/pre-execute",
+                           "prepend: true", '"hook", "--agent", "dsh"',
+                           "bash", "pwsh", "deny", "ask", "next()", "catch",
+                           "3000", "detached: true",
+                           "process.kill(-child.pid", 'child.kill("SIGKILL")'):
+                self.assertIn(needle, content)
+            self.assertNotIn("updatedInput", content)
+            self.assertEqual(os.path.realpath(self.substituted_actx(content)), ACTX)
+            self.assertIn("dsh: installed", self.init(home, "--show").stdout)
+
+    def test_dsh_double_init_patch_unchanged(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.init(home, "--agent", "dsh")
+            _, patch = self.dsh_paths(home)
+            with open(patch, "rb") as handle:
+                first = handle.read()
+            os.utime(patch, (1, 1))
+            self.init(home, "--agent", "dsh")
+            with open(patch, "rb") as handle:
+                self.assertEqual(handle.read(), first)
+            self.assertEqual(os.stat(patch).st_mtime, 1)  # not rewritten
+            self.assertEqual(self.load(patch), [DSH_PATCH_ITEM])
+
+    def test_dsh_stale_ours_replaced(self):
+        # Every shape that resolves to our mjs is ours: the legacy plain entry
+        # (absolute, bare-relative, file:// URL) and a non-canonical insert
+        # operation.  One canonical insert operation replaces them all.
+        with tempfile.TemporaryDirectory() as home:
+            mjs, patch = self.dsh_paths(home)
+            stale = [
+                {"id": "actx", "name": mjs},
+                {"id": "actx", "name": "actx/actx-dsh.mjs"},
+                {"id": "actx", "name": "file://" + mjs},
+                {"insert": [{"id": "actx", "name": mjs}]},
+            ]
+            self.write_dsh_patch(home, json.dumps(stale, indent=2))
+            self.init(home, "--agent", "dsh")
+            self.assertEqual(self.load(patch), [DSH_PATCH_ITEM])
+
+    def test_dsh_foreign_patch_items_untouched(self):
+        # The home patch is a list of patch operations.  Nothing here is ours:
+        # another plugin (plain entry and insert), an insert that also holds our
+        # entry among others, and override items carrying our id with a foreign
+        # or missing name.
+        foreign = [
+            {"id": "other", "name": "./other/x.mjs"},
+            {"insert": [{"id": "other", "name": "./other/y.mjs"}]},
+            {"insert": [DSH_LEGACY_ROW,
+                        {"id": "other", "name": "./other/z.mjs"}]},
+            {"id": "actx", "name": "https://example.com/x.mjs"},
+            {"id": "actx"},
+        ]
+        with tempfile.TemporaryDirectory() as home:
+            mjs, patch = self.dsh_paths(home)
+            self.write_dsh_patch(home, json.dumps(foreign, indent=2))
+            self.init(home, "--agent", "dsh")
+            self.assertEqual(self.load(patch), foreign + [DSH_PATCH_ITEM])
+            self.init(home, "--agent", "dsh", "--uninstall")
+            self.assertFalse(os.path.exists(mjs))
+            self.assertEqual(self.load(patch), foreign)
+
+    def test_dsh_legacy_plain_row_recognised_and_cleaned(self):
+        # A plain entry is what the first build wrote; dsh read it as an
+        # override that matched nothing.  It counts as installed, a re-init
+        # replaces it, and an uninstall removes it.
+        with tempfile.TemporaryDirectory() as home:
+            self.init(home, "--agent", "dsh")
+            mjs, patch = self.dsh_paths(home)
+            self.write_dsh_patch(home, json.dumps([DSH_LEGACY_ROW], indent=2))
+            self.assertIn("dsh: installed", self.init(home, "--show").stdout)
+            self.init(home, "--agent", "dsh")
+            self.assertEqual(self.load(patch), [DSH_PATCH_ITEM])
+            self.write_dsh_patch(home, json.dumps([DSH_LEGACY_ROW], indent=2))
+            self.init(home, "--agent", "dsh", "--uninstall")
+            self.assertFalse(os.path.exists(mjs))
+            self.assertFalse(os.path.exists(patch))
+
+    def test_dsh_row_predicate_forms(self):
+        from actx_lib import installer
+
+        with tempfile.TemporaryDirectory() as root:
+            patch = os.path.join(root, "cordis.patch.yml")
+            mjs = os.path.join(root, "actx", "actx-dsh.mjs")
+            for name, expected in (
+                ("./actx/actx-dsh.mjs", True),
+                ("actx/actx-dsh.mjs", True),
+                (mjs, True),
+                ("file://" + mjs, True),
+                ("https://example.com/x.mjs", False),
+                ("./actx/other.mjs", False),
+                ("/old/bin/actx-dsh.mjs", False),
+                (None, False),
+            ):
+                with self.subTest(form="legacy", name=name):
+                    self.assertIs(installer._dsh_row_is_ours(
+                        {"id": "actx", "name": name}, patch, mjs), expected)
+                with self.subTest(form="insert", name=name):
+                    self.assertIs(installer._dsh_row_is_ours(
+                        {"insert": [{"id": "actx", "name": name}]}, patch, mjs),
+                        expected)
+            for row, expected in (
+                ({"insert": []}, False),
+                ({"insert": "x"}, False),
+                ({"insert": [{"id": "actx", "name": mjs},
+                             {"id": "other", "name": "./other/x.mjs"}]}, False),
+                ({"insert": [{"id": "other", "name": mjs}]}, False),
+                ({"id": "other", "name": mjs}, False),
+                ({"id": "actx"}, False),
+                ("row", False),
+            ):
+                with self.subTest(row=row):
+                    self.assertIs(installer._dsh_row_is_ours(row, patch, mjs),
+                                  expected)
+
+    def test_dsh_refuses_hand_written_yaml_byte_identical(self):
+        original = "- id: my-own\n  name: ./mine.mjs\n"
+        with tempfile.TemporaryDirectory() as home:
+            patch = self.write_dsh_patch(home, original)
+            for args, verb in (
+                (["--agent", "dsh"], "cannot install"),
+                (["--agent", "dsh", "--uninstall"], "cannot uninstall"),
+            ):
+                with self.subTest(args=args):
+                    p = self.run_actx(["init"] + args, home)
+                    self.assertEqual(p.returncode, 1, p.stdout)
+                    self.assertIn(verb, p.stderr)
+                    self.assertIn(patch, p.stderr)
+                    self.assertIn("./actx/actx-dsh.mjs", p.stderr)
+                    with open(patch, encoding="utf-8") as handle:
+                        self.assertEqual(handle.read(), original)
+            # A malformed patch reads as not installed, never as a traceback.
+            self.assertIn("dsh: not installed", self.init(home, "--show").stdout)
+
+    def test_dsh_uninstall_removes_both_files(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.init(home, "--agent", "dsh")
+            mjs, patch = self.dsh_paths(home)
+            self.init(home, "--agent", "dsh", "--uninstall")
+            self.assertFalse(os.path.exists(mjs))
+            self.assertFalse(os.path.exists(patch))
+            self.assertIn("dsh: not installed", self.init(home, "--show").stdout)
+
+    def test_dsh_uninstall_with_nothing_installed_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.init(home, "--agent", "dsh", "--uninstall")
+            self.assertEqual(os.listdir(home), [])
+
+    def test_dsh_show_dir_alone_is_not_installed(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".dsh"))
+            self.assertIn("dsh: not installed", self.init(home, "--show").stdout)
+
+    def test_dsh_autodetected_by_home_dir(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".dsh"))
+            self.init(home)
+            mjs, patch = self.dsh_paths(home)
+            self.assertTrue(os.path.exists(mjs))
+            self.assertEqual(self.load(patch), [DSH_PATCH_ITEM])
+
     # --- shared -----------------------------------------------------------
     def test_is_actx_hook_command_exact_forms(self):
         from actx_lib import installer
@@ -825,6 +1118,396 @@ class AdapterInitTests(unittest.TestCase):
             p = self.init(home, "--help")
             self.assertRegex(p.stdout, r"\bdevin\b")
             self.assertRegex(p.stdout, r"\bpi\b")
+            self.assertRegex(p.stdout, r"\bdsh\b")
+            self.assertRegex(p.stdout, r"\bhermes\b")
+
+
+class HermesInstallerTests(unittest.TestCase):
+    """CHK-05: the hermes installer against a mocked CLI.  Every case patches
+    `subprocess.run` and `_hermes_binary`, so the result is the same on a
+    machine without Hermes and on the owner's machine; `HOME` is a temp dir."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.root = os.path.join(self.home, ".hermes")
+        self.allowlist = os.path.join(self.root, "shell-hooks-allowlist.json")
+        self.cli = HermesCli(self.home)
+        # XDG_CONFIG_HOME / PI_CODING_AGENT_DIR are blanked so a caller's
+        # overrides cannot point auto-detection at a real agent directory.
+        env = {"HOME": self.home, "XDG_CONFIG_HOME": "",
+               "PI_CODING_AGENT_DIR": ""}
+        for patcher in (
+            mock.patch.dict(os.environ, env),
+            mock.patch("actx_lib.installer._hermes_binary",
+                       return_value="/fake/hermes"),
+            mock.patch("actx_lib.installer.abs_path", return_value=ACTX),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        run_patch = mock.patch(
+            "actx_lib.installer.subprocess.run", side_effect=self.cli)
+        self.run_mock = run_patch.start()
+        self.addCleanup(run_patch.stop)
+
+    # --- helpers ----------------------------------------------------------
+    def make_root(self):
+        os.makedirs(self.root, exist_ok=True)
+
+    def write_json(self, path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(data, indent=2) + "\n")
+
+    def load(self, path):
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def write_config(self, data):
+        path = os.path.join(self.home, ".config", "actx", "config.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        return path
+
+    def run_installer(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            rc = installer.main(list(args))
+        return rc, out.getvalue(), err.getvalue()
+
+    # --- CHK-05 (1): the hermeticity gate --------------------------------
+    def test_absent_data_root_skips_before_any_subprocess(self):
+        rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "actx init: hermes: no ~/.hermes data root - skipping "
+            "(run hermes once first)", err)
+        self.assertEqual(self.run_mock.call_count, 0)
+        self.assertFalse(os.path.exists(self.allowlist))
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".config", "actx")))
+        rc, _, err = self.run_installer("--agent", "hermes", "--uninstall")
+        self.assertEqual(rc, 0)
+        self.assertIn("no ~/.hermes data root", err)
+        self.assertEqual(self.run_mock.call_count, 0)
+
+    def test_missing_binary_skips_with_zero_subprocess(self):
+        self.make_root()
+        with mock.patch("actx_lib.installer._hermes_binary", return_value=None):
+            rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 0)
+        self.assertIn("the hermes binary was not found on PATH - skipping", err)
+        self.assertEqual(self.run_mock.call_count, 0)
+        self.assertFalse(os.path.exists(self.allowlist))
+
+    # --- CHK-05 (2): fresh profile, exact argv and payload ---------------
+    def test_fresh_profile_writes_hook_and_allowlist(self):
+        self.make_root()
+        foreign = {"command": "echo foreign", "matcher": "^terminal$"}
+        self.cli.hooks[HERMES_DEFAULT_PROFILE] = {
+            "pre_tool_call": [foreign], "model": "test-model"}
+        rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 0, err)
+        expected_entries = [foreign, HERMES_ENTRY]
+        self.assertEqual(self.cli.set_calls(), [[
+            "/fake/hermes", "config", "set", "hooks.pre_tool_call",
+            json.dumps(expected_entries, separators=(",", ":")),
+        ]])
+        self.assertEqual(self.cli.hooks[HERMES_DEFAULT_PROFILE], {
+            "pre_tool_call": expected_entries, "model": "test-model"})
+        self.assertIn(["/fake/hermes", "config", "get", "hooks", "--json"],
+                      self.cli.calls)
+        self.assertIn(["/fake/hermes", "config", "path"], self.cli.calls)
+        with open(self.allowlist, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertEqual(text, json.dumps(
+            {"approvals": [HERMES_APPROVAL]}, indent=2) + "\n")
+        self.assertEqual(os.stat(self.allowlist).st_mode & 0o777, 0o600)
+
+    # --- CHK-05 (3): foreign entries survive ------------------------------
+    def test_foreign_entries_survive_a_reinit(self):
+        self.make_root()
+        foreign_hook = {"command": "/usr/local/bin/auditor hook",
+                        "matcher": "^terminal$"}
+        foreign_approval = {"event": "post_tool_call", "command": "echo done"}
+        self.cli.hooks[HERMES_DEFAULT_PROFILE] = {
+            "pre_tool_call": [foreign_hook]}
+        self.write_json(self.allowlist,
+                        {"approvals": [foreign_approval], "version": 2})
+        for _ in range(2):
+            rc, _, err = self.run_installer("--agent", "hermes")
+            self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            self.cli.hooks[HERMES_DEFAULT_PROFILE]["pre_tool_call"],
+            [foreign_hook, HERMES_ENTRY])
+        self.assertEqual(self.load(self.allowlist), {
+            "approvals": [foreign_approval, HERMES_APPROVAL], "version": 2})
+
+    # --- CHK-05 (4): a stale actx path is replaced in both files ----------
+    def test_stale_actx_path_replaced_in_both_files(self):
+        self.make_root()
+        stale_command = shlex.quote("/old/bin/actx") + " hook --agent hermes"
+        self.cli.hooks[HERMES_DEFAULT_PROFILE] = {"pre_tool_call": [
+            {"command": stale_command, "matcher": "^terminal$", "timeout": 10}]}
+        self.write_json(self.allowlist, {"approvals": [
+            {"event": "pre_tool_call", "command": stale_command}]})
+        rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            self.cli.hooks[HERMES_DEFAULT_PROFILE]["pre_tool_call"],
+            [HERMES_ENTRY])
+        self.assertEqual(self.load(self.allowlist)["approvals"],
+                         [HERMES_APPROVAL])
+        self.assertNotIn("/old/bin/actx", json.dumps(self.cli.hooks))
+
+    # --- CHK-05 (5): double init is a no-op -------------------------------
+    def test_double_init_does_not_write_again(self):
+        self.make_root()
+        self.assertEqual(self.run_installer("--agent", "hermes")[0], 0)
+        with open(self.allowlist, "rb") as handle:
+            first = handle.read()
+        os.utime(self.allowlist, (1, 1))
+        sets = len(self.cli.set_calls())
+        rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.cli.set_calls()), sets)
+        with open(self.allowlist, "rb") as handle:
+            self.assertEqual(handle.read(), first)
+        self.assertEqual(os.stat(self.allowlist).st_mtime, 1)
+
+    # --- CHK-05 (6): uninstall reverses both sides ------------------------
+    def test_uninstall_reverses_both_sides_including_stale(self):
+        self.make_root()
+        self.assertEqual(self.run_installer("--agent", "hermes")[0], 0)
+        data = self.load(self.allowlist)
+        data["approvals"].append({
+            "event": "pre_tool_call",
+            "command": "/old/bin/actx hook --agent hermes"})
+        self.write_json(self.allowlist, data)
+        rc, _, err = self.run_installer("--agent", "hermes", "--uninstall")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.cli.hooks[HERMES_DEFAULT_PROFILE], {})
+        self.assertFalse(os.path.exists(self.allowlist))  # emptied -> deleted
+        sets, unsets = len(self.cli.set_calls()), len(self.cli.unset_calls())
+        rc, _, err = self.run_installer("--agent", "hermes", "--uninstall")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.cli.set_calls()), sets)  # nothing ours
+        self.assertEqual(len(self.cli.unset_calls()), unsets)
+
+    def test_uninstall_keeps_foreign_approvals(self):
+        self.make_root()
+        foreign = {"event": "post_tool_call", "command": "echo done"}
+        self.write_json(self.allowlist,
+                        {"approvals": [HERMES_APPROVAL, foreign], "version": 2})
+        self.cli.hooks[HERMES_DEFAULT_PROFILE] = {
+            "pre_tool_call": [HERMES_ENTRY]}
+        rc, _, err = self.run_installer("--agent", "hermes", "--uninstall")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.load(self.allowlist),
+                         {"approvals": [foreign], "version": 2})
+
+    # --- CHK-08: the uninstall write path the live CLI accepts ------------
+    def test_uninstall_empty_remainder_unsets_the_whole_section(self):
+        self.make_root()
+        self.assertEqual(self.run_installer("--agent", "hermes")[0], 0)
+        self.cli.calls.clear()
+        rc, _, err = self.run_installer("--agent", "hermes", "--uninstall")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.cli.unset_calls(),
+                         [["/fake/hermes", "config", "unset", "hooks"]])
+        self.assertEqual(self.cli.set_calls(), [])
+        self.assertEqual(self.cli.hooks[HERMES_DEFAULT_PROFILE], {})
+
+    def test_uninstall_with_foreign_sub_key_unsets_only_our_list(self):
+        self.make_root()
+        foreign = {"command": "echo after", "matcher": "^terminal$"}
+        self.cli.hooks[HERMES_DEFAULT_PROFILE] = {
+            "pre_tool_call": [HERMES_ENTRY], "post_tool_call": [foreign]}
+        self.write_json(self.allowlist, {"approvals": [HERMES_APPROVAL]})
+        rc, _, err = self.run_installer("--agent", "hermes", "--uninstall")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.cli.unset_calls(), [[
+            "/fake/hermes", "config", "unset", "hooks.pre_tool_call"]])
+        self.assertEqual(self.cli.set_calls(), [])
+        self.assertEqual(self.cli.hooks[HERMES_DEFAULT_PROFILE],
+                         {"post_tool_call": [foreign]})
+        self.assertNotIn("post_tool_call", json.dumps(self.cli.calls))
+
+    def test_uninstall_keeps_foreign_pre_tool_call_entries(self):
+        self.make_root()
+        foreign = {"command": "echo foreign", "matcher": "^terminal$"}
+        self.cli.hooks[HERMES_DEFAULT_PROFILE] = {
+            "pre_tool_call": [foreign, HERMES_ENTRY]}
+        self.write_json(self.allowlist, {"approvals": [HERMES_APPROVAL]})
+        rc, _, err = self.run_installer("--agent", "hermes", "--uninstall")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.cli.set_calls(), [[
+            "/fake/hermes", "config", "set", "hooks.pre_tool_call",
+            json.dumps([foreign], separators=(",", ":")),
+        ]])
+        self.assertEqual(self.cli.hooks[HERMES_DEFAULT_PROFILE],
+                         {"pre_tool_call": [foreign]})
+
+    # --- CHK-08: install writes only the changed sub-key ------------------
+    def test_install_writes_only_the_changed_sub_key(self):
+        self.make_root()
+        foreign = {"command": "echo after", "matcher": "^terminal$"}
+        self.cli.hooks[HERMES_DEFAULT_PROFILE] = {
+            "pre_tool_call": [], "post_tool_call": [foreign]}
+        rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.cli.set_calls(), [[
+            "/fake/hermes", "config", "set", "hooks.pre_tool_call",
+            json.dumps([HERMES_ENTRY], separators=(",", ":")),
+        ]])
+        self.assertEqual(self.cli.hooks[HERMES_DEFAULT_PROFILE],
+                         {"pre_tool_call": [HERMES_ENTRY],
+                          "post_tool_call": [foreign]})
+        self.assertNotIn("post_tool_call", json.dumps(self.cli.set_calls()))
+
+    def test_live_uninstall_shape_succeeds_end_to_end(self):
+        """The shape that failed live (CHK-08): our entry is the only hook,
+        so the emptied remainder is unset, never written whole."""
+        self.make_root()
+        rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.cli.hooks[HERMES_DEFAULT_PROFILE],
+                         {"pre_tool_call": [HERMES_ENTRY]})
+        rc, _, err = self.run_installer("--agent", "hermes", "--uninstall")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(err, "")
+        self.assertEqual(self.cli.hooks[HERMES_DEFAULT_PROFILE], {})
+        self.assertFalse(os.path.exists(self.allowlist))
+
+    # --- CHK-05 (7): configured profiles ----------------------------------
+    def test_configured_profiles_are_each_processed(self):
+        self.make_root()
+        self.write_config({"hermes_profiles": ["a", "b"]})
+        self.cli.paths["a"] = os.path.join(self.home, "hermes-a", "config.yaml")
+        self.cli.paths["b"] = os.path.join(self.home, "hermes-b", "config.yaml")
+        rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 0, err)
+        for name in ("a", "b"):
+            self.assertIn(["/fake/hermes", "-p", name, "config", "get",
+                           "hooks", "--json"], self.cli.calls)
+            self.assertEqual(len(self.cli.set_calls(name)), 1)
+            allowlist = os.path.join(self.home, "hermes-%s" % name,
+                                     "shell-hooks-allowlist.json")
+            self.assertEqual(self.load(allowlist),
+                             {"approvals": [HERMES_APPROVAL]})
+        self.assertIn(["/fake/hermes", "config", "get", "hooks", "--json"],
+                      self.cli.calls)  # default profile, no -p flag
+
+    def test_non_string_profile_entries_are_noted_and_skipped(self):
+        self.make_root()
+        self.write_config({"hermes_profiles": ["a", 3]})
+        self.cli.paths["a"] = os.path.join(self.home, "hermes-a", "config.yaml")
+        rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("is not a profile name - ignored", err)
+        self.assertIn(["/fake/hermes", "-p", "a", "config", "get", "hooks",
+                       "--json"], self.cli.calls)
+        self.assertFalse(any(argv[1:3] == ["-p", "3"]
+                             for argv in self.cli.calls))
+
+    # --- CHK-05 (8): one broken profile, the rest continue ----------------
+    def test_invalid_config_get_fails_profile_and_continues(self):
+        self.make_root()
+        self.write_config({"hermes_profiles": ["a", "b"]})
+        self.cli.raw_hooks["a"] = "not json\n"
+        rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 1)
+        self.assertIn("actx init: hermes: profile 'a'", err)
+        self.assertIn("did not return JSON", err)
+        self.assertIn("actx init: cannot install hermes", err)
+        self.assertEqual(self.cli.set_calls("a"), [])
+        self.assertEqual(len(self.cli.set_calls("b")), 1)
+        self.assertEqual(
+            len(self.cli.set_calls(HERMES_DEFAULT_PROFILE)), 1)
+
+    def test_uninstall_invalid_config_get_fails_and_touches_nothing(self):
+        self.make_root()
+        original = json.dumps({"approvals": [HERMES_APPROVAL]}, indent=2) + "\n"
+        with open(self.allowlist, "w", encoding="utf-8") as handle:
+            handle.write(original)
+        self.cli.raw_hooks[HERMES_DEFAULT_PROFILE] = "{broken"
+        rc, _, err = self.run_installer("--agent", "hermes", "--uninstall")
+        self.assertEqual(rc, 1)
+        self.assertIn("default profile", err)
+        self.assertIn("manually", err)
+        self.assertIn("cannot uninstall hermes", err)
+        self.assertEqual(self.cli.set_calls(), [])
+        with open(self.allowlist, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), original)
+
+    # --- CHK-05 (8b): a bad allowlist refuses before any write ------------
+    def test_invalid_allowlist_refuses_with_no_writes(self):
+        self.make_root()
+        self.cli.hooks[HERMES_DEFAULT_PROFILE] = {"pre_tool_call": []}
+        original = '{"approvals": [broken]}\n'
+        with open(self.allowlist, "w", encoding="utf-8") as handle:
+            handle.write(original)
+        rc, _, err = self.run_installer("--agent", "hermes")
+        self.assertEqual(rc, 1)
+        self.assertIn(self.allowlist, err)
+        self.assertIn("nothing was written", err)
+        self.assertEqual(self.cli.set_calls(), [])
+        with open(self.allowlist, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), original)
+
+    def test_allowlist_wrong_shapes_refused(self):
+        self.make_root()
+        self.cli.hooks[HERMES_DEFAULT_PROFILE] = {"pre_tool_call": []}
+        for data in ({"approvals": {}}, {"approvals": ["x"]},
+                     {"approvals": None}, [], "x"):
+            with self.subTest(data=data):
+                self.cli.calls.clear()
+                self.write_json(self.allowlist, data)
+                rc, _, err = self.run_installer("--agent", "hermes")
+                self.assertEqual(rc, 1)
+                self.assertEqual(self.cli.set_calls(), [])
+                self.assertEqual(self.load(self.allowlist), data)
+
+    # --- CHK-05 (9): autodetect follows the data root ---------------------
+    def test_autodetect_follows_the_data_root(self):
+        rc, _, err = self.run_installer()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("hermes", err)
+        self.assertEqual(self.run_mock.call_count, 0)
+        self.make_root()
+        rc, _, err = self.run_installer()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.cli.set_calls()), 1)
+        self.assertTrue(os.path.exists(self.allowlist))
+
+    # --- CHK-05 (10): --show is a stdlib read ----------------------------
+    def test_show_reads_the_allowlist_without_subprocess(self):
+        self.make_root()
+        self.write_json(self.allowlist, {"approvals": [HERMES_APPROVAL]})
+        rc, out, err = self.run_installer("--show")
+        self.assertEqual(rc, 0)
+        self.assertIn("hermes: installed", out)
+        self.assertEqual(self.run_mock.call_count, 0)
+        self.write_json(self.allowlist, {"approvals": [
+            {"event": "pre_tool_call",
+             "command": "/old/bin/actx hook --agent hermes"}]})
+        self.assertIn("hermes: not installed",
+                      self.run_installer("--show")[1])
+        with open(self.allowlist, "w", encoding="utf-8") as handle:
+            handle.write("{broken")
+        rc, out, err = self.run_installer("--show")
+        self.assertEqual(rc, 0)
+        self.assertIn("hermes: not installed", out)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(self.run_mock.call_count, 0)
+
+    def test_installed_requires_the_exact_current_command(self):
+        self.make_root()
+        self.assertFalse(installer._installed("hermes"))
+        self.write_json(self.allowlist, {"approvals": [HERMES_APPROVAL]})
+        self.assertTrue(installer._installed("hermes"))
+        self.assertEqual(self.run_mock.call_count, 0)
 
 
 if __name__ == "__main__":

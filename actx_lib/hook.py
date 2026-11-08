@@ -1,15 +1,73 @@
 import json
+import shlex
 import sys
 
 import actx_lib.conventions as conventions
 import actx_lib.rewriter as rewriter
 import actx_lib.security_gate as security_gate
 
-ALLOWED_TOOLS = {"Bash", "bash", "Shell", "shell", "exec"}
+ALLOWED_TOOLS = {"Bash", "bash", "Shell", "shell", "exec", "terminal", "pwsh"}
 
 ADDITIONAL_CONTEXT = "Command rewritten by actx for output compression."
 
 _AGY_DEFER_REASON = "actx: command outside actx policy — deferred to user confirmation"
+
+_GATE_ERROR_REASON = (
+    "actx security gate internal error on irreversible command"
+)
+
+# Human gate-confirmation texts (ask paths only): the command, one plain
+# sentence about what that command class does, and the gate's rule reason.
+# One static sentence per category that is not `T6_HIGH_RISK_<HEAD>`; a
+# head-named category is covered by _HUMAN_ASK_FAMILY, so a new table head
+# needs no new sentence. `T6_GATE_ERROR` appends the sanitized exception.
+# Model-facing texts (deny, ask_as_deny) do not use this table.
+_HUMAN_ASK = "actx security gate confirmation required"
+
+_HUMAN_ASK_EXPLANATIONS = {
+    "T4_DESTRUCTIVE_MUTATION":
+        "deletes or overwrites files and local state and cannot be undone",
+    "T5_SUPPLY_CHAIN":
+        "installs or updates packages — third-party code will run on this "
+        "machine",
+    "T6_HIGH_RISK_GIT":
+        "rewrites remote git history or refs and can affect what everyone "
+        "else sees",
+    "T6_HIGH_RISK_CARGO":
+        "publishes a Rust crate or changes crates.io state",
+    "T6_HIGH_RISK_SWIFTFORMAT":
+        "rewrites Swift source files in place",
+    "T6_HIGH_RISK_GRADLEW":
+        "publishes build artifacts or deletes build outputs",
+    "T6_HIGH_RISK_SQL":
+        "changes database rows or schema",
+    "T6_GATE_ERROR":
+        "the security gate could not finish checking this command, so it "
+        "needs a human decision",
+}
+
+_HUMAN_ASK_FAMILY_PREFIX = "T6_HIGH_RISK_"
+_HUMAN_ASK_FAMILY = (
+    "runs {head} in a mode that can change remote state, publish artifacts, "
+    "or deploy a service"
+)
+_HUMAN_ASK_FALLBACK = (
+    "runs a command class that the security gate asks a human to review"
+)
+
+# A long command keeps its first 70 and last 40 characters so a trailing
+# trigger stays visible; the marker names the hidden char count and flags a
+# hidden compound separator. shlex.quote is applied after truncation so the
+# displayed command is always one well-formed shell word.
+_HUMAN_ASK_COMMAND_MAX = 120
+_HUMAN_ASK_COMMAND_HEAD = 70
+_HUMAN_ASK_COMMAND_TAIL = 40
+_HUMAN_ASK_REASON_MAX = 120
+_HUMAN_ASK_COMPOUND = ("&&", "||", ";", "|")
+_CONTROL_TO_SPACE = {
+    code: " " for code in [*range(0x20), 0x7f, *range(0x80, 0xa0)]
+}
+
 
 # Per-agent policy for the Claude/Codex schema (TK-65, `actx hook --agent
 # <name>`); a Codex turn_id selects codex when no agent is specified.
@@ -26,17 +84,27 @@ _AGY_DEFER_REASON = "actx: command outside actx policy — deferred to user conf
 #   push:        a rewritable `git push` (rewriter.is_git_push), decided
 #                before the mutator policy: "defer" - no verdict at all, the
 #                harness's own confirmation stays in force (TK-70 REQ-01).
+#   output:      how a verdict is shaped: "claude" (default) - the
+#                hookSpecificOutput object; "hermes" - the flat Hermes
+#                shell-hook shapes ({"decision": "block"|"modify", ...},
+#                {"action": "approve", ...}); no additionalContext, no hints.
+#   gate_only:   True - never reach the rewriter: the gate verdicts (deny/ask)
+#                pass through in the claude schema and every other outcome is
+#                no output (dsh; its mutator/push rows are unreachable and
+#                kept for row-form uniformity).
 AGENT_POLICIES = {
     None: {"ask_as_deny": False, "mutator": "rewrite", "push": "defer"},
     "codex": {"ask_as_deny": False, "mutator": "none", "push": "defer"},
     "opencode": {"ask_as_deny": True, "mutator": "none", "push": "defer"},
     "devin": {"ask_as_deny": False, "mutator": "allow", "push": "defer"},
     "pi": {"ask_as_deny": True, "mutator": "rewrite", "push": "defer"},
+    "hermes": {"ask_as_deny": False, "mutator": "none", "push": "defer", "output": "hermes"},
+    "dsh": {"ask_as_deny": False, "mutator": "none", "push": "defer", "gate_only": True},
 }
 
 
 def _gate_error_reason(exc):
-    return f"actx security gate internal error on irreversible command: {exc}"
+    return f"{_GATE_ERROR_REASON}: {exc}"
 
 
 def _error_is_irreversible(command):
@@ -58,6 +126,65 @@ def _gate_reason(prefix, category, reason):
     if category:
         return f"{prefix} [{category}]: {reason}"
     return f"{prefix}: {reason}"
+
+
+def _cap(text, limit=_HUMAN_ASK_REASON_MAX):
+    if len(text) <= limit:
+        return text
+    return text[:limit - 1] + "…"
+
+
+def _shown_command(command):
+    """The command as one shlex-quoted shell word. A command longer than
+    _HUMAN_ASK_COMMAND_MAX keeps its first 70 and last 40 characters; the
+    marker carries the hidden char count, and a hidden `&&`/`||`/`;`/`|`
+    marks the shown fragment as a partial compound command."""
+    if len(command) > _HUMAN_ASK_COMMAND_MAX:
+        hidden = command[_HUMAN_ASK_COMMAND_HEAD:-_HUMAN_ASK_COMMAND_TAIL]
+        if any(sep in hidden for sep in _HUMAN_ASK_COMPOUND):
+            marker = (
+                f"…(+{len(hidden)} chars, compound command partially shown)…"
+            )
+        else:
+            marker = f"…(+{len(hidden)} chars)…"
+        command = (
+            command[:_HUMAN_ASK_COMMAND_HEAD]
+            + marker
+            + command[-_HUMAN_ASK_COMMAND_TAIL:]
+        )
+    return shlex.quote(command)
+
+
+def _sanitized_exc(reason):
+    """The exception detail of a T6_GATE_ERROR reason, made printable: a
+    control character becomes a space and the result is capped at 120."""
+    prefix = _GATE_ERROR_REASON + ": "
+    exc = reason[len(prefix):] if reason.startswith(prefix) else reason
+    return _cap(exc.translate(_CONTROL_TO_SPACE))
+
+
+def _explanation(category, reason):
+    text = _HUMAN_ASK_EXPLANATIONS.get(category)
+    if text is not None:
+        if category == "T6_GATE_ERROR":
+            text += f" (internal error: {_sanitized_exc(reason or '')})"
+        return text
+    if category and category.startswith(_HUMAN_ASK_FAMILY_PREFIX):
+        head = category[len(_HUMAN_ASK_FAMILY_PREFIX):].lower()
+        if head:
+            return _HUMAN_ASK_FAMILY.format(head=head)
+    return _HUMAN_ASK_FALLBACK
+
+
+def _human_ask_message(command, category, reason):
+    """Human-facing gate-confirmation text: the command, a plain-language
+    explanation of the category, and the gate rule reason. Used only where
+    a human decides (claude-schema ask, hermes approve, agy force_ask)."""
+    category_part = f" [{category}]" if category else ""
+    return (
+        f"{_HUMAN_ASK}{category_part} {_shown_command(command)}: "
+        f"{_explanation(category, reason)} — {_cap(reason or '')}"
+    )
 
 
 def process(text, agent=None):
@@ -94,7 +221,11 @@ def process(text, agent=None):
             # command keeps the fail-open deferral.
             if not _error_is_irreversible(command):
                 return None
-            return {"decision": "force_ask", "reason": _gate_error_reason(exc)}
+            return {
+                "decision": "force_ask",
+                "reason": _human_ask_message(
+                    command, "T6_GATE_ERROR", _gate_error_reason(exc)),
+            }
 
         if sec_res is not None:
             if sec_res.decision == "deny":
@@ -105,7 +236,8 @@ def process(text, agent=None):
             if sec_res.decision == "ask":
                 return {
                     "decision": "force_ask",
-                    "reason": sec_res.reason,
+                    "reason": _human_ask_message(
+                        command, sec_res.category, sec_res.reason),
                 }
 
         try:
@@ -159,6 +291,7 @@ def process(text, agent=None):
     if agent is None and isinstance(turn_id, str) and turn_id:
         agent = "codex"
     policy = AGENT_POLICIES.get(agent, AGENT_POLICIES[None])
+    output = policy.get("output", "claude")
 
     # 1. Evaluate Security Gatekeeper policies
     try:
@@ -177,13 +310,15 @@ def process(text, agent=None):
 
     if sec_res is not None:
         if sec_res.decision == "deny":
+            reason = _gate_reason(
+                "actx security gate violation", sec_res.category, sec_res.reason)
+            if output == "hermes":
+                return {"decision": "block", "reason": reason}
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
-                    "permissionDecisionReason": _gate_reason(
-                        "actx security gate violation",
-                        sec_res.category, sec_res.reason),
+                    "permissionDecisionReason": reason,
                 }
             }
 
@@ -199,15 +334,22 @@ def process(text, agent=None):
             }
 
         if sec_res.decision == "ask":
+            message = _human_ask_message(
+                command, sec_res.category, sec_res.reason)
+            if output == "hermes":
+                return {"action": "approve", "message": message}
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "ask",
-                    "permissionDecisionReason": (
-                        f"actx security gate confirmation required: {sec_res.reason}"
-                    ),
+                    "permissionDecisionReason": message,
                 }
             }
+
+    # dsh (gate_only): the gate verdict is the whole policy - never reach the
+    # rewriter, so no allow and no updatedInput are ever produced.
+    if policy.get("gate_only", False):
+        return None
 
     # 2. Output compression rewrite (for safe/allowed commands)
     try:
@@ -239,6 +381,12 @@ def process(text, agent=None):
 
     updated_input = dict(tool_input)
     updated_input["command"] = rewritten
+
+    # Hermes shell-hook contract: a rewrite is a flat "modify" carrying the
+    # full tool_input; the contract has no additionalContext field, so the
+    # conventions hint is never computed on this path.
+    if output == "hermes":
+        return {"decision": "modify", "tool_input": updated_input}
 
     # TK-45: compact-flag hint (REQ-03) - allow+rewrite verdict ONLY, in
     # its own try/except: any conventions failure degrades to the plain
