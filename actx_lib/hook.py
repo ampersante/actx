@@ -41,6 +41,9 @@ _HUMAN_ASK_EXPLANATIONS = {
         "publishes build artifacts or deletes build outputs",
     "T6_HIGH_RISK_SQL":
         "changes database rows or schema",
+    "T3_OBFUSCATION_EVAL":
+        "runs a shell command whose command word is a substitution or "
+        "variable, so the gate cannot tell statically what it will run",
     "T6_GATE_ERROR":
         "the security gate could not finish checking this command, so it "
         "needs a human decision",

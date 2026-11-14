@@ -334,6 +334,7 @@ class GatePackageNameResolutionTests(unittest.TestCase):
                 "__init__.py", "common.py", "t1_paths.py", "t2_t3.py",
                 "t4_destructive.py", "t5_supply.py", "t6_git.py",
                 "t6_tools.py", "t6_sql.py", "t7_action.py", "engine.py",
+                "shell_parse.py",
             },
         )
 

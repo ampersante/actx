@@ -5,11 +5,19 @@ dispatch table (_evaluate_chunk) and the public evaluate_security entrypoint
 Body unchanged from the pre-split monolith - see tools/ast_identity_check.py.
 """
 
+import os
 import re
 import shlex
 from typing import NamedTuple
 
-from .common import SecurityDecision, _DECISION_ALLOW, _RE_FORK_BOMB, _RE_PIPE_TO_SHELL
+from .common import (
+    SecurityDecision,
+    _DECISION_ALLOW,
+    _RE_FORK_BOMB,
+    _RE_PIPE_TO_SHELL,
+    _WRAPPER_COMMANDS,
+    _unwrap_tokens,
+)
 from .t1_paths import _check_sensitive_paths
 from .t2_t3 import _check_exfiltration, _check_obfuscation_and_eval
 from .t4_destructive import _check_destructive_and_persistence, _check_find_exec_subcommands
@@ -430,13 +438,366 @@ def _closed_grammar_words(command: str) -> GrammarWords | None:
     return GrammarWords(words, tuple(globs))
 
 
-def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = False) -> SecurityDecision:
+# TK-73: the structural parser (shell_parse) only ADDS evaluations to the
+# line-based path of evaluate_security. _needs_parse is a pure cost
+# optimisation: the line-based path always runs, so a missed trigger only
+# skips the extra closures and never changes today's verdict.
+#
+# shell_parse is imported on first use: a command without a trigger never
+# loads it, which keeps the hook's start-up cost on ordinary commands.
+def parse_command(text):
+    from . import shell_parse
+    return shell_parse.parse_command(text)
+
+
+def extract_substitutions(text):
+    from . import shell_parse
+    return shell_parse.extract_substitutions(text)
+
+
+_RE_PARSE_TRIGGER = re.compile("['\"$`<({#\\\\\\n]")
+
+# Same set as the shell-wrapper branch of t1_paths._check_sensitive_paths
+# (a test compares them).
+_SHELL_HEADS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "busybox"})
+# Heads whose string argument is a command line run by another shell.
+_COMMAND_RUNNERS = frozenset({
+    "ssh", "mosh", "sshpass", "docker", "podman", "kubectl", "oc", "watch", "script", "su", "runuser",
+})
+_STRING_EXECUTORS = frozenset({"eval", "source", "."})
+_ARGV_EXECUTORS = frozenset({"xargs", "find", "parallel", "sudo", "doas"})
+_RE_C_FLAGS = re.compile(r"[-+][A-Za-z]*c[A-Za-z]*$")
+_RE_NEWLINE_LIKE = re.compile("[\n\r\x0b\x0c\x85  ]")
+_RE_REDIRECT_WORD = re.compile(r"[0-9]*[<>]")
+_RE_DURATION_WORD = re.compile(r"\d+[smhd]?$")
+_RE_ASSIGN_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+_MALFORMED_DENY_PATTERNS = (
+    r"\.env\b",
+    r"/\.ssh\b",
+    r"/\.aws\b",
+    r"\beval\s",
+    r"\brm\s+-rf\s+/",
+    r"\bbase64\s+-d\s*\|",
+)
+_RDYN_ASK = SecurityDecision(
+    decision="ask",
+    reason="Nested shell text runs a command word known only at run time (substitution or variable)",
+    category="T3_OBFUSCATION_EVAL",
+)
+_UNPARSED_ASK = SecurityDecision(
+    decision="ask",
+    reason="actx security gate could not parse the shell structure (unparsed shell structure)",
+    category="T6_GATE_ERROR",
+)
+
+
+# Words the parser strips or reads differently while no trigger character
+# appears (`coproc rm -rf ~`, `=rm -rf /`, `if x; then rm -rf /; fi`).
+_PARSE_KEYWORDS = frozenset(
+    "! if then elif else while until do for select case function coproc repeat nocorrect noglob".split()
+)
+_WORD_SEPARATORS = str.maketrans({c: " " for c in ";&|()"})
+
+
+def _has_parse_word(command: str) -> bool:
+    # A word-level scan (split) is several times cheaper than a regex on
+    # long inputs. Separators count on both sides (a harmless superset).
+    words = command.translate(_WORD_SEPARATORS).split()
+    if not _PARSE_KEYWORDS.isdisjoint(words):
+        return True
+    return "=" in command and any(
+        w[0] == "=" and len(w) > 1 and (w[1].isalnum() or w[1] == "_") for w in words
+    )
+
+
+def _needs_parse(command: str) -> bool:
+    return _RE_PARSE_TRIGGER.search(command) is not None or _has_parse_word(command)
+
+
+_RE_PLAIN_QUOTED = re.compile(r"(?<!\S)([\'\"])([A-Za-z0-9_./=:,@%+-]+)\1(?!\S)")
+
+
+def _heredoc_covers(chunk: str, parsed) -> bool:
+    """True when the chunk is a piece of a heredoc body line."""
+    needle = chunk.strip().replace("\\", "")
+    return any(needle in line for line in parsed.heredoc_body_lines)
+
+
+def _run_chunk(chunk, exempt, decisions, parsed=None, broad=False, done=None, dropped=None):
+    """Evaluate one chunk (a line-based chunk or a parser unit): returns a
+    deny decision or None and appends an ask to decisions. A failure in the
+    chunk never discards the rest (broad: any exception, for parser units).
+    done: collects (chunk, exempt-or-not) of evaluations that completed, so
+    a parser unit equal to an already judged chunk is not judged twice."""
+    try:
+        dec = _evaluate_chunk(chunk, exempt)
+        if done is not None:
+            done.add((chunk, exempt is None))
+            # A unit that only differs by quotes around plain whole words
+            # (`'TODO'` -> `TODO`) is judged by this same evaluation.
+            if "'" in chunk or '"' in chunk:
+                done.add((_RE_PLAIN_QUOTED.sub(r"\2", chunk), exempt is None))
+        if dec.decision == "deny":
+            return dec
+        if dec.decision == "ask":
+            decisions.append(dec)
+    except (Exception if broad else ValueError) as exc:
+        # Malformed syntax fallback
+        for bad_pat in _MALFORMED_DENY_PATTERNS:
+            if re.search(bad_pat, chunk):
+                return SecurityDecision(
+                    decision="deny",
+                    reason="Malformed shell syntax contains prohibited security patterns",
+                    category="T1_CREDENTIAL_ACCESS",
+                )
+        # REQ-04 (TK-70): a parser failure on an irreversible chunk
+        # asks instead of falling through to the default allow; every
+        # other chunk keeps the previous fallback. The ask joins the
+        # normal ask list so a later chunk's deny still wins (the
+        # engine's deny > ask > allow precedence).
+        # TK-73: after a successful parse, a chunk that is not a piece of
+        # a heredoc body line is a fragment of a multi-line quote; the
+        # parser's units judge it, so no gate-error ask for it.
+        if looks_irreversible(chunk):
+            ask = SecurityDecision(
+                decision="ask",
+                reason=f"actx security gate internal error on irreversible command: {exc}",
+                category="T6_GATE_ERROR",
+            )
+            if parsed is None or _heredoc_covers(chunk, parsed):
+                decisions.append(ask)
+            elif dropped is not None:
+                dropped.append(ask)
+    return None
+
+
+class _Seen(set):
+    """Nested texts judged so far by one top-level call, and their size."""
+
+    chars = 0
+
+
+_MAX_NESTED_CHARS = 12_000
+_NESTED_LIMIT_ASK = SecurityDecision(
+    decision="ask",
+    reason="actx security gate stopped checking an excessively nested command (nested structure too large)",
+    category="T6_GATE_ERROR",
+)
+
+
+def _eval_nested(text, cwd, seen, decisions, rdyn=True):
+    """Whole-gate evaluation of a text the shell runs as commands. seen is
+    shared by the whole recursion of one top-level call: the evaluation is
+    pure and every verdict reaches the top, so a repeat adds nothing (and
+    nested `$((` would otherwise re-evaluate the same texts exponentially)."""
+    key = (text, rdyn)
+    if key in seen or not text.strip():
+        return None
+    # Total size of the nested texts judged by one top-level call: a
+    # pathological nesting has quadratically many distinct substrings.
+    seen.chars += len(text)
+    if seen.chars > _MAX_NESTED_CHARS:
+        decisions.append(_NESTED_LIMIT_ASK)
+        return None
+    seen.add(key)
+    try:
+        dec = evaluate_security(text, cwd, _nested=True, _seen=seen, _rdyn=rdyn)
+    except Exception:
+        return None
+    if dec.decision == "deny":
+        return dec
+    if dec.decision == "ask":
+        decisions.append(dec)
+    return None
+
+
+def _c_operand(tokens, j):
+    """The operand of the `-c` option of the shell at tokens[j], or None."""
+    k = j + 1
+    while k < len(tokens) and tokens[k][:1] in "-+" and tokens[k] not in ("-", "+", "--"):
+        if tokens[k] in ("-o", "+o", "-O", "+O"):
+            k += 2
+            continue
+        if _RE_C_FLAGS.match(tokens[k]):
+            return tokens[k + 1] if k + 1 < len(tokens) else None
+        k += 1
+    return None
+
+
+def _head_index(tokens):
+    """Index of the command a unit's words run after env assignments and
+    wrapper commands, skipping each wrapper's options together with their
+    values (`timeout -s KILL 5 sh`), or None."""
+    from .shell_parse import _WRAPPER_VALUE_OPTIONS
+
+    i, n = 0, len(tokens)
+    while i < n:
+        t = tokens[i]
+        base = os.path.basename(t)
+        if _RE_ASSIGN_WORD.match(t):
+            i += 1
+        elif _RE_REDIRECT_WORD.match(t):
+            i += 1 if t.lstrip("0123456789").strip("<>&") else 2  # operator alone: target follows
+        elif base in _WRAPPER_COMMANDS:
+            value_opts = _WRAPPER_VALUE_OPTIONS.get(base, ())
+            duration = base == "timeout"  # its first positional operand
+            i += 1
+            while i < n:
+                t = tokens[i]
+                if t.startswith("-"):
+                    i += 2 if t in value_opts else 1
+                elif "=" in t or _RE_DURATION_WORD.match(t) or duration:
+                    duration = False
+                    i += 1
+                else:
+                    break
+        else:
+            return i
+    return None
+
+
+def _shell_word(word, any_word=False):
+    """A shell, or a word that starts with one (`sh -c ...`); with any_word,
+    a word holding one anywhere (`env -S "/usr/bin/env bash -c ..."`)."""
+    parts = word.split()
+    if not any_word:
+        parts = parts[:1]
+    return any(os.path.basename(p) in _SHELL_HEADS for p in parts)
+
+
+def _shell_bodies(unit):
+    """Words of a unit that a shell runs as a command line (INV-10), only
+    where the unit's command really executes them: a word with a newline-like
+    character when the head is a shell, eval/source/., a command runner or an
+    argv executor (xargs, find, sudo, ...); and, for a shell that the unit
+    itself starts (directly or through such an executor), the operand of its
+    `-c` option, whatever quotes it holds (the canonical unit text re-quotes
+    it in a form the line-based checks mis-tokenise). Other arguments of the
+    shell (script names, script arguments) are data."""
+    if not unit.multiline:
+        return ()
+    try:
+        tokens = shlex.split(unit.text)
+    except ValueError:
+        return unit.multiline
+    try:
+        rest = _unwrap_tokens(tokens)
+    except Exception:
+        rest = []
+    heads = set()
+    plain = list(tokens)
+    while plain and _RE_ASSIGN_WORD.match(plain[0]):
+        plain.pop(0)
+    if plain:
+        heads.add(os.path.basename(plain[0]))
+    if rest:
+        heads.add(os.path.basename(rest[0]))
+    head_at = _head_index(tokens)
+    if head_at is not None:
+        heads.add(os.path.basename(tokens[head_at]))
+    direct = bool(heads & _SHELL_HEADS)
+    via = bool(heads & _ARGV_EXECUTORS)
+    # A shell word among the unit's own words (a quoted value counts only as
+    # the value of env's -S) and a head the option skipping did not resolve
+    # (an unknown wrapper, a redirection, `env -S "sh -c ..."`): which operand
+    # the shell runs is unknown, so every newline-like value counts as a body
+    # (stricter).
+    ambiguous = any(
+        _shell_word(
+            t[2:] if t.startswith("-S") else t,
+            t.startswith("-S") or bool(k and tokens[k - 1] in ("-S", "--split-string")),
+        )
+        for k, t in enumerate(tokens)
+        if t not in unit.multiline or t.startswith("-S") or (k and tokens[k - 1] in ("-S", "--split-string"))
+    )
+    if not (direct or via or ambiguous or heads & (_COMMAND_RUNNERS | _STRING_EXECUTORS)):
+        return ()
+    bodies = [v for v in unit.multiline if _RE_NEWLINE_LIKE.search(v)]
+    starts = []
+    for k in {head_at, tokens.index(rest[0]) if rest and rest[0] in tokens else None}:
+        if k is not None and os.path.basename(tokens[k]) in _SHELL_HEADS:
+            starts.append(k)
+    if via:
+        starts += [k for k, t in enumerate(tokens) if os.path.basename(t) in _SHELL_HEADS]
+    for k in starts:
+        operand = _c_operand(tokens, k)
+        if operand is not None and operand in unit.multiline and operand not in bodies:
+            bodies.append(operand)
+    return tuple(bodies)
+
+
+def _rdyn_check(unit, nested, rdyn=True):
+    """INV-09: inside a nested evaluation a command word known only at run
+    time (substitution or variable) asks. rdyn is False for the alternative
+    reading of an arithmetic expansion (`$(( $a + 1 ))` read as `( $a + 1 )`):
+    a hedge, not a command the shell runs."""
+    return _RDYN_ASK if nested and rdyn and unit.dyn_head else None
+
+
+def _evaluate_parsed(parsed, cwd, exempt, nested, decisions, done, seen, rdyn):
+    """R1-R3 of evaluate_security: parser units (with dialect variants),
+    nested texts and shell bodies. Returns a deny decision or None; asks
+    are appended to decisions."""
+    if "|" in parsed.canonical and _RE_PIPE_TO_SHELL.search(parsed.canonical):
+        try:
+            t3 = _check_obfuscation_and_eval(parsed.canonical, [])
+        except Exception:
+            t3 = None
+        if t3:
+            if t3.decision == "deny":
+                return t3
+            decisions.append(t3)
+    # TK-63: a unit gets the exemption only when it is the sole command.
+    unit_exempt = exempt if len(parsed.units) == 1 and not parsed.nested else None
+    items = [(u.pos, 0, u) for u in parsed.units] + [(nd.pos, 1, nd) for nd in parsed.nested]
+    items.sort(key=lambda it: (it[0], it[1]))
+    for _pos, kind, item in items:
+        if kind == 1:
+            dec = _eval_nested(item.text, cwd, seen, decisions, item.kind != "arith_alt")
+            if dec:
+                return dec
+            continue
+        ask = _rdyn_check(item, nested, rdyn)
+        if ask:
+            decisions.append(ask)
+        text = item.text.strip()
+        if text and (text, unit_exempt is None) not in done:
+            dec = _run_chunk(text, unit_exempt, decisions, broad=True)
+            if dec:
+                return dec
+        for body in _shell_bodies(item):
+            dec = _eval_nested(body, cwd, seen, decisions)
+            if dec:
+                return dec
+    return None
+
+
+def _evaluate_unparsed(command, cwd, nested, decisions, seen):
+    """INV-02: the parser gave up; the line-based path already ran, and the
+    bodies a plain scan finds in substitutions go to the whole gate. At the
+    top level an unbalanced substitution asks."""
+    bodies = extract_substitutions(command)
+    if bodies is None:
+        if not nested and any(m in command for m in ("$(", "`", "<(", ">(")):
+            decisions.append(_UNPARSED_ASK)
+        return None
+    for body in bodies:
+        dec = _eval_nested(body, cwd, seen, decisions)
+        if dec:
+            return dec
+    return None
+
+
+def evaluate_security(
+    command: str, cwd: str | None = None, *, _nested: bool = False, _seen=None, _rdyn: bool = True
+) -> SecurityDecision:
     """Evaluate a shell command string against the security gatekeeper policies.
 
     Returns SecurityDecision(decision="allow"|"deny"|"ask", reason=..., category=...).
     Fail-open on internal parser errors to guarantee uninterrupted developer workflow.
     _nested: a recursive call from inside the gate (`sh -c` body); it never
-    gets the TK-63 exemptions.
+    gets the TK-63 exemptions. _seen, _rdyn: private state of that recursion
+    (evaluated nested texts; whether R-DYN applies to this call's units).
     """
     if not command or not isinstance(command, str):
         return _DECISION_ALLOW
@@ -512,44 +873,41 @@ def evaluate_security(command: str, cwd: str | None = None, *, _nested: bool = F
         if exempt is not None and sum(1 for c in chunks if c.strip()) != 1:
             exempt = None
 
+        # TK-73: one structural parse (the trigger is a cost optimisation
+        # only); None after a trigger means the parser gave up (INV-02).
+        triggered = _needs_parse(command)
+        try:
+            parsed = parse_command(command) if triggered else None
+        except Exception:
+            parsed = None
+
         decisions = []
+        done = set()
+        dropped = []
+        seen = _Seen() if _seen is None else _seen
         for chunk in chunks:
             chunk = chunk.strip()
             if not chunk:
                 continue
-            try:
-                dec = _evaluate_chunk(chunk, exempt)
-                if dec.decision == "deny":
-                    return dec
-                if dec.decision == "ask":
-                    decisions.append(dec)
-            except ValueError as exc:
-                # Malformed syntax fallback
-                for bad_pat in (
-                    r"\.env\b",
-                    r"/\.ssh\b",
-                    r"/\.aws\b",
-                    r"\beval\s",
-                    r"\brm\s+-rf\s+/",
-                    r"\bbase64\s+-d\s*\|",
-                ):
-                    if re.search(bad_pat, chunk):
-                        return SecurityDecision(
-                            decision="deny",
-                            reason="Malformed shell syntax contains prohibited security patterns",
-                            category="T1_CREDENTIAL_ACCESS",
-                        )
-                # REQ-04 (TK-70): a parser failure on an irreversible chunk
-                # asks instead of falling through to the default allow; every
-                # other chunk keeps the previous fallback. The ask joins the
-                # normal ask list so a later chunk's deny still wins (the
-                # engine's deny > ask > allow precedence).
-                if looks_irreversible(chunk):
-                    decisions.append(SecurityDecision(
-                        decision="ask",
-                        reason=f"actx security gate internal error on irreversible command: {exc}",
-                        category="T6_GATE_ERROR",
-                    ))
+            dec = _run_chunk(chunk, exempt, decisions, parsed, done=done, dropped=dropped)
+            if dec:
+                return dec
+
+        # An error while adding the parser's evaluations must not drop the
+        # line-based verdict (it stands as the pre-TK-73 gate gave it).
+        dec = None
+        try:
+            if parsed is not None:
+                dec = _evaluate_parsed(parsed, cwd, exempt, _nested, decisions, done, seen, _rdyn)
+            elif triggered:
+                dec = _evaluate_unparsed(command, cwd, _nested, decisions, seen)
+        except Exception:
+            # The T6 asks R0 dropped for multi-line quote fragments relied on
+            # this parse: keep them.
+            decisions.extend(dropped)
+            dec = None
+        if dec:
+            return dec
 
         if decisions:
             return decisions[0]

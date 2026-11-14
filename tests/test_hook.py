@@ -1367,7 +1367,7 @@ class HumanAskReasonTests(unittest.TestCase):
         from actx_lib import hook
 
         categories = gate_ask_categories()
-        self.assertEqual(len(categories), 46, sorted(categories))
+        self.assertEqual(len(categories), 47, sorted(categories))
         for category in sorted(categories):
             with self.subTest(category=category):
                 explanation = hook._explanation(category, "probe reason")
