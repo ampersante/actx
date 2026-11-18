@@ -29,6 +29,7 @@ AGENTS = (
     "pi",
     "dsh",
     "hermes",
+    "zcode",
 )
 
 def _tier2_flags_block():
@@ -79,6 +80,7 @@ _AGENT_PATHS = {
     "windsurf": {"instructions": "~/.codeium/windsurf/memories/global_rules.md"},
     "gemini": {"hook": "~/.gemini/config/hooks.json"},
     "copilot": {"hook": "~/.copilot/settings.json"},
+    "zcode": {"hook": "~/.zcode/cli/config.json"},
 }
 
 _ADAPTERS_DIR = os.path.join(
@@ -87,6 +89,10 @@ _ADAPTERS_DIR = os.path.join(
 
 # Devin CLI: Claude-format PreToolUse hook; its shell tool is `exec`.
 _DEVIN_MATCHER = "^exec$"
+
+# zcode: config hooks are off until `hooks.enabled` is true, and a `process`
+# handler execs its command directly (no shell), so the path is unquoted.
+_ZCODE_MATCHER = "Bash"
 
 # Codex names its shell tool differently across versions.
 _CODEX_MATCHER = "Bash|shell|bash|exec"
@@ -182,6 +188,15 @@ def _copilot_handler(abs_actx):
         "type": "command",
         "bash": shlex.quote(abs_actx) + " hook",
         "timeoutSec": 10,
+    }
+
+
+def _zcode_handler(abs_actx):
+    return {
+        "type": "process",
+        "command": abs_actx,
+        "args": ["hook"],
+        "timeoutMs": 5000,
     }
 
 
@@ -550,12 +565,13 @@ def _load_devin(path):
     return data
 
 
-def _strip_actx_handlers(pretool, matcher=None, keep=None):
+def _strip_actx_handlers(pretool, matcher=None, keep=None,
+                         predicate=_is_actx_handler):
     """Return (entries, kept): ``pretool`` without actx handlers.  An entry
     emptied by that removal is dropped; other entries and user handlers are
-    returned as they were.  ``keep`` (our exact current handler) survives
-    once, in the first entry whose matcher is ``matcher`` that holds it;
-    ``kept`` says whether it did."""
+    returned as they were.  ``predicate`` decides which handlers are actx's.
+    ``keep`` (our exact current handler) survives once, in the first entry
+    whose matcher is ``matcher`` that holds it; ``kept`` says whether it did."""
     kept = False
     entries = []
     for entry in pretool:
@@ -565,7 +581,7 @@ def _strip_actx_handlers(pretool, matcher=None, keep=None):
             continue
         remaining = []
         for handler in handlers:
-            if _is_actx_handler(handler):
+            if predicate(handler):
                 if (keep is not None and not kept and handler == keep
                         and entry.get("matcher") == matcher):
                     kept = True
@@ -652,6 +668,175 @@ def _devin_installed(path):
         )
         for entry in data.get("hooks", {}).get("PreToolUse", [])
     )
+
+
+def _is_actx_zcode_handler(handler):
+    """True only for zcode config-hook handlers actx writes or wrote: a
+    ``process`` handler whose command is an ``actx`` binary and whose first
+    arg is ``hook``, or any handler with a string command in the
+    command-string canon.  Total: never raises, an unknown shape is not ours
+    (a ``command`` list is the flat form, left untouched)."""
+    if not isinstance(handler, dict):
+        return False
+    command = handler.get("command")
+    if handler.get("type") == "process":
+        return (
+            isinstance(command, str)
+            and os.path.basename(command) == "actx"
+            and isinstance(handler.get("args"), list)
+            and handler["args"][:1] == ["hook"]
+        )
+    if isinstance(command, str):
+        return _is_actx_hook_command(command)
+    return False
+
+
+def _zcode_shape_error(data):
+    """None when actx may edit this zcode config, else the reason.  A missing
+    ``hooks`` / ``hooks.events`` / ``events.PreToolUse`` key is the normal
+    create path; a key that is present with the wrong type is refused, never
+    normalised."""
+    if not isinstance(data, dict):
+        return "the top level is not a JSON object"
+    if "hooks" not in data:
+        return None
+    hooks = data["hooks"]
+    if not isinstance(hooks, dict):
+        return '"hooks" is not an object'
+    if "enabled" in hooks and not isinstance(hooks["enabled"], bool):
+        return '"hooks.enabled" is not a boolean'
+    if "events" not in hooks:
+        return None
+    events = hooks["events"]
+    if not isinstance(events, dict):
+        return '"hooks.events" is not an object'
+    if "PreToolUse" not in events:
+        return None
+    pretool = events["PreToolUse"]
+    if not isinstance(pretool, list):
+        return '"hooks.events.PreToolUse" is not a list'
+    for entry in pretool:
+        if not isinstance(entry, dict):
+            return 'a "hooks.events.PreToolUse" entry is not an object'
+        if "hooks" in entry and not isinstance(entry["hooks"], list):
+            return 'a "hooks.events.PreToolUse" entry has "hooks" that is not a list'
+        if "matcher" in entry and not isinstance(entry["matcher"], str):
+            return 'a "hooks.events.PreToolUse" entry has "matcher" that is not a string'
+    return None
+
+
+def _load_zcode(path):
+    """The parsed zcode config ({} when the file is missing).  ValueError
+    with the reason when the file must be left untouched."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot read it as strict JSON (%s)" % exc) from exc
+    reason = _zcode_shape_error(data)
+    if reason is not None:
+        raise ValueError(reason)
+    return data
+
+
+def _install_zcode(path, abs_actx):
+    """zcode: merge our handler into the ``Bash`` entry of
+    ``hooks.events.PreToolUse`` and turn ``hooks.enabled`` on (config hooks
+    are off by default, and the flag enables every config hook in the file)."""
+    data = _load_zcode(path)
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    events = hooks.get("events")
+    if not isinstance(events, dict):
+        events = {}
+    pretool = events.get("PreToolUse")
+    pretool = list(pretool) if isinstance(pretool, list) else []
+
+    handler = _zcode_handler(abs_actx)
+    pretool, kept = _strip_actx_handlers(
+        pretool, _ZCODE_MATCHER, keep=handler, predicate=_is_actx_zcode_handler
+    )
+    if not kept:
+        for index, entry in enumerate(pretool):
+            if (isinstance(entry, dict) and entry.get("matcher") == _ZCODE_MATCHER
+                    and isinstance(entry.get("hooks"), list)):
+                pretool[index] = dict(entry, hooks=entry["hooks"] + [handler])
+                break
+        else:
+            pretool.append({"matcher": _ZCODE_MATCHER, "hooks": [handler]})
+
+    updated_hooks = dict(hooks)
+    flipped = hooks.get("enabled") is False
+    if hooks.get("enabled") is not True:
+        updated_hooks["enabled"] = True
+    updated_hooks["events"] = dict(events, PreToolUse=pretool)
+    updated = dict(data, hooks=updated_hooks)
+    if os.path.exists(path) and updated == data:
+        return False
+    _write_json(path, updated)
+    if flipped:
+        print(
+            "note: %s: hooks.enabled was false; set to true (enables every "
+            "config hook in this file)" % path,
+            file=sys.stderr,
+        )
+    return True
+
+
+def _uninstall_zcode(path):
+    """Remove actx handlers from every ``hooks.events.PreToolUse`` entry; an
+    entry, ``PreToolUse`` or ``events`` is dropped only when that removal
+    emptied it.  ``hooks`` and ``hooks.enabled`` stay (documented residue:
+    uninstall never turns the user's config hooks off)."""
+    if not os.path.exists(path):
+        return False
+    data = _load_zcode(path)
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    events = hooks.get("events")
+    if not isinstance(events, dict) or not isinstance(events.get("PreToolUse"), list):
+        return False
+    pretool, _ = _strip_actx_handlers(
+        events["PreToolUse"], predicate=_is_actx_zcode_handler
+    )
+    if pretool == events["PreToolUse"]:
+        return False
+    updated_events = dict(events)
+    if pretool:
+        updated_events["PreToolUse"] = pretool
+    else:
+        del updated_events["PreToolUse"]
+    updated_hooks = dict(hooks)
+    if updated_events:
+        updated_hooks["events"] = updated_events
+    else:
+        del updated_hooks["events"]
+    _write_json(path, dict(data, hooks=updated_hooks))
+    return True
+
+
+def _zcode_installed(path):
+    try:
+        data = _load_zcode(path)
+    except ValueError:
+        return False
+    target = abs_path()
+    for entry in data.get("hooks", {}).get("events", {}).get("PreToolUse", []):
+        if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+            continue
+        for handler in entry["hooks"]:
+            if not _is_actx_zcode_handler(handler):
+                continue
+            if handler.get("type") == "process":
+                if handler.get("command") == target and handler.get("args") == ["hook"]:
+                    return True
+            elif shlex.split(handler["command"])[0] == target:
+                return True
+    return False
 
 
 def _dsh_name_target(name, patch_path):
@@ -1323,6 +1508,8 @@ def _detect_existing(agent):
         return False
     if agent in ("claude", "codex", "gemini", "copilot", "devin"):
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["hook"])))
+    if agent == "zcode":
+        return os.path.isdir(os.path.expanduser(os.path.dirname(paths["hook"])))
     if agent == "opencode":
         return os.path.exists(os.path.expanduser(os.path.dirname(paths["plugin"])))
     if agent == "pi":
@@ -1426,6 +1613,8 @@ def _installed(agent):
         return _hermes_installed()
     if agent == "devin":
         return _devin_installed(os.path.expanduser(paths["hook"]))
+    if agent == "zcode":
+        return _zcode_installed(os.path.expanduser(paths["hook"]))
     if agent in ("grok", "cline", "windsurf"):
         text = _read_instructions(os.path.expanduser(paths["instructions"]))
         return _contains_section(text)
@@ -1513,6 +1702,21 @@ def install(agent, abs_actx):
         path = os.path.expanduser(paths["instructions"])
         _install_instructions(path)
         return 0
+    if agent == "zcode":
+        path = os.path.expanduser(paths["hook"])
+        try:
+            _install_zcode(path, abs_actx)
+        except ValueError as exc:
+            entry = {"matcher": _ZCODE_MATCHER,
+                     "hooks": [_zcode_handler(abs_actx)]}
+            print(
+                "cannot install: %s: %s. The file was left unchanged. Add this "
+                'entry to the "hooks.events.PreToolUse" list manually:\n%s'
+                % (path, exc, json.dumps(entry, indent=2)),
+                file=sys.stderr,
+            )
+            return 1
+        return 0
     print("unknown agent", file=sys.stderr)
     return 1
 
@@ -1585,6 +1789,21 @@ def uninstall(agent, abs_actx):
         return 0
     if agent in ("grok", "cline", "windsurf"):
         _uninstall_instructions(os.path.expanduser(paths["instructions"]))
+        return 0
+    if agent == "zcode":
+        path = os.path.expanduser(paths["hook"])
+        try:
+            _uninstall_zcode(path)
+        except ValueError as exc:
+            print(
+                "cannot uninstall: %s: %s. The file may contain comments or an "
+                "unexpected shape; it was left unchanged. Remove the actx "
+                "handler (a \"process\" handler running the actx binary with "
+                "the \"hook\" argument) from \"hooks.events.PreToolUse\" "
+                "manually." % (path, exc),
+                file=sys.stderr,
+            )
+            return 1
         return 0
     print("unknown agent", file=sys.stderr)
     return 1

@@ -400,6 +400,7 @@ class InitTests(unittest.TestCase):
                 os.path.join(home, ".pi", "agent", "extensions", "actx.ts"),
                 os.path.join(home, ".dsh", "actx", "actx-dsh.mjs"),
                 os.path.join(home, ".dsh", "cordis.patch.yml"),
+                os.path.join(home, ".zcode", "cli", "config.json"),
             ):
                 self.assertTrue(os.path.exists(path), path)
 
@@ -415,6 +416,7 @@ class InitTests(unittest.TestCase):
                 "devin",
                 "pi",
                 "dsh",
+                "zcode",
             ):
                 self.assertIn("%s: installed" % agent, p.stdout)
             self.assertIn("hermes: not installed", p.stdout)
@@ -585,6 +587,31 @@ DEVIN_OWNER_SHAPED = {
 USER_BASH_ENTRY = {"matcher": "Bash",
                    "hooks": [{"type": "command", "command": "echo bash-user"}]}
 USER_EXEC_HANDLER = {"type": "command", "command": "echo exec-user", "timeout": 5}
+# TK-53: zcode config hooks live in ~/.zcode/cli/config.json and stay off
+# until `hooks.enabled` is true.  A `process` handler runs its command
+# directly (no shell), so the binary path carries no quoting.
+ZCODE_HANDLER = {"type": "process", "command": ACTX, "args": ["hook"],
+                 "timeoutMs": 5000}
+ZCODE_ENTRY = {"matcher": "Bash", "hooks": [ZCODE_HANDLER]}
+# Synthetic config with the live key set (hooks/mcp/plugins) and the kit's
+# event shape; actx writes a separate Bash entry and leaves all of it alone.
+ZCODE_KIT_HANDLER = {"type": "command", "command": "python3 /h/hooks/k.py",
+                     "timeoutMs": 20000}
+ZCODE_OWNER_SHAPED = {
+    "mcp": {"servers": {}},
+    "plugins": ["x"],
+    "hooks": {
+        "enabled": True,
+        "events": {
+            "SessionStart": [{"hooks": [ZCODE_KIT_HANDLER]}],
+            "PreToolUse": [
+                {"matcher": "^(Write|Edit|ApplyPatch|NotebookEdit)$",
+                 "hooks": [ZCODE_KIT_HANDLER]},
+            ],
+            "Stop": [{"hooks": [ZCODE_KIT_HANDLER]}],
+        },
+    },
+}
 # TK-72: the one patch item actx writes into ~/.dsh/cordis.patch.yml (JSON,
 # which dsh reads as YAML).  The home patch is a list of patch OPERATIONS: a
 # new entry goes in through `insert`, while a bare `{"id": ...}` item would
@@ -891,6 +918,266 @@ class AdapterInitTests(unittest.TestCase):
             self.assertIn("devin: installed",
                           self.init(home, "--show", extra_env=env).stdout)
 
+    # --- zcode ------------------------------------------------------------
+    def zcode_path(self, home):
+        return os.path.join(home, ".zcode", "cli", "config.json")
+
+    def write_zcode(self, home, text, mode=0o600):
+        path = self.zcode_path(home)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(path, mode)
+        return path
+
+    def test_zcode_missing_file_created_0600(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.init(home, "--agent", "zcode")
+            path = self.zcode_path(home)
+            self.assertEqual(
+                self.load(path),
+                {"hooks": {"enabled": True, "events": {"PreToolUse": [ZCODE_ENTRY]}}})
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertIn("zcode: installed", self.init(home, "--show").stdout)
+
+    def test_zcode_empty_config_keeps_enabled_after_uninstall(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_zcode(home, "{}\n")
+            self.init(home, "--agent", "zcode")
+            self.assertEqual(
+                self.load(path),
+                {"hooks": {"enabled": True, "events": {"PreToolUse": [ZCODE_ENTRY]}}})
+            self.init(home, "--agent", "zcode", "--uninstall")
+            self.assertEqual(self.load(path), {"hooks": {"enabled": True}})
+            with open(path, "rb") as handle:
+                first = handle.read()
+            self.init(home, "--agent", "zcode", "--uninstall")
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), first)
+            self.assertIn("zcode: not installed", self.init(home, "--show").stdout)
+
+    def test_zcode_owner_shaped_config_round_trip(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_zcode(home, json.dumps(ZCODE_OWNER_SHAPED, indent=2))
+            self.init(home, "--agent", "zcode")
+            data = self.load(path)
+            # Our entry is new: the kit's PreToolUse entry keeps its matcher
+            # and handler, and every other key, event and entry is untouched.
+            self.assertEqual(data["mcp"], ZCODE_OWNER_SHAPED["mcp"])
+            self.assertEqual(data["plugins"], ZCODE_OWNER_SHAPED["plugins"])
+            self.assertTrue(data["hooks"]["enabled"])
+            self.assertEqual(data["hooks"]["events"]["SessionStart"],
+                             ZCODE_OWNER_SHAPED["hooks"]["events"]["SessionStart"])
+            self.assertEqual(data["hooks"]["events"]["Stop"],
+                             ZCODE_OWNER_SHAPED["hooks"]["events"]["Stop"])
+            self.assertEqual(data["hooks"]["events"]["PreToolUse"], [
+                ZCODE_OWNER_SHAPED["hooks"]["events"]["PreToolUse"][0],
+                ZCODE_ENTRY,
+            ])
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+            with open(path, "rb") as handle:
+                first = handle.read()
+            os.utime(path, (1, 1))
+            self.init(home, "--agent", "zcode")
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), first)
+            self.assertEqual(os.stat(path).st_mtime, 1)  # not rewritten
+            self.assertIn("zcode: installed", self.init(home, "--show").stdout)
+
+            self.init(home, "--agent", "zcode", "--uninstall")
+            self.assertEqual(self.load(path), ZCODE_OWNER_SHAPED)
+            self.assertIn("zcode: not installed", self.init(home, "--show").stdout)
+
+    def test_zcode_user_bash_entry_untouched_ours_appended(self):
+        foreign = {"type": "process", "command": "/usr/bin/some",
+                   "args": ["run"], "timeoutMs": 1000}
+        original = {
+            "hooks": {
+                "enabled": True,
+                "events": {
+                    "PreToolUse": [
+                        {"matcher": "Bash", "hooks": [ZCODE_KIT_HANDLER, foreign]},
+                    ],
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_zcode(home, json.dumps(original))
+            for _ in range(2):
+                self.init(home, "--agent", "zcode")
+            self.assertEqual(self.load(path), {
+                "hooks": {
+                    "enabled": True,
+                    "events": {
+                        "PreToolUse": [
+                            {"matcher": "Bash",
+                             "hooks": [ZCODE_KIT_HANDLER, foreign, ZCODE_HANDLER]},
+                        ],
+                    },
+                },
+            })
+            self.init(home, "--agent", "zcode", "--uninstall")
+            self.assertEqual(self.load(path), original)
+
+    def test_zcode_unrecognized_forms_survive_install_and_uninstall(self):
+        original = {
+            "hooks": {
+                "enabled": True,
+                "events": {
+                    "PreToolUse": [
+                        {"command": ["/old/actx", "hook"], "timeout": 15},
+                        {"type": "process", "command": ["/old/actx", "hook"]},
+                        {"matcher": "Write",
+                         "hooks": [{"type": "script", "command": "x"},
+                                   {"command": 42}]},
+                    ],
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_zcode(home, json.dumps(original))
+            self.init(home, "--agent", "zcode")
+            data = self.load(path)
+            self.assertEqual(data["hooks"]["events"]["PreToolUse"][:3],
+                             original["hooks"]["events"]["PreToolUse"])
+            self.assertEqual(data["hooks"]["events"]["PreToolUse"][3], ZCODE_ENTRY)
+            self.init(home, "--agent", "zcode", "--uninstall")
+            self.assertEqual(self.load(path), original)
+
+    def test_zcode_stale_actx_handlers_replaced(self):
+        stale_process = {"type": "process", "command": "/old/bin/actx",
+                         "args": ["hook"], "timeoutMs": 5000}
+        stale_command = {"command": "/old/bin/actx hook", "timeout": 10}
+        original = {"hooks": {"enabled": True, "events": {"PreToolUse": [
+            {"matcher": "Bash",
+             "hooks": [ZCODE_KIT_HANDLER, stale_process, stale_command]},
+        ]}}}
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_zcode(home, json.dumps(original))
+            self.init(home, "--agent", "zcode")
+            self.assertEqual(self.load(path), {"hooks": {"enabled": True, "events": {
+                "PreToolUse": [
+                    {"matcher": "Bash", "hooks": [ZCODE_KIT_HANDLER, ZCODE_HANDLER]},
+                ],
+            }}})
+            self.assertIn("zcode: installed", self.init(home, "--show").stdout)
+
+    def test_zcode_keeps_lookalike_command_handlers(self):
+        lookalikes = [{"type": "command", "command": command}
+                      for command in ("my-actx hook", "actx hook && rm x",
+                                      "echo actx hook")]
+        original = {"hooks": {"enabled": True, "events": {
+            "PreToolUse": [{"matcher": "Bash", "hooks": list(lookalikes)}]}}}
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_zcode(home, json.dumps(original))
+            self.init(home, "--agent", "zcode")
+            self.init(home, "--agent", "zcode", "--uninstall")
+            self.assertEqual(self.load(path), original)
+
+    def test_zcode_refuses_malformed_shapes_byte_identical(self):
+        cases = {
+            "comment": '{\n  // comment\n  "a": 1\n}\n',
+            "top_level_list": "[]\n",
+            "hooks_not_dict": '{"hooks": []}\n',
+            "hooks_null": '{"hooks": null}\n',
+            "events_not_dict": '{"hooks": {"events": []}}\n',
+            "pretool_not_list": '{"hooks": {"events": {"PreToolUse": {}}}}\n',
+            "entry_not_dict": '{"hooks": {"events": {"PreToolUse": ["x"]}}}\n',
+            "entry_hooks_not_list": (
+                '{"hooks": {"events": {"PreToolUse": '
+                '[{"matcher": "Bash", "hooks": "x"}]}}}\n'),
+            "matcher_not_str": (
+                '{"hooks": {"events": {"PreToolUse": [{"matcher": 1}]}}}\n'),
+            "enabled_not_bool": '{"hooks": {"enabled": "true"}}\n',
+        }
+        for name, text in cases.items():
+            for args in (["--agent", "zcode"], ["--agent", "zcode", "--uninstall"]):
+                with self.subTest(case=name, args=args):
+                    with tempfile.TemporaryDirectory() as home:
+                        path = self.write_zcode(home, text)
+                        p = self.run_actx(["init"] + args, home)
+                        self.assertEqual(p.returncode, 1, p.stdout)
+                        self.assertIn(path, p.stderr)
+                        if "--uninstall" not in args:
+                            self.assertIn('"hooks.events.PreToolUse"', p.stderr)
+                            self.assertIn('"matcher": "Bash"', p.stderr)
+                        else:
+                            self.assertIn("Remove the actx handler", p.stderr)
+                        with open(path, encoding="utf-8") as handle:
+                            self.assertEqual(handle.read(), text)
+
+    def test_zcode_enabled_false_is_switched_on_with_a_note(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_zcode(home, '{"hooks": {"enabled": false}}\n')
+            p = self.run_actx(["init", "--agent", "zcode"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn(
+                "note: %s: hooks.enabled was false; set to true (enables every "
+                "config hook in this file)" % path, p.stderr)
+            self.assertEqual(
+                self.load(path),
+                {"hooks": {"enabled": True, "events": {"PreToolUse": [ZCODE_ENTRY]}}})
+            p = self.run_actx(["init", "--agent", "zcode"], home)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertNotIn("hooks.enabled was false", p.stderr)
+
+    def test_zcode_show_recognizes_only_the_current_binary(self):
+        with tempfile.TemporaryDirectory() as home:
+            for handler in (
+                {"type": "process", "command": "/old/bin/actx",
+                 "args": ["hook"], "timeoutMs": 5000},
+                {"command": "/old/bin/actx hook", "timeout": 10},
+            ):
+                with self.subTest(handler=handler):
+                    path = self.write_zcode(home, json.dumps({"hooks": {
+                        "enabled": True,
+                        "events": {"PreToolUse": [{"matcher": "Bash",
+                                                   "hooks": [handler]}]}}}))
+                    self.assertIn("zcode: not installed",
+                                  self.init(home, "--show").stdout)
+                    os.unlink(path)
+            self.write_zcode(home, json.dumps({"hooks": {
+                "enabled": True,
+                "events": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                    {"command": shlex.quote(ACTX) + " hook", "timeout": 10}]}]}}}))
+            self.assertIn("zcode: installed", self.init(home, "--show").stdout)
+
+    def test_zcode_autodetected_by_cli_dir(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".zcode", "cli"))
+            self.init(home)
+            self.assertEqual(
+                self.load(self.zcode_path(home)),
+                {"hooks": {"enabled": True, "events": {"PreToolUse": [ZCODE_ENTRY]}}})
+        with tempfile.TemporaryDirectory() as home:
+            self.init(home)
+            self.assertFalse(os.path.exists(os.path.join(home, ".zcode")))
+            self.assertIn("zcode: not installed",
+                          self.init(home, "--show").stdout)
+
+    def test_zcode_hook_payload_end_to_end(self):
+        def run_hook(command):
+            payload = json.dumps({"tool_name": "Bash",
+                                  "tool_input": {"command": command}})
+            return subprocess.run([ACTX, "hook", "--payload", payload],
+                                  capture_output=True, text=True)
+
+        p = run_hook("git status")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        output = json.loads(p.stdout)["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "allow")
+        self.assertEqual(output["updatedInput"], {"command": "actx git status"})
+
+        p = run_hook("kubectl exec pod -- sh")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        output = json.loads(p.stdout)["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "ask")
+
+        p = run_hook("git push origin feature")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, "")
+
     # --- dsh --------------------------------------------------------------
     def dsh_paths(self, home):
         return (
@@ -1120,6 +1407,7 @@ class AdapterInitTests(unittest.TestCase):
             self.assertRegex(p.stdout, r"\bpi\b")
             self.assertRegex(p.stdout, r"\bdsh\b")
             self.assertRegex(p.stdout, r"\bhermes\b")
+            self.assertRegex(p.stdout, r"\bzcode\b")
 
 
 class HermesInstallerTests(unittest.TestCase):
