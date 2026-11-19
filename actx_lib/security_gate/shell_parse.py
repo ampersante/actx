@@ -14,7 +14,16 @@ what the gate must evaluate in addition to its line-based path:
   them (substitution and process-substitution bodies, the alternative
   `$( (...) )` reading of arithmetic, a here-string fed to a shell);
 * heredoc_body_lines - every heredoc body line, stripped and without
-  backslashes, so the caller can keep its line-based verdict for them.
+  backslashes, so the caller can keep its line-based verdict for them;
+* heredoc_quoted_lines - the same lines of heredocs whose delimiter was
+  quoted, i.e. text the shell never expands: a caller may treat a failure
+  on such a line as data, not as a command (TK-74 п.6(а));
+* heredoc_unquoted_lines - the same lines of heredocs whose delimiter was
+  unquoted (the shell expands `$` and backticks in them); a line that lies
+  in both kinds keeps the caller's line-based verdict (TK-74 п.6(а));
+* function_names - the decoded names of the functions the command declares
+  (`name ()` and `function name` forms, however the name is spelled), so a
+  caller can tell a redefined head from the stock one (TK-74 п.6(а)).
 
 Anything outside the closed grammar below yields None; the function never
 raises. The parser only ADDS evaluations: it never removes text from the
@@ -40,8 +49,23 @@ Unit = namedtuple(
     defaults=(None, False, ()),
 )
 Nested = namedtuple("Nested", ("text", "kind", "pos"))
-# units: list[Unit]; nested: list[Nested]; heredoc_body_lines: frozenset[str].
-ParsedCommand = namedtuple("ParsedCommand", ("units", "nested", "heredoc_body_lines", "canonical"))
+# units: list[Unit]; nested: list[Nested]; the heredoc sets and
+# function_names: frozenset[str] (heredoc_quoted_lines: bodies of
+# quoted-delimiters, which the shell never expands; heredoc_unquoted_lines:
+# bodies the shell expands; function_names: declared names, TK-74 п.6(а)).
+ParsedCommand = namedtuple(
+    "ParsedCommand",
+    (
+        "units",
+        "nested",
+        "heredoc_body_lines",
+        "canonical",
+        "heredoc_quoted_lines",
+        "heredoc_unquoted_lines",
+        "function_names",
+    ),
+    defaults=(frozenset(), frozenset(), frozenset()),
+)
 
 
 _MAX_DEPTH = 32
@@ -171,11 +195,17 @@ class _Word:
 
 
 class _Ctx:
-    __slots__ = ("nested", "heredoc_lines", "variants", "no_alt", "steps")
+    __slots__ = (
+        "nested", "heredoc_lines", "heredoc_quoted_lines", "heredoc_unquoted_lines",
+        "function_names", "variants", "no_alt", "steps",
+    )
 
     def __init__(self, no_alt=False):
         self.nested = []
         self.heredoc_lines = set()
+        self.heredoc_quoted_lines = set()
+        self.heredoc_unquoted_lines = set()
+        self.function_names = set()
         self.variants = 0
         self.no_alt = no_alt
         self.steps = 0
@@ -349,6 +379,9 @@ class _Parser:
                     if j < n and s[j] == ")":
                         # Function definition `name () body`: the body is
                         # parsed as commands; the name is not a command.
+                        # TK-74 п.6(а): record the decoded name; the gate
+                        # must not take a redefined head for the stock one.
+                        self.ctx.function_names.add(_value(cur[0][1].pieces))
                         cur = []
                         self.i = j + 1
                         self._blanks_nl()
@@ -532,7 +565,10 @@ class _Parser:
         s, n = self.s, self.n
         self._blanks()
         if self.i < n and s[self.i] not in "{(\n;&|<>":
-            self._word("n")
+            w = self._word("n")
+            # TK-74 п.6(а): `function name {` declares a function; its
+            # decoded name joins the command's set.
+            self.ctx.function_names.add(_value(w.pieces))
             self._blanks()
         if self.i < n and s[self.i] == "(":
             j = self.i + 1
@@ -629,6 +665,10 @@ class _Parser:
                 stripped = line.strip().replace("\\", "")
                 if stripped:
                     self.ctx.heredoc_lines.add(stripped)
+                    if quoted:
+                        self.ctx.heredoc_quoted_lines.add(stripped)
+                    else:
+                        self.ctx.heredoc_unquoted_lines.add(stripped)
                 self.i = j + 1
             if not quoted and body_end > body_start:
                 body = s[body_start:body_end]
@@ -679,6 +719,8 @@ class _Parser:
                     continue
                 self.ctx.nested.extend(ctx.nested)
                 self.ctx.heredoc_lines |= ctx.heredoc_lines
+                self.ctx.heredoc_quoted_lines |= ctx.heredoc_quoted_lines
+                self.ctx.heredoc_unquoted_lines |= ctx.heredoc_unquoted_lines
                 k = p.i
                 continue
             k += 1
@@ -1349,7 +1391,15 @@ def parse_command(text):
                 canonical.append(";" if sep in (None, "\n") else sep)
             canonical.append(t)
         nested = sorted(ctx.nested, key=lambda nd: nd.pos)
-        return ParsedCommand(units, nested, frozenset(ctx.heredoc_lines), " ".join(canonical))
+        return ParsedCommand(
+            units,
+            nested,
+            frozenset(ctx.heredoc_lines),
+            " ".join(canonical),
+            frozenset(ctx.heredoc_quoted_lines),
+            frozenset(ctx.heredoc_unquoted_lines),
+            frozenset(ctx.function_names),
+        )
     except Exception:
         return None
 

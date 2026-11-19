@@ -930,7 +930,10 @@ class InterfaceTest(unittest.TestCase):
         self.assertEqual(list(Nested._fields), ["text", "kind", "pos"])
         self.assertEqual(
             list(ParsedCommand._fields),
-            ["units", "nested", "heredoc_body_lines", "canonical"],
+            [
+                "units", "nested", "heredoc_body_lines", "canonical",
+                "heredoc_quoted_lines", "heredoc_unquoted_lines", "function_names",
+            ],
         )
         u = parse_command("echo a").units[0]
         with self.assertRaises(AttributeError):

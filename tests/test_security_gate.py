@@ -2190,7 +2190,9 @@ class ShellStructureTableTests(unittest.TestCase):
         ('bash <<\'EOF\'\necho don\'t\ngit push --force origin "$BR" # it\'s; echo b\nEOF', 'gate', 'ask T6_GATE_ERROR'),
         ('bash <<\'EOF\'\nrm -rf "$HOME/x" \\; # it\'s\nEOF', 'gate', 'ask T6_GATE_ERROR'),
         ("cat <<'EOF'\nit's fine\nEOF", 'allow', 'allow'),
-        ("cat <<'EOF'\ndon't expand $HOME\nEOF", 'gate', 'ask T6_GATE_ERROR'),
+        # TK-74 п.6(а): the quoted heredoc body feeds cat, a data head; its
+        # shlex failure is not a gate error (owner decision, data-head class).
+        ("cat <<'EOF'\ndon't expand $HOME\nEOF", 'gate', 'allow'),
         ('cat <<EOF\n$HOME and `date`\nEOF', 'allow', 'allow'),
         ('cat <<-EOF\n\tindented\n\tEOF', 'allow', 'allow'),
         ("cat <<'A' <<'B'\none\nA\ntwo\nB", 'allow', 'allow'),
@@ -2199,6 +2201,214 @@ class ShellStructureTableTests(unittest.TestCase):
         ("cat > notes.md <<'EOF'\nhello\nEOF", 'deny', 'deny T7'),
         ("cat > main.py <<'EOF'\nprint(1)\nEOF", 'deny', 'deny T7'),
         ('cat <<EOF | sh\nls\nEOF', 'deny', 'deny T3'),
+        # TK-74 п.6(а): a shlex failure on a line of a quoted heredoc body
+        # that only feeds a data-sink head (an inline interpreter or cat) is
+        # data, not a gate error; any other head, an unquoted delimiter, a
+        # pipeline or a unit that routes the body keeps the ask.
+        (
+            "python3 - <<'E'\ns=open(p).read()\ns=s.replace(a,'''    def m13(path, d):\nopen(p,'w').write(s)\nE",
+            'gate', 'allow',
+        ),
+        ("python3 - <<'E'\n. ./env $x # it's\nE", 'gate', 'allow'),
+        ("env VAR=1 python3 - <<'E'\n. ./env $x # it's\nE", 'gate', 'allow'),
+        ("bash <<'EOF'\ndon't expand $HOME\nEOF", 'gate', 'ask T6_GATE_ERROR'),
+        (
+            "make -f - <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "timeout -s KILL 5 sh <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            'env -S "bash -s" <<\'E\'\n'
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "$X - <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "cat <<E\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "python3 - <<'A' && bash <<'B'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'A\nx\nB',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "cat <<< x <<'E'\n"
+            ". ./env $x # it's\n"
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "cat >(sh) <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "cat > >(sh) <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "cat <<'E' | xargs sh -c\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "cat 2>> x <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        # F7: a head declared in the same command or spelled as a path
+        # (`cat() { sh; }`, `./cat`) may run the body, so no exemption.
+        (
+            "cat() { sh; }; cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "function cat { sh; }; cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "function cat() { sh; }; cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            'function c""at { sh; }; cat <<\'E\'\n'
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "./cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "~/bin/cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        # F21: any declaration can shadow any name (`nice() { read w; }`,
+        # not only a data head's), so its presence alone keeps the ask.
+        (
+            "nice() { read w; }; nice cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "function deploy { :; }; python3 - <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        # F17: a wrapper reached by a path (`./env`, `~/bin/nice`) may be any
+        # program, so the head it resolves to is not trusted.
+        (
+            "./env cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "/usr/bin/env cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "~/bin/nice -n 10 python3 - <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        # F8/F18/F22: a group redirect (`} > /dev/null`, `} &> log`,
+        # `} > >(wc -c)`) routes the command's output, so no exemption.
+        (
+            "{ cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E\n'
+            '} > >(wc -c)',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "{ cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E\n'
+            '} > /dev/null',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "{ cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E\n'
+            '} > out.log',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "{ cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E\n'
+            '} &> /dev/null',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        (
+            "{ cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E\n'
+            '} &>> log',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        # F20: writing the group's output to a source file is T7's deny,
+        # which fires before the gate-error path (stronger than the ask).
+        (
+            "{ cat <<'E'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E\n'
+            '} > x.sh',
+            'deny', 'deny T7_ACTION_SPACE',
+        ),
+        # F9/F13: the same line lies in an unquoted body too, so its shlex
+        # failure is not data of a quoted body only; the ask stays.
+        (
+            "cat <<E\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'E\n'
+            "cat <<'F'\n"
+            'git push --force origin "$BR"  # it\'s\n'
+            'F',
+            'gate', 'ask T6_GATE_ERROR',
+        ),
+        # a data heredoc whose line tokenizes asks nothing, before and after
+        ("python3 - <<'E'\n. ./env\nE", 'allow', 'allow'),
         # here-strings and process substitution
         ('bash <<< "rm -rf /"', 'allow', 'deny T4'),
         ("bash <<< 'ls'", 'allow', 'allow'),
@@ -2759,6 +2969,15 @@ class ShellStructureTableTests(unittest.TestCase):
         self.assertEqual(self._verdict("gradlew 'assembleRelease'"), ("allow", None))
         self.assertEqual(self._verdict("rm -rf '/awk'")[0], "deny")
         self.assertEqual(self._verdict('rm -rf "$HOME/proj/build"; echo $(ls)')[0], "deny")
+
+    def test_heredoc_marker_distinguishes_here_string(self):
+        # TK-74 п.6(а), F6: the heredoc marker matches `<<`/`<<-` only, so a
+        # here-string is not taken for a heredoc redirection; and the `<<<`
+        # token of the same unit defeats the data-only predicate (rule iii):
+        # the ask of the body's shlex failure stays.
+        tokens = ["cat", "<<<", "x", "<<", "E"]
+        self.assertEqual([t for t in tokens if engine._RE_HEREDOC_TOKEN.fullmatch(t)], ["<<"])
+        self.assertEqual(self._verdict("cat <<< x <<'E'\n. ./env $x # it's\nE"), ("ask", "T6_GATE_ERROR"))
 
 
 if __name__ == "__main__":

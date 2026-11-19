@@ -517,18 +517,94 @@ def _needs_parse(command: str) -> bool:
 _RE_PLAIN_QUOTED = re.compile(r"(?<!\S)([\'\"])([A-Za-z0-9_./=:,@%+-]+)\1(?!\S)")
 
 
-def _heredoc_covers(chunk: str, parsed) -> bool:
-    """True when the chunk is a piece of a heredoc body line."""
+# TK-74 п.6(а): heads that read a heredoc body as data, not as a command line
+# (an inline interpreter or cat). Only when every unit with a heredoc feeds
+# one of them does a quoted body line's shlex failure drop the gate-error ask;
+# any other head keeps today's ask, so the list grows only by the owner's word.
+_DATA_SINK_HEADS = frozenset({
+    "python3", "python", "pypy", "pypy3", "node", "deno", "bun", "ruby",
+    "perl", "php", "lua", "luajit", "Rscript", "cat",
+})
+# A heredoc redirection as a whole token of a unit's canonical text (`<<`,
+# `<<-`, with an optional fd prefix); a here-string `<<<` does not match.
+_RE_HEREDOC_TOKEN = re.compile(r"\d*(<<|<<-)$")
+
+
+def _heredoc_covers(chunk: str, parsed, which: str = "body") -> bool:
+    """True when the chunk is a piece of a heredoc body line; which selects
+    the delimiter kind: "body" (any body), "quoted" (the shell never expands
+    the text) or "unquoted" (the shell expands it, TK-74 п.6(а))."""
+    lines = {
+        "body": parsed.heredoc_body_lines,
+        "quoted": parsed.heredoc_quoted_lines,
+        "unquoted": parsed.heredoc_unquoted_lines,
+    }[which]
     needle = chunk.strip().replace("\\", "")
-    return any(needle in line for line in parsed.heredoc_body_lines)
+    return any(needle in line for line in lines)
 
 
-def _run_chunk(chunk, exempt, decisions, parsed=None, broad=False, done=None, dropped=None):
+def _heredoc_data_only(parsed) -> bool:
+    """TK-74 п.6(а): True when every unit with a heredoc redirection feeds the
+    body to a known data-sink head and routes it nowhere else: no function
+    declared in the command (a head may be redefined), no pipeline, no `>`
+    or non-heredoc `<` token in such a unit (`cat 2>> x <<'E'`,
+    `cat >(sh) <<'E'`, `cat <<'E' | xargs sh -c`), no wrapper path before
+    the head (`./env cat`, `~/bin/nice python3`), and no unit without a
+    command word or led by an operator token (`} > /dev/null`, `} &> log`).
+    Otherwise the body may run or go to a command, so the caller keeps the
+    gate-error ask."""
+    # F21: any declaration can redefine any name (`nice() { read w; }`, a
+    # wrapper's or a data sink's), so the whole command leaves the exemption.
+    if parsed.function_names:
+        return False
+    if "|" in parsed.canonical:
+        return False
+    found = False
+    for unit in parsed.units:
+        try:
+            tokens = shlex.split(unit.text)
+        except ValueError:
+            return False
+        # F8: `>(...)` hands the text to a program whatever the head is.
+        if any(">(" in t for t in tokens):
+            return False
+        head_at = _head_index(tokens)
+        # F18/F22: no command word (`} > /dev/null`), or an operator token in
+        # the head's place (`} &> log`, `} > >(wc)`): a redirect of a
+        # compound command, not a data-sink unit.
+        if head_at is None or any(c in tokens[head_at] for c in "<>&"):
+            return False
+        if not any(_RE_HEREDOC_TOKEN.fullmatch(t) for t in tokens):
+            continue
+        found = True
+        if unit.dyn_head:
+            return False
+        head = tokens[head_at]
+        # F7/F17: only a bare name of the list reads the body as data; a path
+        # (`./cat`, `~/bin/cat`) or a wrapper reachable only by path
+        # (`./env cat`) may be any program.
+        if "/" in head or head not in _DATA_SINK_HEADS:
+            return False
+        if any("/" in t for t in tokens[:head_at]):
+            return False
+        # F2/F6/F8: `>` or a non-heredoc `<` token (`2>>`, `<<<`) sends the
+        # text or its output elsewhere.
+        if any(">" in t or ("<" in t and not _RE_HEREDOC_TOKEN.fullmatch(t)) for t in tokens):
+            return False
+    return found
+
+
+def _run_chunk(
+    chunk, exempt, decisions, parsed=None, broad=False, done=None, dropped=None, heredoc_memo=None
+):
     """Evaluate one chunk (a line-based chunk or a parser unit): returns a
     deny decision or None and appends an ask to decisions. A failure in the
     chunk never discards the rest (broad: any exception, for parser units).
     done: collects (chunk, exempt-or-not) of evaluations that completed, so
-    a parser unit equal to an already judged chunk is not judged twice."""
+    a parser unit equal to an already judged chunk is not judged twice.
+    heredoc_memo: one-cell memo of one command (TK-74 п.6(а)), so the
+    heredoc data-sink predicate runs at most once per command and only after
+    an irreversible ask; a call without it computes the predicate directly."""
     try:
         dec = _evaluate_chunk(chunk, exempt)
         if done is not None:
@@ -564,7 +640,33 @@ def _run_chunk(chunk, exempt, decisions, parsed=None, broad=False, done=None, dr
                 reason=f"actx security gate internal error on irreversible command: {exc}",
                 category="T6_GATE_ERROR",
             )
-            if parsed is None or _heredoc_covers(chunk, parsed):
+            # TK-74 п.6(а): a quote-bearing line of a quoted heredoc body that
+            # only feeds a data-sink head (python3 - <<'E', cat <<'E') is data,
+            # not an irreversible command fragment; the ask drops like a
+            # multi-line quote fragment's and returns if the structural
+            # evaluation itself fails (the dropped list, R0). The predicate is
+            # lazy and computed once per command (F14/F16): a canonical text
+            # without `<<` (nested heredocs carry `:)` there) is not a heredoc
+            # command, and a line that also lies in an unquoted body keeps the
+            # ask (F13).
+            data_only = False
+            if parsed is not None:
+                if heredoc_memo is None:
+                    data_only = "<<" in parsed.canonical and _heredoc_data_only(parsed)
+                else:
+                    if "data" not in heredoc_memo:
+                        heredoc_memo["data"] = "<<" in parsed.canonical and _heredoc_data_only(parsed)
+                    data_only = heredoc_memo["data"]
+            if (
+                data_only
+                and _heredoc_covers(chunk, parsed, which="quoted")
+                and not _heredoc_covers(chunk, parsed, which="unquoted")
+            ):
+                if dropped is not None:
+                    dropped.append(ask)
+                else:
+                    decisions.append(ask)
+            elif parsed is None or _heredoc_covers(chunk, parsed):
                 decisions.append(ask)
             elif dropped is not None:
                 dropped.append(ask)
@@ -884,12 +986,18 @@ def evaluate_security(
         decisions = []
         done = set()
         dropped = []
+        # TK-74 п.6(а): one cell per command for the heredoc data-sink
+        # predicate, filled on the first irreversible ask (F14).
+        heredoc_memo = {}
         seen = _Seen() if _seen is None else _seen
         for chunk in chunks:
             chunk = chunk.strip()
             if not chunk:
                 continue
-            dec = _run_chunk(chunk, exempt, decisions, parsed, done=done, dropped=dropped)
+            dec = _run_chunk(
+                chunk, exempt, decisions, parsed, done=done, dropped=dropped,
+                heredoc_memo=heredoc_memo,
+            )
             if dec:
                 return dec
 

@@ -1028,6 +1028,8 @@ class AdapterInitTests(unittest.TestCase):
                     "PreToolUse": [
                         {"command": ["/old/actx", "hook"], "timeout": 15},
                         {"type": "process", "command": ["/old/actx", "hook"]},
+                        {"type": "process", "command": "/old/bin/actx hook",
+                         "timeoutMs": 5000},
                         {"matcher": "Write",
                          "hooks": [{"type": "script", "command": "x"},
                                    {"command": 42}]},
@@ -1039,9 +1041,9 @@ class AdapterInitTests(unittest.TestCase):
             path = self.write_zcode(home, json.dumps(original))
             self.init(home, "--agent", "zcode")
             data = self.load(path)
-            self.assertEqual(data["hooks"]["events"]["PreToolUse"][:3],
+            self.assertEqual(data["hooks"]["events"]["PreToolUse"][:4],
                              original["hooks"]["events"]["PreToolUse"])
-            self.assertEqual(data["hooks"]["events"]["PreToolUse"][3], ZCODE_ENTRY)
+            self.assertEqual(data["hooks"]["events"]["PreToolUse"][4], ZCODE_ENTRY)
             self.init(home, "--agent", "zcode", "--uninstall")
             self.assertEqual(self.load(path), original)
 
@@ -1106,6 +1108,19 @@ class AdapterInitTests(unittest.TestCase):
                             self.assertIn("Remove the actx handler", p.stderr)
                         with open(path, encoding="utf-8") as handle:
                             self.assertEqual(handle.read(), text)
+
+    def test_zcode_unreadable_config_is_a_clean_error(self):
+        text = '{"hooks": {"enabled": true}}\n'
+        with tempfile.TemporaryDirectory() as home:
+            path = self.write_zcode(home, text)
+            os.chmod(path, 0)
+            p = self.run_actx(["init", "--agent", "zcode"], home)
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+            self.assertNotIn("Traceback", p.stderr)
+            self.assertIn(path, p.stderr)
+            os.chmod(path, 0o644)
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), text.encode())
 
     def test_zcode_enabled_false_is_switched_on_with_a_note(self):
         with tempfile.TemporaryDirectory() as home:
@@ -1173,6 +1188,13 @@ class AdapterInitTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         output = json.loads(p.stdout)["hookSpecificOutput"]
         self.assertEqual(output["permissionDecision"], "ask")
+
+        p = run_hook("echo x > actx_lib/hook.py")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        output = json.loads(p.stdout)["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("actx security gate violation",
+                      output["permissionDecisionReason"])
 
         p = run_hook("git push origin feature")
         self.assertEqual(p.returncode, 0, p.stderr)

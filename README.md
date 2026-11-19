@@ -10,7 +10,7 @@ $ git status        →   $ actx git status
 
 ![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB)
 ![Stdlib only](https://img.shields.io/badge/dependencies-none-brightgreen)
-![Tests](https://img.shields.io/badge/tests-1478%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1480%20passed-brightgreen)
 
 ---
 
@@ -96,7 +96,7 @@ After installation, restart the agent.
 ### Via curl (release tarball)
 
 ```bash
-curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.18.0.tar.gz | tar xz
+curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.19.0.tar.gz | tar xz
 cd actx-2.18.0
 bash install.sh
 ```

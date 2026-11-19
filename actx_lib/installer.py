@@ -673,9 +673,10 @@ def _devin_installed(path):
 def _is_actx_zcode_handler(handler):
     """True only for zcode config-hook handlers actx writes or wrote: a
     ``process`` handler whose command is an ``actx`` binary and whose first
-    arg is ``hook``, or any handler with a string command in the
-    command-string canon.  Total: never raises, an unknown shape is not ours
-    (a ``command`` list is the flat form, left untouched)."""
+    arg is ``hook``, or any handler that is not a ``process`` handler whose
+    string command is in the command-string canon.  Total: never raises, an
+    unknown shape is not ours (a ``command`` list is the flat form, left
+    untouched)."""
     if not isinstance(handler, dict):
         return False
     command = handler.get("command")
