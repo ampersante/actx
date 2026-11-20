@@ -1,9 +1,16 @@
 // actx adapter for OpenCode >= 2.0.0, written by `actx init --agent opencode`.
 // Transport only: every decision comes from `actx hook --agent opencode`
 // (one rewriter, one security gate). OpenCode treats any exception thrown
-// by this hook as a deny, so every failure path returns and the original
+// by a hook as a deny, so every failure path returns and the original
 // command runs under OpenCode's own permissions (fail-open). The only
-// intentional throw is the gate's deny.
+// intentional throw is the gate's deny - and, on OpenCode < 2.3 where no
+// permission channel exists, the gate's ask (it must not run silently).
+//
+// OpenCode >= 2.3 can ask the human: an "ask" verdict recorded here by
+// tool-call id in `execute.before` is raised in `ctx.permission.hook`
+// as a real prompt carrying the actx reason. Every other outcome (allow,
+// rewrite, empty actx output, actx failure) is a recorded pass-through
+// that leaves OpenCode's own permission rules in force.
 import { execFileSync } from "node:child_process"
 
 const ACTX = __ACTX_ABS_PATH__
@@ -23,27 +30,72 @@ function verdict(command) {
 export default {
   id: "actx",
   async setup(ctx) {
+    // OpenCode < 2.3 has no ctx.permission: a gate "ask" cannot become a
+    // prompt there, so it falls back to the deny throw below.
+    const canPrompt = !!(ctx.permission && typeof ctx.permission.hook === "function")
+    const verdicts = new Map()
+
     await ctx.tool.hook("execute.before", (event) => {
+      let input
       let res
       try {
         if (event.tool !== "shell") return
-        const input = event.input
+        input = event.input
         if (!input || typeof input !== "object" || typeof input.command !== "string" || !input.command) return
         res = verdict(input.command)
-        if (!res || typeof res !== "object") return
-        if (res.permissionDecision === "allow") {
-          if (res.updatedInput && typeof res.updatedInput.command === "string") {
-            input.command = res.updatedInput.command
-          }
-          return
-        }
       } catch {
+        // fail-open (actx unavailable / malformed input): record a
+        // pass-through so the permission hook never reports "verdict
+        // missing" for a call actx could not classify
+        if (canPrompt && typeof event.id === "string") verdicts.set(event.id, { kind: "allow" })
         return
       }
-      // `ask` is never emitted for --agent opencode; an older actx could
-      // emit it, and it must never run silently.
-      if (res.permissionDecision === "deny" || res.permissionDecision === "ask") {
-        throw new Error(String(res.permissionDecisionReason || "actx security gate"))
+      const decision = res && typeof res === "object" ? res.permissionDecision : undefined
+      const reason = String((res && res.permissionDecisionReason) || "actx security gate")
+      if (decision === "deny") throw new Error(reason)
+      if (decision === "ask") {
+        if (!canPrompt) throw new Error(reason)
+        if (typeof event.id === "string") verdicts.set(event.id, { kind: "ask", reason })
+        return
+      }
+      if (res && res.updatedInput && typeof res.updatedInput.command === "string") {
+        input.command = res.updatedInput.command
+      }
+      // allow or empty actx output (deferred push, unrewritten mutator):
+      // pass-through, OpenCode's own rules stay in force
+      if (canPrompt && typeof event.id === "string") verdicts.set(event.id, { kind: "allow" })
+    })
+
+    if (canPrompt) {
+      await ctx.permission.hook("evaluate", (event) => {
+        try {
+          if (event.action !== "shell" || event.effect === "deny") return
+          const id = event.source && event.source.id
+          if (typeof id !== "string") return
+          const recorded = verdicts.get(id)
+          verdicts.delete(id)
+          if (!recorded) {
+            // a shell call that reaches the permission hook without a
+            // record is asked, never run silently
+            event.effect = "ask"
+            event.message = "actx verdict missing for this shell call"
+            return
+          }
+          if (recorded.kind === "ask") {
+            event.effect = "ask"
+            event.message = recorded.reason
+          }
+        } catch {
+          // never throw from a permission hook
+        }
+      })
+    }
+
+    await ctx.tool.hook("execute.after", (event) => {
+      try {
+        if (event.tool === "shell" && typeof event.id === "string") verdicts.delete(event.id)
+      } catch {
+        // never throw from execute.after
       }
     })
   },

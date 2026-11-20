@@ -544,6 +544,19 @@ def gate_ask_as_deny(agent, category, reason):
     }
 
 
+def human_ask(category, command, explanation, reason):
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+            "permissionDecisionReason": (
+                "actx security gate confirmation required "
+                f"[{category}] {shlex.quote(command)}: {explanation} — {reason}"
+            ),
+        }
+    }
+
+
 class HookAgentPolicyTests(unittest.TestCase):
     def run_hook(self, args, command=None, stdin_text=None):
         if stdin_text is None:
@@ -582,15 +595,66 @@ class HookAgentPolicyTests(unittest.TestCase):
         self.assertEqual(
             json.loads(out)["hookSpecificOutput"]["permissionDecision"], "ask")
 
-    def test_opencode_force_push_ask_becomes_deny(self):
+    def test_opencode_force_push_ask_is_human_ask(self):
+        # TK-75: OpenCode >= 2.3 raises an ask as its own permission prompt,
+        # so the gate's ask is no longer converted to a deny.
         out = self.hook_stdout(["--agent", "opencode"], FORCE_PUSH)
-        self.assertEqual(json.loads(out), gate_ask_as_deny(
-            "opencode", "T6_HIGH_RISK_GIT", FORCE_PUSH_REASON))
+        self.assertEqual(json.loads(out), human_ask(
+            "T6_HIGH_RISK_GIT", FORCE_PUSH, GIT_EXPLANATION,
+            FORCE_PUSH_REASON))
 
     def test_pi_force_push_ask_becomes_deny(self):
         out = self.hook_stdout(["--agent", "pi"], FORCE_PUSH)
         self.assertEqual(json.loads(out), gate_ask_as_deny(
             "pi", "T6_HIGH_RISK_GIT", FORCE_PUSH_REASON))
+
+    def test_opencode_verdict_table(self):
+        """One row per verdict class for --agent opencode (TK-75). Deny,
+        allow+updatedInput and the empty mutator/push rows are byte-shared
+        with the no-agent policy and pinned in
+        test_gate_deny_unchanged_for_every_agent,
+        test_observational_rewrite_unchanged_for_every_agent and
+        Tk70PushPolicyTests; the ask rows are repeated here to pin each
+        ask class on this agent."""
+        self.assertEqual(
+            json.loads(self.hook_stdout(["--agent", "opencode"], "sudo -n true")),
+            {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "actx security gate violation [T4_DESTRUCTIVE_MUTATION]: "
+                    "Privilege escalation via 'sudo' is prohibited in "
+                    "autonomous agent sessions"),
+            }})
+        asks = {
+            FORCE_PUSH: human_ask(
+                "T6_HIGH_RISK_GIT", FORCE_PUSH, GIT_EXPLANATION,
+                FORCE_PUSH_REASON),
+            PUSH_PROTECTED: human_ask(
+                "T6_HIGH_RISK_GIT", PUSH_PROTECTED, GIT_EXPLANATION,
+                PROTECTED_PUSH_REASON),
+            "npm install --help": human_ask(
+                "T5_SUPPLY_CHAIN", "npm install --help",
+                "installs or updates packages — third-party code will run on "
+                "this machine",
+                "'npm install' installs packages from a registry; "
+                "agent-driven installs always require human confirmation"),
+        }
+        for command, expected in asks.items():
+            with self.subTest(command=command):
+                self.assertEqual(
+                    json.loads(self.hook_stdout(["--agent", "opencode"], command)),
+                    expected)
+        rewritten = json.loads(
+            self.hook_stdout(["--agent", "opencode"], "git status"))
+        self.assertEqual(rewritten["hookSpecificOutput"]["permissionDecision"],
+                         "allow")
+        self.assertEqual(rewritten["hookSpecificOutput"]["updatedInput"],
+                         {"command": "actx git status"})
+        for command in ("git add file", PUSH_UNPROTECTED):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.hook_stdout(["--agent", "opencode"], command), "")
 
     def test_gate_deny_unchanged_for_every_agent(self):
         # TK-64 row (replaces `actx rewrite "cat .env"` -> empty): the gate
@@ -650,7 +714,7 @@ class HookAgentPolicyTests(unittest.TestCase):
         self.assertEqual(self.hook_stdout(["--agent", "opencode"], MUTATOR), "")
         self.assertEqual(
             json.loads(self.hook_stdout(["--agent", "opencode"], FORCE_PUSH))
-            ["hookSpecificOutput"]["permissionDecision"], "deny")
+            ["hookSpecificOutput"]["permissionDecision"], "ask")
         self.assertEqual(
             json.loads(self.hook_stdout(["--agent", "opencode"], "git status"))
             ["hookSpecificOutput"]["updatedInput"],
@@ -672,7 +736,7 @@ class HookAgentPolicyTests(unittest.TestCase):
         # Pins the unchanged fail-open half of TK-70 REQ-04: a gate failure
         # on a benign (non-irreversible) command still defers to the
         # harness (empty output) on every agent. The irreversible half
-        # (ask / opencode+pi deny) is pinned in Tk70GateErrorAskTests.
+        # (ask / pi deny) is pinned in Tk70GateErrorAskTests.
         from actx_lib import hook
 
         for args in ([], ["--agent", "opencode"], ["--agent", "devin"],
@@ -956,12 +1020,13 @@ class Tk70PushPolicyTests(unittest.TestCase):
                             ),
                         }
                     })
-                for agent in ("opencode", "pi"):
-                    with self.subTest(command=command, agent=agent):
-                        self.assertEqual(
-                            json.loads(self.hook_stdout(
-                                ["--agent", agent], command)),
-                            gate_ask_as_deny(agent, "T6_HIGH_RISK_GIT", reason))
+                self.assertEqual(json.loads(
+                    self.hook_stdout(["--agent", "opencode"], command)),
+                    human_ask("T6_HIGH_RISK_GIT", command, GIT_EXPLANATION,
+                              reason))
+                self.assertEqual(
+                    json.loads(self.hook_stdout(["--agent", "pi"], command)),
+                    gate_ask_as_deny("pi", "T6_HIGH_RISK_GIT", reason))
                 agy = self.run_hook([], stdin_text=gemini_input(
                     "run_command", {"CommandLine": command}))
                 self.assertEqual(json.loads(agy.stdout), {
@@ -997,13 +1062,15 @@ class Tk70GateErrorAskTests(unittest.TestCase):
                 self.assertEqual(
                     json.loads(self.main_stdout(args, payload, RuntimeError("boom"))),
                     expected)
-        for agent in ("opencode", "pi"):
-            with self.subTest(agent=agent):
-                self.assertEqual(
-                    json.loads(self.main_stdout(
-                        ["--agent", agent], payload, RuntimeError("boom"))),
-                    gate_ask_as_deny(agent, "T6_GATE_ERROR",
-                                     f"{GATE_ERROR_MESSAGE}: boom"))
+        self.assertEqual(
+            json.loads(self.main_stdout(
+                ["--agent", "opencode"], payload, RuntimeError("boom"))),
+            gate_error_ask("boom"))
+        self.assertEqual(
+            json.loads(self.main_stdout(
+                ["--agent", "pi"], payload, RuntimeError("boom"))),
+            gate_ask_as_deny("pi", "T6_GATE_ERROR",
+                             f"{GATE_ERROR_MESSAGE}: boom"))
 
     def test_hermes_gate_error_approves_on_unprotected_push(self):
         # Hermes has its own ask shape ({"action": "approve", ...}), so the
@@ -1458,7 +1525,19 @@ class HumanAskReasonTests(unittest.TestCase):
 
     def test_ask_as_deny_is_byte_identical_across_runs(self):
         expected = json.dumps(gate_ask_as_deny(
-            "opencode", "T6_HIGH_RISK_GIT", FORCE_PUSH_REASON)) + "\n"
+            "pi", "T6_HIGH_RISK_GIT", FORCE_PUSH_REASON)) + "\n"
+        for _ in range(2):
+            p = subprocess.run(
+                [ACTX, "hook", "--agent", "pi"],
+                input=hook_input("Bash", {"command": FORCE_PUSH}),
+                capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.stdout, expected)
+
+    def test_opencode_human_ask_is_byte_identical_across_runs(self):
+        expected = json.dumps(human_ask(
+            "T6_HIGH_RISK_GIT", FORCE_PUSH, GIT_EXPLANATION,
+            FORCE_PUSH_REASON)) + "\n"
         for _ in range(2):
             p = subprocess.run(
                 [ACTX, "hook", "--agent", "opencode"],

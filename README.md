@@ -10,7 +10,7 @@ $ git status        →   $ actx git status
 
 ![Python 3.14](https://img.shields.io/badge/Python-3.14-3776AB)
 ![Stdlib only](https://img.shields.io/badge/dependencies-none-brightgreen)
-![Tests](https://img.shields.io/badge/tests-1480%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-1482%20passed-brightgreen)
 
 ---
 
@@ -59,7 +59,7 @@ M (3):
 - **Stderr never hidden** — a compacted command (tests, linters, installers) prints its stderr after the summary, secret values masked: whole on failure; on success whole up to 20 lines, longer stderr keeps its warning/error/URL lines plus one `[actx] N stderr lines hidden; full output: <tee path>` line (`actx run --failures` stays silent on a green run).
 - **Lossless filenames** — `git status`, `ls`, and `find` compress the format, not the names.
 - **Tee for recovery** — truncated or failed output is saved to `~/.local/share/actx/tee` as JSON (secret values masked); a truncated result is always saved and its tee path printed.
-- **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent on an error (the OpenCode plugin's deliberate throw on a security-gate deny is OpenCode's only way to block a command); on any error they pass the command through unchanged and the output through with secret values masked (if masking itself fails, lines that may carry a secret are withheld and a marker line says how many). Point-wise exception (TK-70): if the gate itself fails on an already-parsed irreversible command, the hook returns `ask` (category `T6_GATE_ERROR`; OpenCode/pi `deny`, Antigravity `force_ask`) instead of passing it through; malformed input without a command and a host timeout/kill stay fail-open. The Hermes hook entry is registered with `fail_closed: true` (an owner decision): a missing or broken actx blocks the tool call instead of letting it through (see ³).
+- **Fail-open everywhere** — hooks, adapters, and filters never throw into the agent on an error (the OpenCode plugin's deliberate throw on a security-gate deny is OpenCode's only way to block a command); on any error they pass the command through unchanged and the output through with secret values masked (if masking itself fails, lines that may carry a secret are withheld and a marker line says how many). Point-wise exception (TK-70): if the gate itself fails on an already-parsed irreversible command, the hook returns `ask` (category `T6_GATE_ERROR`; OpenCode asks through its permission prompt, pi `deny`, Antigravity `force_ask`) instead of passing it through; malformed input without a command and a host timeout/kill stay fail-open. The Hermes hook entry is registered with `fail_closed: true` (an owner decision): a missing or broken actx blocks the tool call instead of letting it through (see ³).
 - **Escape hatch** — `ACTX_BYPASS=1` or a `bypass_commands` entry runs the matching command unfiltered (byte-for-byte except masked secret values), preserving the exit code.
 - **Stdlib only** — Python 3.14 standard library. No pip, no brew, no network, no telemetry.
 - **Multi-agent** — deterministic hooks and plugins for Claude Code, Codex, Gemini/Antigravity, GitHub Copilot CLI, ZCode, OpenCode, Devin CLI, pi, and Hermes Agent; deterministic security gate for dsh (the dsh platform cannot rewrite tool arguments); rule-based instructions for Grok, Cline, Windsurf, and Cursor.
@@ -96,8 +96,8 @@ After installation, restart the agent.
 ### Via curl (release tarball)
 
 ```bash
-curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.19.0.tar.gz | tar xz
-cd actx-2.18.0
+curl -fsSL https://github.com/ampersante/actx/archive/refs/tags/v2.20.0.tar.gz | tar xz
+cd actx-2.20.0
 bash install.sh
 ```
 
@@ -266,7 +266,7 @@ cache). Under `--dangerously-skip-permissions` Antigravity still honours a hook
 
 ² These adapters call `actx hook --agent <name>` and require actx ≥ 2.13.0. Per harness:
 
-- **OpenCode** checks its own `permission` rules against the command *after* the plugin has rewritten it. So the git mutators (`git add|commit|pull|fetch`) are left unrewritten, and your rules such as `shell:git commit*` still match them. OpenCode has no confirmation channel for plugins, so a gate `ask` (e.g. `git push --force`) becomes a deny with the reason `actx security gate (opencode: no confirmation channel) …`. Not covered: user-typed `!cmd`, the `execute` tool (code-mode bridge for catalog/MCP tools), MCP tools. The agentic-kit `apply` writes the same plugin file; until the kit drops its template, re-run `actx init` after a kit apply.
+- **OpenCode** checks its own `permission` rules against the command *after* the plugin has rewritten it. So the git mutators (`git add|commit|pull|fetch`) are left unrewritten, and your rules such as `shell:git commit*` still match them. On OpenCode ≥ 2.3 a gate `ask` (e.g. `git push --force`) becomes a real permission prompt carrying the actx reason — the plugin records the verdict by tool-call id in `execute.before` and raises it in `ctx.permission.hook("evaluate")`; `session.permissions: "prompt"` (the default) must stay on. A shell call that reaches the permission hook without a record is asked (`actx verdict missing`), never run silently. On OpenCode 2.0–2.2 there is no permission channel: a gate `ask` falls back to the deny throw. Not covered: user-typed `!cmd`, the `execute` tool (code-mode bridge for catalog/MCP tools), MCP tools.
 - **Devin** also checks its rules after the hook. `git add`/`commit`/`pull`/`fetch` are allowed without being rewritten, so a matching `deny` rule of yours still wins. A gate `ask` prompts; `devin -p` rejects it. An ordinary `git push` gets no answer, so Devin's own confirmation prompt applies (`devin -p` rejects it). Mutator forms actx cannot rewrite (`git -C dir push`) also get Devin's default prompt, which `-p` rejects. `~/.config/devin/config.json` (or `$XDG_CONFIG_HOME/devin/config.json`) is merged in place and keeps mode 0600; if it contains comments or an unexpected shape, `actx init` leaves it untouched, exits 1 and prints the entry to add by hand.
 - **pi** never asks the human: a gate `ask` becomes a deny with the reason `actx security gate (pi: no confirmation channel) …`, so the agent sees why and continues. An ordinary `git push` gets no answer from actx and runs unmodified (pi has no confirmation system). The extension goes to `$PI_CODING_AGENT_DIR/extensions/actx.ts` (default `~/.pi/agent/extensions/actx.ts`). Not covered: user-typed `!cmd`.
 - **`git push` on every harness (TK-70).** An ordinary push — destination not protected, no `--mirror`/`--tags`/`--follow-tags`/`--all`/`--branches`/`--prune`/`--delete`/`-d`/`:dst` refspec and no wildcard refspec — gets no verdict from actx: empty output on Claude Code, Codex, ZCode, OpenCode, Devin, pi, Hermes and dsh, and a fallthrough `ask` on Antigravity (`agy -p --dangerously-skip-permissions` auto-approves it — a known limit until TK-66). Push output is not compressed on any host: a live probe showed no guarantee that an `updatedInput` without a verdict keeps the host's confirmation window. Dangerous push forms and a destination in `main`/`master` (or your `protected_branches`) ask.

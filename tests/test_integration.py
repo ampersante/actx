@@ -59,8 +59,11 @@ class IntegrationTests(unittest.TestCase):
                 content = handle.read()
             self.assertEqual(content.count("const ACTX = "), 1)
             # TK-65: one v2 default export, one actx hook call.
+            # TK-75: one permission evaluate hook and one execute.after.
             self.assertEqual(content.count("export default"), 1)
             self.assertEqual(content.count('ctx.tool.hook("execute.before"'), 1)
+            self.assertEqual(content.count('ctx.permission.hook("evaluate"'), 1)
+            self.assertEqual(content.count('"execute.after"'), 1)
             self.assertEqual(content.count('"hook", "--agent", "opencode"'), 1)
             self.assertNotIn('"rewrite"', content)
 

@@ -76,7 +76,9 @@ _CONTROL_TO_SPACE = {
 # <name>`); a Codex turn_id selects codex when no agent is specified.
 # None = the default policy. The gate runs first for every agent.
 #   ask_as_deny: the agent has no confirmation channel - a gate "ask" is
-#                emitted as "deny" with the gate's reason.
+#                emitted as "deny" with the gate's reason. Since TK-75 this
+#                is only pi: OpenCode >= 2.3 raises an ask as its own
+#                permission prompt.
 #   mutator:     a rewritable git mutator (rewriter.is_mutator):
 #                "rewrite" - allow + updatedInput, like any other rewrite;
 #                "none"    - no output: the harness's own rules see the
@@ -98,7 +100,7 @@ _CONTROL_TO_SPACE = {
 AGENT_POLICIES = {
     None: {"ask_as_deny": False, "mutator": "rewrite", "push": "defer"},
     "codex": {"ask_as_deny": False, "mutator": "none", "push": "defer"},
-    "opencode": {"ask_as_deny": True, "mutator": "none", "push": "defer"},
+    "opencode": {"ask_as_deny": False, "mutator": "none", "push": "defer"},
     "devin": {"ask_as_deny": False, "mutator": "allow", "push": "defer"},
     "pi": {"ask_as_deny": True, "mutator": "rewrite", "push": "defer"},
     "hermes": {"ask_as_deny": False, "mutator": "none", "push": "defer", "output": "hermes"},
@@ -288,8 +290,8 @@ def process(text, agent=None):
 
     # The policy is resolved before the gate so the gate-error path below
     # emits its ask through the same mapping as a gate ask (REQ-04, TK-70):
-    # a Codex turn_id selects the codex policy, and opencode/pi turn the
-    # ask into a deny with their standard reason.
+    # a Codex turn_id selects the codex policy, and pi turns the ask into a
+    # deny with its standard reason.
     turn_id = data.get("turn_id")
     if agent is None and isinstance(turn_id, str) and turn_id:
         agent = "codex"

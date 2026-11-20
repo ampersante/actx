@@ -169,11 +169,18 @@ class InitTests(unittest.TestCase):
             self.assertNotIn("__ACTX_ABS_PATH__", content)
             # TK-65: OpenCode v2 plugin form only (default {id, setup},
             # ctx.tool.hook("execute.before"), shell tool, actx hook).
+            # TK-75: the ask verdict travels to ctx.permission.hook
+            # ("evaluate") by tool-call id; the canPrompt guard keeps
+            # OpenCode < 2.3 on the deny throw.
             for needle in ("export default", 'id: "actx"', "setup(ctx)",
                            'ctx.tool.hook("execute.before"',
                            '"hook", "--agent", "opencode"', "execFileSync",
                            "input: JSON.stringify", 'event.tool !== "shell"',
-                           "throw new Error", "catch"):
+                           "throw new Error", "catch",
+                           'ctx.permission.hook("evaluate"',
+                           '"execute.after"', "canPrompt",
+                           "actx verdict missing for this shell call",
+                           "event.source.id"):
                 self.assertIn(needle, content)
             for needle in ("tool.execute.before", "export const", '"rewrite"',
                            '"bash"'):
